@@ -748,17 +748,29 @@
                                             (:line @session))))))))))
 
 (defn ^:export stop!
-  "Stop a running app server — whatever `start!` returned. Idempotent, and
-  safe on a `{:serving? false …}` that never had an image.
+  "Stop a running app server — whatever `start!` returned — and remove the
+  dir its static mounts were materialized into. Idempotent, and safe on a
+  `{:serving? false …}` that never had an image.
 
-  There is exactly ONE thing to kill, and that is the point of the dedicated
-  image: the listener, the loaded namespaces and the process are the same
-  object, so there is no half-stopped state where a port stays bound because
-  a handle was dropped. `repl/stop!` already tolerates a partially-built
-  handle and destroys the process before touching the transport."
+  There is exactly ONE process to kill, and that is the point of the
+  dedicated image: the listener, the loaded namespaces and the process are
+  the same object, so there is no half-stopped state where a port stays
+  bound because a handle was dropped. `repl/stop!` already tolerates a
+  partially-built handle and destroys the process before touching the
+  transport.
+
+  The static dir goes here because this is the one place that still holds
+  the plan. `boot!` writes a fresh temp dir per boot, deliberately, and
+  nothing removed the previous one: 1,181 `slopp-static*` dirs, 21 MB, on
+  the machine this was found on."
   [running]
   (when-let [img (:image running)]
     (repl/stop! img))
+  (when-let [sd (get-in running [:plan :static-dir])]
+    (let [root (io/file (str sd))]
+      (when (.exists root)
+        (doseq [f (reverse (file-seq root))]
+          (io/delete-file f true)))))
   nil)
 
 (defn ^:export refresh!

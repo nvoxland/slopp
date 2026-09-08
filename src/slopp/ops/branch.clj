@@ -29,14 +29,14 @@
   session store (store/merge-logs), hot-load what arrived (new namespaces in
   dependency order, then changed forms through the compile gate), commit,
   persist, verify every touched namespace, and record ONE `:merge` delta."
-  [session theirs from-label]
+  [session theirs from-label & {:keys [carry-markers]}]
   (let [t0   (System/nanoTime)
         ;; OUR side, hydrated: the merge folds both logs from the fork point,
         ;; and the live value carries none — the list is read here, for this
         ;; merge, and `committed` drops it from what lands
         base (assoc (:store @session) :deltas
                     (db/line-deltas (:db @session) (engine/session-line session)))
-        r    (merge/merge-logs base theirs :from from-label)]
+        r    (merge/merge-logs base theirs :from from-label :carry-markers carry-markers)]
     (cond
       (:error r)
       ;; the engine's own error (identity mismatch) speaks for itself —
@@ -449,8 +449,13 @@
   - **The branch moved** — somebody else landed while this thread worked. The
     branch is merged INTO the thread first, through the same pipeline a
     `branch_merge` uses, and then the WHOLE in-image suite is re-run against
-    the merged state. The thread's head then has the branch's head in its
-    ancestry, so the second half is the fast-forward case. Conflicts or a red
+    the merged state. The branch's deltas arrive as RE-MINTED copies
+    (`:merged-from`), and the branch is then re-pointed at the thread's
+    head — so the branch's old chain is NOT in the new ancestry, and
+    whatever the merge left behind leaves main for good. That is why this
+    merge alone carries the branch's commit points and telemetry markers
+    across (`fields/travelling-markers`); 8 of this store's own commit points
+    were off main before it did. Conflicts or a red
     rebase land NOTHING and leave the thread open holding the merged state:
     the agent resolves and calls done again. Resolving is a REWRITE: each
     form under :conflicts shows both sides, and a new version written after
@@ -529,7 +534,11 @@
                     ;; job is to cross lines.
                     _ (engine/refresh-cache! session)
                     m (merge-into-session! session (db/load-store-with-history conn branch-id)
-                                           (str "branch:" branch-nm "#" branch-id))]
+                                           (str "branch:" branch-nm "#" branch-id)
+                                           ;; the thread is about to BECOME the branch, so the
+                                           ;; branch's commit points must cross with its content
+                                           ;; or they leave main's ancestry for good
+                                           :carry-markers true)]
                 (cond
                   (:error m)
                   {:landed false :reason (:error m)}

@@ -439,7 +439,7 @@
   (let [mk (fn [resp] (-> (store/empty-store)
                           (store/ingest 'st.api
                                         (str "(ns st.api)\n\n"
-                                             "(defn ^{:http/method :post :http/path \"/o\""
+                                             "(defn ^{:http/method :post :rest/path \"/o\""
                                              " :rest/request st.c/a :rest/response " resp "} make [r] r)\n"))))
         old-sig (edit.http/client-signature (mk "st.c/a"))]
     (testing "a recorded sig that no longer matches the current endpoints fires the advisory"
@@ -452,7 +452,27 @@
                                                   "generated-sig" (edit.http/client-signature fresh-store)))]
         (is (empty? (rules.rest/rest-stale-client-check nil fresh nil)))))
     (testing "never generated (no recorded sig) → never nags"
-      (is (empty? (rules.rest/rest-stale-client-check nil (mk "st.c/a") nil))))))
+      (is (empty? (rules.rest/rest-stale-client-check nil (mk "st.c/a") nil))))
+    (testing "CONTENT is not in the contract, so a new stylesheet does not stale the client"
+      ;; the client is generated from :rest rows only; the signature hashed
+      ;; every route, so adding a `/css/app.css` document flipped the advisory
+      ;; and nothing but a regenerate that changed nothing could clear it
+      (let [fresh-store (mk "st.c/b")
+            fresh (first (store/record-config-put fresh-store "client" :manifest
+                                                  "generated-sig" (edit.http/client-signature fresh-store)))
+            with-css (store/ingest fresh 'st.css
+                                   (str "(ns st.css)\n\n"
+                                        "(def ^{:http/path \"/css/app.css\" :http/auth :public} sheet \"body{}\")\n"))]
+        (is (= (edit.http/client-signature fresh) (edit.http/client-signature with-css)))
+        (is (empty? (rules.rest/rest-stale-client-check nil with-css nil)))))
+    (testing "a client generated FROM a url is not judged against this store's endpoints"
+      ;; generate_client {from url} consumes somebody else's contract; the
+      ;; in-store signature says nothing about it. It records where it came
+      ;; from instead, and the advisory does not fire on a fossil signature
+      (let [foreign (-> (mk "st.c/b")
+                        (store/record-config-put "client" :manifest "generated-sig" old-sig) first
+                        (store/record-config-put "client" :manifest "generated-from" "http://x/api/rest/paths") first)]
+        (is (empty? (rules.rest/rest-stale-client-check nil foreign nil)))))))
 
 (deftest rest-inline-schema-dup-advisory-nudges-extraction
   ;; the DRY paved-road nudge (D-web-contracts part 2): 2+ endpoints declaring

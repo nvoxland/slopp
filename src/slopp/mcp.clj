@@ -1590,11 +1590,13 @@
   web tooling itself: the app image is a CHILD JVM, and stopping it before
   its owner goes is what frees the port before the next server wants it."
   [session]
-  (when-let [running (:app-server @session)]
-    (locking session
+  ;; read INSIDE the lock: a refresh assigns the handle after its boot
+  ;; returns, and a read taken before that saw nothing to stop
+  (locking session
+    (when-let [running (:app-server @session)]
       (try (live/stop! running) (catch Throwable _ nil))
-      (swap! session dissoc :app-server))
-    {:stopped true}))
+      (swap! session dissoc :app-server)
+      {:stopped true})))
 
 ^:reads (defn ^:export write-tool?
   "Whether tool `name` WRITES the store — the classification the turn gate

@@ -9,7 +9,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.ops :as ops]
             [slopp.ops.external :as external]
-            [slopp.store :as store] [slopp.edit.rest :as edit.rest] [clojure.string :as str] [slopp.edit.http :as edit.http]))
+            [slopp.store :as store] [slopp.edit.rest :as edit.rest] [clojure.string :as str] [slopp.edit.http :as edit.http] [slopp.project.capabilities :as capabilities]))
 
 (deftest ^:external rest-endpoint-schema-is-inert-until-the-app-publishes-an-API
   ;; THE point of moving this gate out of http. Serving a document is http's
@@ -210,4 +210,36 @@
                              " :http/auth :public :rest/response [:map]}\n"
                              "  orders \"O.\" [_] {:status 200})\n"))]
         (is (nil? (edit.rest/rest-path-partition ok 'demo.api 'orders)))
-        (is (some? (edit.rest/rest-path-partition no 'demo.api 'orders)))))))
+        (is (some? (edit.rest/rest-path-partition no 'demo.api 'orders)))))
+
+    (testing "and the setting the refusal names is one config_file will TAKE"
+      ;; the gate's teaching and the catalog's escape both said
+      ;; `config_file {path capabilities key rest.prefix …}` — and the
+      ;; capabilities registry had no such row, so the write was refused as
+      ;; \"not a capability\". A store whose API lived at /v1 could never
+      ;; legalise a single :rest/path.
+      (is (nil? (capabilities/config-refusal "rest.prefix" "/v1"))
+          (str (capabilities/config-refusal "rest.prefix" "/v1"))))
+
+    (testing "a prefix spelled with a trailing slash, or without a leading one, is the same prefix"
+      ;; `/api/` used to INVERT the partition: `(str prefix \"/\")` became
+      ;; `/api//`, so every :rest/path was outside it and every :http/path
+      ;; under /api was fine
+      (let [slashed (-> on (store/record-config-put "capabilities" :manifest
+                                                    "rest.prefix" "/api/") first)
+            bare    (-> on (store/record-config-put "capabilities" :manifest
+                                                    "rest.prefix" "v1") first)
+            api     (fn [st p] (with st (str "(defn ^{:rest/path \"" p "\" :http/method :get"
+                                             " :http/auth :public :rest/response [:map]}\n"
+                                             "  orders \"O.\" [_] {:status 200})\n")))
+            page    (fn [st p] (with st (str "(defn ^{:http/path \"" p "\" :http/method :get"
+                                             " :http/auth :public}\n"
+                                             "  page \"P.\" [_] {:status 200})\n")))]
+        (is (= "/api" (edit.rest/rest-path-prefix slashed)))
+        (is (= "/v1" (edit.rest/rest-path-prefix bare)))
+        (is (nil? (check (api slashed "/api/orders") 'orders))
+            (str (check (api slashed "/api/orders") 'orders)))
+        (is (some? (check (page slashed "/api/page.html") 'page))
+            "content under the API prefix still refuses")
+        (is (nil? (check (api bare "/v1/orders") 'orders))
+            (str (check (api bare "/v1/orders") 'orders)))))))

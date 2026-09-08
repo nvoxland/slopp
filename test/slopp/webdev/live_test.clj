@@ -1268,3 +1268,15 @@
       (let [code (live/startup-code declared)]
         (is (= 1 (count code)) (pr-str code))
         (is (not-any? #(str/includes? % "slopp.static-dir") code) (pr-str code))))))
+
+(deftest stopping-an-app-server-removes-what-it-materialized
+  ;; boot! writes the static mounts to a fresh temp dir per boot, and stop!
+  ;; killed only the image: 1,181 slopp-static dirs, 21 MB, on the machine
+  ;; this was found on. stop! is the one place that still holds the plan.
+  (let [d (java.nio.file.Files/createTempDirectory
+           "slopp-static-test" (make-array java.nio.file.attribute.FileAttribute 0))
+        f (java.io.File. (str d) "public/x.txt")]
+    (.mkdirs (.getParentFile f))
+    (spit f "x")
+    (live/stop! {:serving? false :plan {:static-dir (str d)}})
+    (is (not (.exists (java.io.File. (str d)))) "the materialized dir is gone with the server")))

@@ -628,3 +628,46 @@
     (is (some? replay) "the namespace crossed the merge")
     (is (= "the ask that created m.born" (:prompt replay)) "and the ask crossed with it")
     (is (= "agent-b" (:agent replay)))))
+
+(deftest a-rebase-carries-the-branchs-commit-points-with-remapped-targets
+  ;; A rebase-land merges the branch INTO the thread and then points the
+  ;; branch at the thread's head, so whatever the merge does not carry leaves
+  ;; the branch's ancestry for good. Content is re-minted; markers were
+  ;; skipped wholesale — and the branch's commit points went with them: on
+  ;; this store's own journal 8 commit markers were off main when this was
+  ;; written. A commit point travels when the caller asks, and it points at
+  ;; the re-minted copy of what it marked rather than at an id off this line.
+  (let [b      (base)
+        ours   (replace! b 'a "(defn a [x] (+ x 1))")
+        theirs (replace! b 'b "(defn b [x] (+ x 2))")
+        target (:id (last (store/deltas theirs)))
+        theirs (first (store/record-commit theirs "their milestone"
+                                           :agent "them" :target target))
+        ;; and one whose target is what a real commit point marks: the head
+        ;; the done just produced, a VERDICT marker that does not travel — so
+        ;; the pointer has to land on the nearest delta at or before it that
+        ;; this line holds
+        theirs (store/record-verification theirs '[m.core] {:test 0 :pass 0 :fail 0 :error 0})
+        theirs (first (store/record-commit theirs "marks a verify" :agent "them"))
+        plain  (merge/merge-logs ours theirs)
+        r      (merge/merge-logs ours theirs :carry-markers true)
+        commits (fn [m] (filter #(= :commit (:op %)) (store/deltas (:store m))))]
+    (testing "a plain merge still leaves line-scoped bookkeeping behind"
+      (is (empty? (commits plain))))
+    (let [[c c2] (commits r)
+          copy   (first (filter #(= target (:merged-from %)) (store/deltas (:store r))))
+          held   (set (map :id (store/deltas (:store r))))]
+      (is (some? c) "the commit point crossed")
+      (is (= "their milestone" (:description c)))
+      (is (= (:id copy) (:target c))
+          "and it marks OUR copy of their delta, not an id this line cannot reach")
+      (is (not= (:id c) (:id (last (store/deltas theirs))))
+          "re-minted: it is this line's delta, with their id as provenance")
+      (is (= target (:merged-from copy)))
+      (is (= 3 (:merged r))
+          "a carried marker COUNTS as merged — a branch that moved by a commit point alone is not 'already converged'")
+      (is (= "marks a verify" (:description c2)))
+      (is (contains? held (:target c2))
+          "a target that was a verdict marker lands on this line all the same")
+      (is (contains? #{(:id copy) (:id c)} (:target c2))
+          "— on the nearest delta before it that crossed (their earlier commit point's copy here), which is the same state"))))

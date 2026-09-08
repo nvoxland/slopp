@@ -19,7 +19,7 @@
   cherry/squint slot in as new methods without re-authoring a single form."
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
-            [slopp.store.render :as store.render] [slopp.build :as build] [slopp.ops.external :as external] [slopp.ops.testrun :as testrun] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.ops.engine :as engine] [clojure.java.io :as io] [slopp.edit :as edit] [slopp.store.artifacts :as artifacts] [slopp.http.client :as http.client] [slopp.edit.http :as edit.http] [slopp.project.capabilities :as capabilities]))
+            [slopp.store.render :as store.render] [slopp.build :as build] [slopp.ops.external :as external] [slopp.ops.testrun :as testrun] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.ops.engine :as engine] [clojure.java.io :as io] [slopp.edit :as edit] [slopp.store.artifacts :as artifacts] [slopp.http.client :as http.client] [slopp.edit.http :as edit.http] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http]))
 
 (def result-marker
   "The line prefix the cljs compile runner prints its EDN summary behind, so the
@@ -477,7 +477,9 @@
   A mount key's tail is the URL prefix and its value a files-manifest path
   prefix (`http.static./js = public/cljs` serves `public/cljs/main.js` at
   `/js/main.js`), so the question is just whether some mount's value is a
-  prefix of the written path.
+  prefix of the written path — read through `rules.http/static-mounts`, the
+  one parser of that family, so a trailing slash means here what it means
+  to the server.
 
   NOT the same question as \"is this file reachable over HTTP\", and the
   caller's message must not say it is. An ENDPOINT that reads the file serves
@@ -488,10 +490,8 @@
   was actually checked is both cheaper and honest."
   [store path]
   (boolean
-   (some (fn [[k v]]
-           (and (re-matches #"http\.static\..+" (str k))
-                (str/starts-with? (str path) (str v))))
-         (get-in store [:config "capabilities" :values]))))
+   (some (fn [[_ v]] (str/starts-with? (str path) (str v "/")))
+         (rules.http/static-mounts store))))
 
 (defn ^:export render-contracts-ns
   "Render the generated CONTRACTS namespace source (a string) from
@@ -1276,8 +1276,14 @@
          (fn [s]
            ;; record the contract fingerprint so the done-advisory can detect
            ;; endpoint drift and nudge a regenerate (the "explicit" safety net)
-           (first (store/record-config-put (write s) "client" :manifest "generated-sig"
-                                           (edit.http/client-signature st0))))
+           (let [s' (write s)
+                 ;; an in-store generation supersedes a url-sourced one: the
+                 ;; advisory judges against this store's endpoints again
+                 s' (if (get-in s' [:config "client" :values "generated-from"])
+                      (first (store/record-config-unset s' "client" "generated-from"))
+                      s')]
+             (first (store/record-config-put s' "client" :manifest "generated-sig"
+                                             (edit.http/client-signature st0)))))
          touched)
         (let [recompiled (maybe-recompile-client! session target)
               others     (other-generated-clients (:store @session) target)]
@@ -1369,8 +1375,19 @@
                ;; to load in the image AND compile into the bundle, which is what
                ;; makes one definition check both sides of the wire
                (let [s1 (first (store/record-module-platform s (str cns) :cljc))
-                     s2 (store/ingest s1 cns csrc)]
-                 (write s2)))
+                     s2 (store/ingest s1 cns csrc)
+                     s3 (write s2)
+                     ;; RECORD where this client came from, and retire any
+                     ;; in-store signature: the stale-client advisory judges
+                     ;; a client against this store's endpoints, which says
+                     ;; nothing about a contract fetched from elsewhere — a
+                     ;; fossil signature from an earlier in-store run kept
+                     ;; that advisory standing with nothing able to clear it
+                     s4 (if (get-in s3 [:config "client" :values "generated-sig"])
+                          (first (store/record-config-unset s3 "client" "generated-sig"))
+                          s3)]
+                 (first (store/record-config-put s4 "client" :manifest
+                                                 "generated-from" (str url)))))
              names)
             (let [recompiled (maybe-recompile-client! session target)
                   ;; what this namespace HELD and no longer does, measured

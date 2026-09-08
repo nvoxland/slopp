@@ -12,7 +12,7 @@
   lands for that operation. Four gates were once hand-pasted at four write
   sites because the chokepoint was not used, and every later fix to them had
   to be applied four times."
-  (:require [clojure.edn :as edn] [clojure.set :as set] [clojure.string :as str] [rewrite-clj.node :as n] [slopp.store.db :as db] [slopp.edit :as edit] [slopp.image :as image] [slopp.store.render :as store.render] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.index.analyze :as analyze] [slopp.edit.hotload :as hotload] [slopp.edit.lintgate :as lintgate] [rewrite-clj.parser :as p] [slopp.rules.http :as rules.http] [slopp.index.refs :as refs] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [clojure.java.io :as io] [slopp.project.capabilities :as capabilities] [slopp.index.crossings :as crossings] [slopp.read.history :as history]))
+  (:require [clojure.edn :as edn] [clojure.set :as set] [clojure.string :as str] [rewrite-clj.node :as n] [slopp.store.db :as db] [slopp.edit :as edit] [slopp.image :as image] [slopp.store.render :as store.render] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.index.analyze :as analyze] [slopp.edit.hotload :as hotload] [slopp.edit.lintgate :as lintgate] [rewrite-clj.parser :as p] [slopp.rules.http :as rules.http] [slopp.index.refs :as refs] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [clojure.java.io :as io] [slopp.project.capabilities :as capabilities] [slopp.index.crossings :as crossings]))
 
 ^{:auto-declare "mutual recursion: adopt-line!, commit-appended!, follow-branch-if-idle!, rebased-write!, refresh-cache!"}
 (declare adopt-line! commit-appended! follow-branch-if-idle! rebased-write! refresh-cache!)
@@ -2154,7 +2154,7 @@
 
 (defn ^:export follow-branch-if-idle!
   "Re-fork the session's thread at its branch's head when it has NOTHING TO
-  PIN — no un-landed content of its own — and its base is behind the branch;
+  PIN — no un-landed work of its own — and its base is behind the branch;
   the store value is reloaded from there. True when it did, nil otherwise.
 
   Rows are not a pin; WORK is. A thread minted before fork on write carries a
@@ -2163,6 +2163,12 @@
   server ran code 1,238 deltas behind, every read answered from it, and
   nothing said so (2026-09-03). What a thread has written since its fork is
   the only thing that can hold its view still.
+
+  And work is ANYTHING that is not a marker (`db/unlanded-work-count`), not
+  the form-content ops the badge counts: an ns_rename, a deps_add or a
+  module_purity is a delta on the thread with no form behind it, and counting
+  content alone read such a thread as idle and re-forked it — declaration
+  dropped — the next time anybody landed.
 
   Called at every point a session lands on a thread — `open!` when the
   caller named the agent, `adopt-line!` when the identity arrives later, and
@@ -2177,7 +2183,7 @@
     (let [line   (:line @session)
           branch (session-fork-line session)]
       (when (and line branch (not= line branch)
-                 (zero? (db/unlanded-count conn line history/content-ops))
+                 (zero? (db/unlanded-work-count conn line))
                  ;; MOVED means the thread's BASE is behind the branch — not its
                  ;; head, which a turn marker of its own advances
                  (not= (db/line-base conn line) (db/line-head conn branch)))

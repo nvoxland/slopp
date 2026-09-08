@@ -373,6 +373,15 @@
   endpoint being described is one the READER chose from a document, not one
   this app was compiled against.
 
+  **`measure` is applied to that descriptor before the request is built** —
+  the caller's `at-project`, which stamps the project's `:webapp/base` and
+  takes the API prefix off the path. Without it the descriptor was measured
+  from nothing: every other request in this app went through `at-project`
+  and this one went to the origin's `/api/modules`, which the daemon does not
+  serve, so the execute button reached a 404 in a browser and a canned nil
+  headless, and no test asserted the url it sent. The 2-arity measures from
+  nothing, for a caller with no project.
+
   **`:http/params` is built from the fields, and it has to be.**
   `endpoint/request` REFUSES a param the descriptor does not name — the guard
   that closed `?slug=demo` reaching a stranger — so a descriptor assembled here
@@ -390,27 +399,28 @@
   which endpoint is addressed, so it travels blank and the url is visibly
   wrong — `/api/form/` is a 404 a reader understands, `/api/form` is somewhere
   else."
-  [{:keys [method path] :as endpoint} filled]
-  (let [m      (or method :get)
-        get?   (= :get m)
-        blank? (fn [v] (or (nil? v) (= "" v)))
-        fields (request-fields endpoint)
-        ;; blank and present, never absent — see the docstring
-        in-path (into {} (for [p (path-params path)]
-                           [(keyword p) (str (get filled p ""))]))
-        ;; a BODY is typed, a query is not. JSON carries numbers and booleans
-        ;; as themselves; a query string carries everything as text and the
-        ;; server coerces, which is why only one of these converts.
-        sent    (into {} (for [{:keys [field in type]} fields
-                               :when (= in (if get? :query :body))
-                               :let  [v (get filled field)]
-                               :when (not (blank? v))]
-                           [(keyword field) (if get? v (typed type v))]))
-        params  (merge in-path sent)]
-    (endpoint/request {:http/method m
-                       :http/path   path
-                       :http/params (set (keys params))}
-                      params)))
+  ([endpoint filled] (request-for endpoint filled identity))
+  ([{:keys [method path] :as endpoint} filled measure]
+   (let [m      (or method :get)
+         get?   (= :get m)
+         blank? (fn [v] (or (nil? v) (= "" v)))
+         fields (request-fields endpoint)
+         ;; blank and present, never absent — see the docstring
+         in-path (into {} (for [p (path-params path)]
+                            [(keyword p) (str (get filled p ""))]))
+         ;; a BODY is typed, a query is not. JSON carries numbers and booleans
+         ;; as themselves; a query string carries everything as text and the
+         ;; server coerces, which is why only one of these converts.
+         sent    (into {} (for [{:keys [field in type]} fields
+                                :when (= in (if get? :query :body))
+                                :let  [v (get filled field)]
+                                :when (not (blank? v))]
+                            [(keyword field) (if get? v (typed type v))]))
+         params  (merge in-path sent)]
+     (endpoint/request (measure {:http/method m
+                                 :http/path   path
+                                 :http/params (set (keys params))})
+                       params))))
 
 (defn url-parts
   "A [[request-for]] request split so the performer has nothing left to decide:

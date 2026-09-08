@@ -991,3 +991,17 @@
             back (store/replay-delta s0 d)]
         (is (some? back) "an old op still replays — it is not a reload")
         (is (= '[rk.core a b] (mapv :name (store/forms back 'rk.core))))))))
+
+(deftest a-content-signature-tells-two-same-length-edits-apart
+  ;; `db/elements-digest` is a change DETECTOR for one line — counts, ranks,
+  ;; sizes — and content-blind on purpose. The full_check queue keyed on it
+  ;; alone, so two threads holding different edits of one length shared a
+  ;; verdict earned on one of them. This is the other half of the key.
+  (let [at (fn [src] (store/ingest (store/empty-store) 'sig.core src))
+        e1 (at "(ns sig.core)\n\n(defn a [x] (< x 1))\n")
+        e2 (at "(ns sig.core)\n\n(defn a [x] (> x 9))\n")
+        e3 (at "(ns sig.core)\n\n(defn a [x] (< x 1))\n")]
+    (is (not= (store/content-signature e1) (store/content-signature e2))
+        "same length, different code")
+    (is (= (store/content-signature e1) (store/content-signature e3))
+        "and the same code, however it got there, is one signature")))

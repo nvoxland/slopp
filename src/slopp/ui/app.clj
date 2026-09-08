@@ -195,7 +195,12 @@
                                       (select-keys addr [:method :path]))
                                      doc))]
           (when (or (not (schema/effectful? ep)) (get-in state [:call :armed?]))
-            (schema/request-for ep (get-in state [:call :params] {}))))))))
+            ;; MEASURED from the project, like the page's own load above: the
+            ;; descriptor `request-for` builds from the document row has no
+            ;; base of its own, and unmeasured it went to the origin's
+            ;; /api/…, which the daemon does not serve
+            (schema/request-for ep (get-in state [:call :params] {})
+                                #(views/at-project params %))))))))
 
 (defn ^{:http/external-path
         "the PROJECT serves `/api/modules`, not the daemon. This app is the

@@ -174,11 +174,18 @@
   ;; itself. That is cheaper and more honest than an exemption list, which
   ;; would be a hand-kept carve-out in a check whose whole point is that prose
   ;; and code drift apart when nothing holds them together.
+  ;;
+  ;; They anchor on a PATH boundary. The first cut matched substrings, and a
+  ;; namespace called `app.context`, a key `:request.context/id`, a file
+  ;; `my-ideas/plan.md` and a url's `/ideas/12` segment all reported — the
+  ;; first namespace anyone names `something.context` would have reddened
+  ;; the whole selfcheck.
   (let [st       (external/built-store)
-        dirs     [(str "." "context" "/") (str "idea" "s" "/")]
+        dir-rxs  [(re-pattern (str "(?<![\\w.])\\." "context" "/"))
+                  (re-pattern (str "(?<![\\w./-])idea" "s/"))]
         tag-rx   (re-pattern (str "\\b" "Cor" "e \\d+"))
         cites    (fn [src]
-                   (vec (distinct (concat (filter #(str/includes? src %) dirs)
+                   (vec (distinct (concat (keep #(re-find % src) dir-rxs)
                                           (re-seq tag-rx src)))))
         rows     (vec (for [n (keys (:namespaces st))
                             f (store/forms st n)
@@ -188,10 +195,17 @@
     (testing "there is a population — the scan reached real source"
       (is (< 2000 (count (for [n (keys (:namespaces st))
                                f (store/forms st n)] f)))))
-    (testing "the detector bites, on both shapes"
-      (is (= [(first dirs)] (cites (str "see " (first dirs) "architecture.md"))))
+    (testing "the detector bites, on every shape"
+      (is (= [(str "." "context" "/")] (cites (str "see ." "context" "/architecture.md"))))
+      (is (= [(str "idea" "s/")] (cites (str "see idea" "s/frictions.md"))))
+      (is (= [(str "idea" "s/")] (cites (str "(`idea" "s/plan.md`)"))))
       (is (seq (cites (str "the " "Cor" "e 1 rule"))))
       (is (= [] (cites "an ordinary docstring naming no helper document"))))
+    (testing "and it does not bite on a name that merely ENDS the same way"
+      (is (= [] (cites "(app.context/run x)")))
+      (is (= [] (cites ":request.context/id")))
+      (is (= [] (cites (str "https://example.com/idea" "s/12"))))
+      (is (= [] (cites (str "my-idea" "s/plan.md")))))
     (testing "no stored form cites a document that does not ship with it"
       (is (= [] rows)
           (str (count rows) " form(s) cite a helper doc the reader will not have"

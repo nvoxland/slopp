@@ -23,7 +23,7 @@
   done-grain half, which sees a whole episode where these see one form."
   (:require [clojure.string :as str]
             [slopp.store :as store]
-            [slopp.edit.modules :as edit.modules] [rewrite-clj.node :as n]))
+            [slopp.edit.modules :as edit.modules] [rewrite-clj.node :as n] [slopp.edit.http :as edit.http]))
 
 (defn ^:export ^{:rule/applies-to :production} webapp-page-unreachable
   "The headless-review gate (D-web): a `^:app/entry` entry — the fn
@@ -260,7 +260,8 @@
                                                (not= i (dec (count segs)))))]
                             s))
               other (some (fn [[nsx nm p id]]
-                            (when (and (= p path) (not= id (:id e)))
+                            (when (and (= (edit.http/route-shape p) (edit.http/route-shape path))
+                                       (not= id (:id e)))
                               (symbol (str nsx) (str nm))))
                           (for [nsx (keys (:namespaces candidate))
                                 x   (store/forms candidate nsx)

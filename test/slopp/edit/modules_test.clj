@@ -123,7 +123,7 @@
   ;; changes, so the advisory can nudge "run generate_client" without re-rendering.
   (let [mk (fn [resp] (store/ingest (store/empty-store) 'sig.api
                                     (str "(ns sig.api)\n\n"
-                                         "(defn ^{:http/method :post :http/path \"/o\""
+                                         "(defn ^{:http/method :post :rest/path \"/o\""
                                          " :rest/request sig.c/a :rest/response " resp "} make [r] r)\n")))]
     (testing "stable for identical contracts"
       (is (= (edit.http/client-signature (mk "sig.c/a"))
@@ -463,5 +463,41 @@
             (str p " is in the grammar and must land: "
                  (pr-str (gate (land on (api p))))))))
 
+    (testing "a query string, a fragment, an empty capture and an empty path refuse"
+      ;; the router matches none of them — `/api/x?y=1` is a path segment
+      ;; `x?y=1` to it, `:` captures a segment under no name, and `\"\" `is no
+      ;; route at all — and the gate's own teaching names the query-string
+      ;; trap while the gate let it through
+      (doseq [p ["/api/x?y=1" "/docs#top" "/a/:" ""]]
+        (is (some? (gate (land on (api p))))
+            (str (pr-str p) " matches nothing and must not land"))))
+
     (testing "and a form that declares no route at all is not this gate's business"
       (is (nil? (gate (land on "(defn thing \"T.\" [x] x)")))))))
+
+(deftest a-route-collision-is-judged-by-what-the-router-SEES
+  ;; The gate compared path STRINGS; the router compares SEGMENTS, tolerates a
+  ;; trailing slash, and binds a capture whatever it is called. So `/users/`
+  ;; beside `/users` and `/users/:uid` beside `/users/:id` both landed, both
+  ;; matched every such url at equal rank, and the winner was vector order —
+  ;; exactly the \"unreachable with nothing to say why\" this gate exists for.
+  (let [on   (first (store/record-config-put
+                     (store/ingest (store/empty-store) 'shop.api
+                                   (str "(ns shop.api)\n\n"
+                                        "(defn ^{:http/method :get :http/path \"/users/:id\" :http/auth :public}"
+                                        " get-user \"G.\" [req] req)\n"))
+                     "capabilities" :manifest "http.enabled" "true"))
+        land (fn [st path]
+               (store/ingest st 'shop.more
+                             (str "(ns shop.more)\n\n"
+                                  "(defn ^{:http/method :get :http/path \"" path "\" :http/auth :public}"
+                                  " dupe \"D.\" [req] req)\n")))
+        gate (fn [st] (edit.http/http-route-collision st 'shop.more 'dupe))]
+    (is (some? (gate (land on "/users/:uid")))
+        "a capture under another name is the same route to the router")
+    (is (some? (gate (land on "/users/:id/")))
+        "a trailing slash is the same route to the router")
+    (is (nil? (gate (land on "/users/:id/edit")))
+        "and a longer path is a different one — the control")
+    (is (nil? (gate (land on "/users")))
+        "as is the collection beside the item")))

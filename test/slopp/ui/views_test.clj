@@ -5212,3 +5212,18 @@
       (testing "cadence is summarised in words as well as drawn"
         (is (re-find #"3 commit points" t))
         (is (re-find #"2 days" t))))))
+
+(deftest the-lens-bar-on-a-through-view-links-the-FORMS-lenses
+  ;; The bar took the lens subject to be the whole address less its lens
+  ;; segment, and the through view's address carries a second form after the
+  ;; subject — so its one lens link read `/store/form/x/through/y/source`,
+  ;; which no route answers. A sweep of every href on every route found
+  ;; exactly one unroutable link, this one.
+  (let [hrefs (fn [v] (vec (keep #(when (and (vector? %) (= :a (first %)))
+                                     (:href (second %)))
+                                  (tree-seq coll? seq v))))]
+    (is (= ["/store/form/x/source"]
+           (hrefs (views/lens-bar "/store/form/x/through/y" :form nil))))
+    (is (= ["/store/form/x/source"]
+           (hrefs (views/lens-bar "/store/form/x" :form nil)))
+        "the control: the plain form page links the same lens")))

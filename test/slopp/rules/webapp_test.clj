@@ -772,3 +772,48 @@
       (is (= {:endpoint 'shop.api/modules :method :get :path "/api/modules"}
              (by 'shop.api/modules))
           (pr-str (by 'shop.api/modules))))))
+
+(deftest a-test-namespaces-fixture-is-not-one-of-the-apps-requests
+  ;; `web-endpoint-rows` excludes -test namespaces (a fixture is not servable
+  ;; surface); `request-paths` did not, so every descriptor a test wrote was
+  ;; reported as a screen asking for something unserved. On this store all 17
+  ;; rows the check fired were fixtures — a list nobody can clear.
+  (let [prod (str "(ns shop.ui)\n\n"
+                  "(def real-ep {:http/method :get :http/path \"/api/nothing\"})\n")
+        fix  (str "(ns shop.ui-test)\n\n"
+                  "(def fixture-ep {:http/method :get :http/path \"/api/fixture\"})\n")
+        on   (-> (store/ingest (store/empty-store) 'shop.ui prod)
+                 (store/ingest 'shop.ui-test fix)
+                 (assoc-in [:config "capabilities" :values "webapp.enabled"] "true"))
+        rows (rules.webapp/request-paths-unserved on)]
+    (is (= ["/api/nothing"] (mapv :path rows))
+        (str "the app's own unserved request is reported, the fixture's is not: " (pr-str rows)))))
+
+(deftest a-request-measured-from-its-own-base-is-addressed-elsewhere
+  ;; The docstring said so and the code did not: a descriptor naming its own
+  ;; `:webapp/base` is addressed at whatever sits THERE, which is not this
+  ;; store or the declaration would be saying nothing. Only an absolute url
+  ;; was being left alone.
+  (let [src (str "(ns shop.ui)\n\n"
+                 "(def there-ep {:http/method :get :http/path \"/things\" :webapp/base \"/other\"})\n"
+                 "(def here-ep {:http/method :get :http/path \"/things\"})\n")
+        on  (assoc-in (store/ingest (store/empty-store) 'shop.ui src)
+                      [:config "capabilities" :values "webapp.enabled"] "true")
+        rows (rules.webapp/request-paths-unserved on)]
+    (is (= '[shop.ui/here-ep] (mapv :form rows))
+        (str "the request with a base is left alone; the one without is reported: " (pr-str rows)))))
+
+(deftest a-fixture-that-rewrites-links-is-not-the-app-rewriting-them
+  ;; `self-prefixed-links` decides whether the dangling-link join can be made
+  ;; at all: any caller of prefix-links parks EVERY literal link in the store
+  ;; as :unresolved. A -test namespace calling it — slopp's own webapp-test
+  ;; does — switched that join off for the whole store, on a fixture.
+  (let [call (fn [nsx]
+               (str "(ns " nsx " (:require [slopp.webapp :as webapp]))\n\n"
+                    "(defn render \"R.\" [v] (webapp/prefix-links \"/p\" v))\n"))
+        fixture-only (store/ingest (store/empty-store) 'demo.view-test (call "demo.view-test"))
+        app-too      (store/ingest fixture-only 'demo.view (call "demo.view"))]
+    (is (= [] (rules.webapp/self-prefixed-links fixture-only))
+        "a test namespace's call is not the app's")
+    (is (= '[demo.view/render] (rules.webapp/self-prefixed-links app-too))
+        "the app's own call still is — the control")))

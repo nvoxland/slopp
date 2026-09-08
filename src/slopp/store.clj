@@ -2063,3 +2063,17 @@
              (= (set fids) (set (keys by-id))))
       (assoc-in store [:namespaces ns-sym :elements] (mapv by-id fids))
       store)))
+
+(defn content-signature
+  "A hash of what every form in `store` SAYS — namespace by namespace, source
+  by source, in order — the identity two lines must share before one may take
+  the other's verdict. Ids are left out: two ingests of one text mint
+  different ids, and an id changes nothing a verdict grades.
+  `slopp.store.db/elements-digest` is the cheap detector for a line's OWN
+  change (counts, ranks, sizes: content-blind by design), and two threads can
+  hold different edits of one length; a check joined across them on the
+  digest alone handed one thread a verdict earned on the other's code."
+  [store]
+  (hash (mapv (fn [nsx]
+                [nsx (mapv #(str (:node %)) (forms store nsx))])
+              (sort (keys (:namespaces store))))))

@@ -671,11 +671,7 @@
         ;; a trailing slash on the value is trimmed, because the join below adds its
         ;; own: `public/` would build `public//app.css`, which no manifest holds,
         ;; and every asset link in the app would read as dangling
-        mounts (into {}
-                     (keep (fn [[k v]]
-                             (when-let [[_ m] (re-matches #"http\.static\.(.+)" (str k))]
-                               [m (str/replace (str v) #"/+$" "")])))
-                     (get-in store [:config "capabilities" :values]))
+        mounts (static-mounts store)
         static-file? (fn [path]
                        (some (fn [[url-prefix file-prefix]]
                                (and (str/starts-with? path (str url-prefix "/"))

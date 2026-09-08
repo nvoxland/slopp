@@ -25,12 +25,20 @@
   "Done-advisory (D-web-contracts part 2): the generated typed client
    (generate_client) is STALE — an endpoint or its :rest/request/:rest/response
    changed since the client was last generated. Fires only once a client has been
-   generated (a `client`/`generated-sig` is on record), so it never nags a store
-   that has not opted into a generated client. Regenerating re-records the
-   signature and clears it."
+   generated IN-STORE (a `client`/`generated-sig` is on record), so it never nags
+   a store that has not opted into a generated client. Regenerating re-records
+   the signature and clears it.
+
+   A client generated FROM a url (`generate_client {from …}`, which records
+   `client`/`generated-from`) consumes somebody else's contract, and this
+   store's endpoint signature says nothing about it — so it is not judged
+   here. Judging it left a store with a fossil signature from an earlier
+   in-store run carrying an advisory nothing could discharge."
   [_session store _changed]
-  (let [recorded (get-in store [:config "client" :values "generated-sig"])]
-    (when (and recorded (not= recorded (edit.http/client-signature store)))
+  (let [recorded (get-in store [:config "client" :values "generated-sig"])
+        foreign  (get-in store [:config "client" :values "generated-from"])]
+    (when (and recorded (nil? foreign)
+               (not= recorded (edit.http/client-signature store)))
       [{:rest-stale-client true
         :teach (str "the generated typed client is out of date — an endpoint or its"
                     " :rest/request/:rest/response changed since generate_client last"

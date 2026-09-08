@@ -879,22 +879,24 @@
     ;; BY PATH. One response for every screen rendered the module page with
     ;; an empty heading over someone else's diagram; a path nobody canned
     ;; answers nil, which the app already renders honestly.
-        ;; the path arrives ADDRESSED — `/api/p/<slug>/api/modules` — because
+    ;;
+    ;; The path arrives ADDRESSED — `/api/projects/<slug>/modules` — because
     ;; `webapp/fetch!` applies the request's base before handing it to this
-    ;; performer. The tenant segment is the HUB's route to a project, not the
-    ;; project's own endpoint, and [[answers]] is keyed by the latter. Stripping
-    ;; it here rather than keying on the whole thing keeps the fixture keyed by
-    ;; the endpoint's own path, which is what makes it a fact about a URL rather
-    ;; than about which project a screen happened to be looking at.
+    ;; performer. The project segment is the DAEMON's mount of a project, not
+    ;; the project's own endpoint, and [[answers]] is keyed by the latter.
+    ;; Stripping it here rather than keying on the whole thing keeps the
+    ;; fixture keyed by the endpoint's own path, which is what makes it a fact
+    ;; about a URL rather than about which project a screen happened to be
+    ;; looking at.
     :call   (fn [request ok _err]
-              ;; **The hub's OWN routing, not a normalisation.** This used to be
-              ;; `(str/replace path #"^/api/p/[^/]+" "")` — strip the tenant if
-              ;; it is there, look up the rest — which made an ADDRESSED request
-              ;; and an UNADDRESSED one indistinguishable by construction. The
-              ;; `:modules` session load asked `/api/modules` at the origin for
-              ;; weeks; the hub answers 404 there, the Code nav was empty in
-              ;; every browser, and every drive test passed because this line
-              ;; answered it anyway.
+              ;; **The daemon's OWN routing, not a normalisation.** This used to
+              ;; be a strip-the-tenant-if-present regex — look up the rest —
+              ;; which made an ADDRESSED request and an UNADDRESSED one
+              ;; indistinguishable by construction. The `:modules` session load
+              ;; asked `/api/modules` at the origin for weeks; the server
+              ;; answers 404 there, the Code nav was empty in every browser,
+              ;; and every drive test passed because this line answered it
+              ;; anyway.
               ;;
               ;; A fixture that NORMALISES an input cannot test what produced
               ;; it. Keying answers by the endpoint's own path is still right —
@@ -902,20 +904,21 @@
               ;; project a screen happened to be looking at — so the fix is to
               ;; keep the key and VALIDATE the prefix rather than discard it.
               ;;
-              ;; Checked against what the HUB serves, deliberately not against
-              ;; the request's own `:webapp/base`: a wrong base would then
-              ;; validate itself, which is the same defect one level in.
+              ;; Checked against what the DAEMON serves, deliberately not
+              ;; against the request's own `:webapp/base`: a wrong base would
+              ;; then validate itself, which is the same defect one level in.
               (let [p    ;; `:http/url`, and the QUERY comes off. A request used to carry
                          ;; `:webapp/path` — the pattern — with its captures and query
                          ;; beside it; `slopp.http.endpoint/request` resolves the whole
                          ;; address into ONE finished url, so what arrives here is
-                         ;; `/api/p/demo/api/search?q=&limit=50`. Keyed on that whole
+                         ;; `/api/projects/demo/search?q=&limit=50`. Keyed on that whole
                          ;; string, every parameterised endpoint misses its answer and
                          ;; renders as an endpoint that returned nothing.
                          (-> (str (:http/url request))
                              (str/replace #"\?.*$" ""))
-                    ;; the only endpoint the hub answers at the ORIGIN. Everything
-                    ;; else is a project's and is reached through the proxy.
+                    ;; the only endpoint this app asks the daemon for at the
+                    ;; ORIGIN: its registry. Everything else is a project's and
+                    ;; is reached through that project's mount.
                     hub? (= "/api/projects" p)
                     own  (some->> (re-matches #"^/api/projects/[^/]+(/.*)$" p) second (str "/api"))]
                 ;; **Matched as PATTERNS, through the app's own router.** [[answers]] is
@@ -933,8 +936,8 @@
                 ;; free to disagree with the router about what `:id` matches.
                 (ok (cond hub? (get responses (answer-for p))
                           own  (get responses (answer-for own))
-                          ;; a project endpoint asked at the origin. The real hub
-                          ;; 404s it; answering nil here is what lets a screen
-                          ;; test SEE that, which is the whole point of the change.
+                          ;; a project endpoint asked at the origin. The real
+                          ;; daemon 404s it; answering nil here is what lets a
+                          ;; screen test SEE that, which is the whole point.
                           :else nil))))
     :render (fn [_])}))

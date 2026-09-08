@@ -212,6 +212,8 @@
 
    {:key "rest.enabled" :type [:boolean] :default false
     :doc "Whether this project publishes a typed API: request/response contracts, boundary validation, and generated clients derived from the same schemas. Requires http."}
+   {:key "rest.prefix" :type [:string] :default "/api"
+    :doc "The url prefix the typed API lives under, and so the API/CONTENT partition: a :rest/path must sit under it and an :http/path must not. Read normalised — a trailing slash trimmed, a missing leading one added — so /api/ and api both mean /api. One answer per store, or the partition is not total. Requires rest."}
 
    {:key "webapp.enabled" :type [:boolean] :default false
     :doc "Whether this project's BROWSER owns routing and state — client-side routes, event dispatch, the ClojureScript build. Serving HTML needs only http; this is the app that runs in the page. Requires http (it has to be served) and NOT rest: a browser app may talk to a third-party API, a socket, or to no server data at all."}

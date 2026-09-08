@@ -19,7 +19,7 @@
             [slopp.ops.engine :as engine]
             [slopp.ops.external :as external]
             [slopp.store.db :as db]
-            [slopp.store.render :as store.render] [next.jdbc :as jdbc] [slopp.store :as store]))
+            [slopp.store.render :as store.render] [next.jdbc :as jdbc] [slopp.store :as store] [slopp.read.history :as history]))
 
 (def ^:private seed "(ns th.core)\n\n(defn f [x] (inc x))\n")
 
@@ -647,3 +647,135 @@
             "the thread re-forked at the branch head")
         (is (not (db/line-has-view? conn @line)) "and its stale rows are gone — it reads the branch until it writes")
         (finally (ops/close! a2))))))
+
+(deftest ^:external a-rebase-keeps-the-commit-points-the-branch-took-while-the-thread-worked
+  ;; A rebase-land merges the branch INTO the thread and then points the
+  ;; branch at the thread's head. Content crosses that merge as re-minted
+  ;; copies; markers did not cross at all — so every commit point the branch
+  ;; took while this thread worked fell out of the branch's ancestry the
+  ;; moment the thread landed. Found on this store's own journal: 652 commit
+  ;; markers written, 644 reachable from main, and the projection, the brief
+  ;; and query_commits all read them from main's ancestry.
+  (let [dir (str (System/getProperty "java.io.tmpdir") "/slopp-rebase-cp-" (System/nanoTime))]
+    (try
+      (let [setup (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "setup"})]
+        (try
+          (ops/ingest! setup 'th.core seed :agent "setup")
+          (is (= "main" (:landed (branch/land-thread! setup)))
+              "fixture: the seed really did reach main")
+          (finally (ops/close! setup))))
+
+      (let [a (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-a"})
+            b (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-b"})]
+        (try
+          (let [conn  (:db @a)
+                trunk (db/trunk-line-id! conn)]
+            (ops/edit-replace! a 'th.core 'f "(defn f [x] (+ x 10))"
+                               :prompt "a works" :agent "agent-a")
+            (ops/ingest! b 'th.other "(ns th.other)\n\n(defn g [] :from-b)\n" :agent "agent-b")
+            ;; B marks its work and lands first — a fast-forward, so main now
+            ;; carries B's commit point
+            (engine/commit-appended! b #(first (store/record-commit % "b's milestone" :agent "agent-b")) [])
+            (is (= "main" (:landed (branch/land-thread! b))))
+            (let [before (first (db/newest-commit-markers conn trunk 1))]
+              (is (= "b's milestone" (:description before))
+                  "fixture: the commit point is on main before A lands")
+              (let [r (branch/land-thread! a)]
+                (is (= "main" (:landed r)) (pr-str r))
+                (is (pos? (:merged (:rebased r) 0)) (str "fixture: A's land was a rebase — " (pr-str r)))
+                (let [after (first (db/newest-commit-markers conn trunk 1))]
+                  (is (= "b's milestone" (:description after))
+                      "the commit point is STILL on main after the rebase-land")
+                  (is (db/on-line? conn trunk (:target after))
+                      "and what it marks is reachable from main's head — the copy, not an id left on the orphaned chain")))))
+          (finally (ops/close! a) (ops/close! b))))
+      (finally (clojure.java.shell/sh "rm" "-rf" dir)))))
+
+(deftest ^:external my-own-earlier-red-still-holds-my-thread
+  ;; A red is attributed EPISODE by episode, but a land is the whole THREAD.
+  ;; Episode one breaks a test and dones red — nothing lands, the thread keeps
+  ;; the break. Episode two touches something unrelated: the failing test's
+  ;; trace is disjoint from what THIS episode changed, so it graded :foreign,
+  ;; the episode was green, and the land carried the break out with it. A red
+  ;; is foreign only when it exercises nothing the THREAD holds.
+  (let [dir (str (System/getProperty "java.io.tmpdir") "/slopp-own-red-" (System/nanoTime))]
+    (try
+      (let [setup (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "setup"})]
+        (try
+          (ops/ingest! setup 'th.core seed :agent "setup")
+          (is (= "main" (:landed (branch/land-thread! setup)))
+              "fixture: the seed really did reach main")
+          (finally (ops/close! setup))))
+
+      (let [me   "agent-1"
+            sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id me})]
+        (try
+          (let [conn   (:db @sess)
+                trunk  (db/trunk-line-id! conn)
+                thread (engine/session-line sess)]
+            ;; episode one: a test f does not pass yet
+            (ops/ingest! sess 'th.core-test
+                         (str "(ns th.core-test\n"
+                              "  (:require [clojure.test :refer [deftest is]]\n"
+                              "            [th.core :as core]))\n\n"
+                              "(deftest f-adds-ten (is (= 11 (core/f 1))))\n")
+                         :agent me)
+            (let [d (external/done! sess :label "red" :agent me :external? false)]
+              (is (= :red (:test-status (:findings d))) (pr-str (:findings d)))
+              (is (nil? (:land d)) "fixture: the red episode landed nothing"))
+
+            ;; episode two: work that f-adds-ten's trace never reaches
+            (ops/ingest! sess 'th.side "(ns th.side)\n\n(defn ^:unused-ok h \"H.\" [] :side)\n" :agent me)
+            (let [d   (external/done! sess :label "unrelated" :agent me :external? false)
+                  fnd (:findings d)]
+              (is (= :red (:test-status fnd)) (pr-str fnd))
+              (is (= :red (:episode-status fnd))
+                  (str "the red is THIS THREAD's, whichever episode wrote it — " (pr-str (:red-attribution fnd))))
+              (is (nil? (:land d)) (str "so nothing lands — " (pr-str (:land d))))
+              (is (= thread (engine/session-line sess)) "and the thread survives, break and all")
+              (let [main-store (db/load-store conn trunk)]
+                (is (nil? (get-in main-store [:namespaces 'th.core-test]))
+                    "the failing test never reached main")
+                (is (nil? (get-in main-store [:namespaces 'th.side]))
+                    "and neither did the unrelated work, which is the price of carrying a red"))))
+          (finally (ops/close! sess))))
+      (finally (clojure.java.shell/sh "rm" "-rf" dir)))))
+
+(deftest ^:external a-thread-holding-only-a-declaration-is-not-re-forked
+  ;; The re-fork asked "has this thread written anything?" with the eight
+  ;; FORM-content ops, so a thread whose only work was an ns_rename, a
+  ;; deps_add or a module_purity read as idle — and the next time anybody
+  ;; landed it was re-forked at the new head, its declaration gone with the
+  ;; view. Nothing had bitten on this store yet; the census showed only
+  ;; markers orphaned. It is the kind of bug that waits.
+  (let [dir (str (System/getProperty "java.io.tmpdir") "/slopp-decl-pin-" (System/nanoTime))]
+    (try
+      (let [setup (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "setup"})]
+        (try
+          (ops/ingest! setup 'th.core seed :agent "setup")
+          (is (= "main" (:landed (branch/land-thread! setup)))
+              "fixture: the seed really did reach main")
+          (finally (ops/close! setup))))
+
+      (let [a (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-a"})
+            b (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-b"})]
+        (try
+          (let [conn  (:db @a)
+                trunk (db/trunk-line-id! conn)
+                line  (engine/session-line a)]
+            (ops/module-tier! a "th" :external :agent "agent-a")
+            (is (zero? (db/unlanded-count conn line history/content-ops))
+                "the control: by the content ops this thread has written nothing")
+            (is (pos? (db/unlanded-work-count conn line))
+                "but it HOLDS a declaration")
+
+            (ops/ingest! b 'th.other "(ns th.other)\n\n(defn g [] :from-b)\n" :agent "agent-b")
+            (is (= "main" (:landed (branch/land-thread! b))) "fixture: the branch moved")
+
+            (is (nil? (engine/follow-branch-if-idle! a))
+                "so the thread is not re-forked when the branch moves")
+            (is (= line (engine/session-line a)) "the session keeps its line")
+            (is (not= (db/line-base conn line) (db/line-head conn trunk))
+                "and the line keeps its base rather than following the branch"))
+          (finally (ops/close! a) (ops/close! b))))
+      (finally (clojure.java.shell/sh "rm" "-rf" dir)))))

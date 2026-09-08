@@ -9,7 +9,7 @@ slopp.coldload-gate: slopp.edit slopp.read slopp.store slopp.ops (test)
 slopp.commit: slopp.mcp slopp.read slopp.store slopp.ops (test)
 slopp.concurrency: slopp.read slopp.store slopp.ops (test)
 slopp.currency: slopp.store
-slopp.daemon: slopp.api slopp.cache slopp.cljnx slopp.http slopp.kernel slopp.mcp slopp.ops slopp.otel slopp.rest slopp.store slopp.sync slopp.ui
+slopp.daemon: slopp.api slopp.cache slopp.cljnx slopp.http slopp.kernel slopp.mcp slopp.ops slopp.otel slopp.rest slopp.store slopp.sync slopp.ui slopp.cache (test)
 slopp.edit: slopp.image slopp.index slopp.project slopp.store slopp.ops (test)
 slopp.edit-group: slopp.read slopp.store slopp.ops (test)
 slopp.effect-boundary: slopp.edit slopp.read slopp.ops (test)
@@ -26,13 +26,12 @@ slopp.git-projection: slopp.git slopp.read slopp.store slopp.ops (test)
 slopp.gitauthor: slopp.git
 slopp.history: slopp.api slopp.mcp slopp.read slopp.store slopp.ops (test)
 slopp.http: slopp.lang slopp.rest (test) slopp.webapp (test)
-slopp.hub: slopp.http slopp.project slopp.store (test)
 slopp.image: slopp.kernel slopp.store
 slopp.index: slopp.cache slopp.image slopp.store slopp.build (test) slopp.mcp (test) slopp.ops (test) slopp.read (test) slopp.rules (test)
 slopp.integration-tier: slopp.ops (test)
 slopp.lab: slopp.mcp slopp.ops slopp.read slopp.store
 slopp.lintgate: slopp.edit slopp.index slopp.store
-slopp.mcp: slopp.api slopp.edit slopp.hub slopp.ops slopp.project slopp.read slopp.rules slopp.store slopp.sync slopp.webdev slopp.http (test)
+slopp.mcp: slopp.api slopp.edit slopp.ops slopp.project slopp.read slopp.rules slopp.store slopp.sync slopp.webdev slopp.http (test)
 slopp.merge: slopp.store
 slopp.modules: slopp.edit slopp.read slopp.store slopp.index (test) slopp.ops (test) slopp.project (test) slopp.rules (test)
 slopp.multiproc: slopp.read slopp.store slopp.ops (test)
@@ -52,7 +51,7 @@ slopp.subform-plan: slopp.edit slopp.store
 slopp.surgeon: slopp.read slopp.ops (test)
 slopp.sync: slopp.edit slopp.git slopp.kernel slopp.ops slopp.read slopp.store
 slopp.sync-plan: slopp.sync slopp.store (test)
-slopp.thread: slopp.ops (test) slopp.store (test)
+slopp.thread: slopp.read slopp.ops (test) slopp.store (test)
 slopp.trace: slopp.ops (test)
 slopp.ui: slopp.http slopp.lang slopp.rest slopp.webapp slopp.cljnx (test)
 slopp.unsafe: slopp.edit slopp.read slopp.store slopp.ops (test)

@@ -2359,42 +2359,6 @@
             :placeholder "search this store…" :aria-label "search this store"}]
    [:button {:type "submit"} "search"]])
 
-(defn lens-bar
-  "The switcher for the screen at `path`: its default view and every lens it
-  offers, with the current one marked.
-
-  **The chrome [[lenses]] said existed and did not.** That docstring named
-  three consumers of the table and the third — the switcher chrome renders it
-  — was aspirational, so `/store/gaps` had no link anywhere in the app and
-  `with-lens` had exactly one production caller. A feature reachable only by
-  typing its URL is a feature nobody finds.
-
-  **nil for a screen with no lenses**, so `app-shell` can leave the element out
-  entirely rather than render an empty bar. Same rule it already makes for an
-  omitted pane: absent, not empty.
-
-  The subject path is recovered by taking the lens segment back OFF, rather
-  than rebuilt from `screen` and `params`. Rebuilding would make this a reverse
-  router — a second producer of the scheme [[route-for]] and [[subject-for]]
-  already own, and the defect this project has now paid for three times. A
-  query string is dropped first, because it belongs to the subject and not to
-  the path arithmetic."
-  [path screen lens]
-  (when-let [ls (seq (lenses screen))]
-    (let [bare    (first (basepath/split-query (str path)))
-          subject (if lens
-                    (subs bare 0 (max 0 (- (count bare) (inc (count lens)))))
-                    bare)
-          item    (fn [l label]
-                    (if (= l lens)
-                      [:strong {:class "lens-current"} label]
-                      [:a {:href (with-lens subject l)} label]))]
-      (into [:nav {:class "lens-bar" :aria-label "views of this subject"}]
-            ;; the separators are MARKUP, never a margin
-            (interpose " "
-                       (cons (item nil (default-view screen))
-                             (for [l ls] (item l l))))))))
-
 (defn schema-fields
   "A schema's fields as a NESTED list — [[slopp.ui.schema/nest]]'s tree as hiccup.
 
@@ -3716,3 +3680,52 @@
       [:p "not aggregated here — slopp publishes the suite's time and counts on "
        "each verification in a range's arc, and this screen does not walk every "
        "range to sum them. The Review section shows them per change."]]]))
+
+(defn lens-subject
+  "The address a lens applies to, for the screen at `path` seen through `lens`
+  (nil for the bare view): the path less its query string and its lens
+  segment — except where a screen's address carries MORE than its subject.
+  The through view names a second form after the subject, and a lens built on
+  the whole address led to `/store/form/x/through/y/source`, which no route
+  answers; a sweep of every href on every route found exactly one unroutable
+  link, that one."
+  [path subject lens]
+  (let [bare (first (basepath/split-query (str path)))
+        bare (if lens
+               (subs bare 0 (max 0 (- (count bare) (inc (count lens)))))
+               bare)]
+    (if (= :form subject)
+      (str/replace bare #"/through/[^/]+$" "")
+      bare)))
+
+(defn lens-bar
+  "The switcher for the screen at `path`: its default view and every lens it
+  offers, with the current one marked.
+
+  **The chrome [[lenses]] said existed and did not.** That docstring named
+  three consumers of the table and the third — the switcher chrome renders it
+  — was aspirational, so `/store/gaps` had no link anywhere in the app and
+  `with-lens` had exactly one production caller. A feature reachable only by
+  typing its URL is a feature nobody finds.
+
+  **nil for a screen with no lenses**, so `app-shell` can leave the element out
+  entirely rather than render an empty bar. Same rule it already makes for an
+  omitted pane: absent, not empty.
+
+  The subject path is [[lens-subject]]'s answer — the lens segment taken back
+  OFF, and a through view's second form with it — rather than rebuilt from
+  `screen` and `params`. Rebuilding would make this a reverse router — a
+  second producer of the scheme [[route-for]] and [[subject-for]] already own,
+  and the defect this project has now paid for three times."
+  [path screen lens]
+  (when-let [ls (seq (lenses screen))]
+    (let [subject (lens-subject path screen lens)
+          item    (fn [l label]
+                    (if (= l lens)
+                      [:strong {:class "lens-current"} label]
+                      [:a {:href (with-lens subject l)} label]))]
+      (into [:nav {:class "lens-bar" :aria-label "views of this subject"}]
+            ;; the separators are MARKUP, never a margin
+            (interpose " "
+                       (cons (item nil (default-view screen))
+                             (for [l ls] (item l l))))))))

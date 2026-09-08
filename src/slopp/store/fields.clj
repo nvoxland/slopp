@@ -407,3 +407,18 @@
   `auto-require-prompt`: one constant with one home, so the reader of the
   log sees the same sentence every time."
   "auto-module-dep: the write's first call across a module boundary")
+
+(def ^:export travelling-markers
+  "The markers that outlive the LINE they were written on, so a rebase-land
+  carries them across the merge it makes (`merge-logs` with `:carry-markers`):
+  `:commit` — a commit point is a fact about the code at its target, and the
+  projection, `session_brief` and `query_commits` all read it from the
+  branch's ancestry — and the telemetry the cost census reads by commit point
+  (`:turn-begin`/`:turn-end`, `:read-cost`, `:otel`).
+
+  NOT `:verify`, `:done` or `:observe`. Each is a verdict about the content
+  that PRECEDED it on its own line, and a rebase puts the thread's own content
+  before the copy — a carried green would stand over code it never graded.
+  Nor `:merge`: it records what another line consumed, scoped by `:from`, and
+  a copy would read as this line's own causal state."
+  #{:commit :turn-begin :turn-end :read-cost :otel})

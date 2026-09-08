@@ -125,7 +125,8 @@
                    :doc  (store/form-docstring (:node e))}))))
 
 (defn ^:export request-paths
-  "Every endpoint DESCRIPTOR path this store declares, as `[{:path :form} …]`
+  "Every endpoint DESCRIPTOR path this store declares, as `[{:path :method
+  :form}]` (plus `:base` when the descriptor names its own `:webapp/base`)
   sorted — `[]` when nothing names an endpoint.
 
   **The other half of a route reference.** A literal `:href` in a view is
@@ -146,7 +147,11 @@
 
   **Read from map literals anywhere in the store**, like [[client-routes]] and
   for the same reason: a descriptor is ordinary data and an app may build one
-  beside the screen it belongs to.
+  beside the screen it belongs to. Anywhere in the store's PRODUCTION code:
+  a -test namespace's descriptor is a fixture, exactly as `web-endpoint-rows`
+  treats a fixture's route, and reading fixtures here reported every one of
+  them as a screen asking for something unserved — 17 of 17 rows on one
+  store, none of them clearable.
 
   A non-literal path is SKIPPED rather than guessed at — a computed path is one
   this cannot read, and inventing an answer would make the join quietly partial,
@@ -155,7 +160,7 @@
   [st]
   (vec (sort-by (juxt :path (comp str :form))
                 (distinct
-                 (for [nsx  (keys (:namespaces st))
+                 (for [nsx  (remove store.render/test-ns? (keys (:namespaces st)))
                        e    (store/forms st nsx)
                        ;; `^{:http/external-path \"why\"}` skips a form WHOLE, the
                        ;; same marker `rules.http/ui-route-refs` honours for a
@@ -172,13 +177,17 @@
                        :when (map? node)
                        :let [p (get node :http/path)]
                        :when (string? p)]
-                   {:path   p
-                    ;; the verb travels with the address because half an
-                    ;; address is not one: two endpoints share a path and
-                    ;; differ only here, and a reader shown the path alone
-                    ;; cannot tell which of them a page calls
-                    :method (get node :http/method :get)
-                    :form   (symbol (str nsx) (str (:name e)))})))))
+                   (cond-> {:path   p
+                            ;; the verb travels with the address because half an
+                            ;; address is not one: two endpoints share a path and
+                            ;; differ only here, and a reader shown the path alone
+                            ;; cannot tell which of them a page calls
+                            :method (get node :http/method :get)
+                            :form   (symbol (str nsx) (str (:name e)))}
+                     ;; and so does the base it is measured from, when the
+                     ;; descriptor names one: that is the join's escape
+                     (string? (get node :webapp/base))
+                     (assoc :base (get node :webapp/base))))))))
 
 (defn ^:export page-calls
   "Every ENDPOINT each page reaches, as `{page-symbol [{:endpoint :method
@@ -437,6 +446,8 @@
   write: it cannot spell an absolute url, because the origin is only known at
   runtime. A path measured from a base it names is addressed at whatever sits
   THERE, which is not this store or the declaration would be saying nothing.
+  (This paragraph was true of the docstring for a while before it was true of
+  the code, which skipped only the absolute urls.)
 
   A base of `\"\"` is the empty case of that — the origin — which is what the
   retired `:webapp/from-origin` boolean used to say. Nothing reads that flag
@@ -462,11 +473,13 @@
   ;; is that its findings can be.
   (let [served (into #{} (keep #(edit.http/route-path (:meta %)))
                      (edit.http/web-endpoint-rows st))]
-    (vec (remove (fn [{:keys [path]}]
+    (vec (remove (fn [{:keys [path base]}]
                    (or (contains? served path)
                        (str/includes? path "://")
                        ;; protocol-relative is the same statement one hop along
-                       (str/starts-with? path "//")))
+                       (str/starts-with? path "//")
+                       ;; measured from a base it names: addressed elsewhere
+                       (some? base)))
                  (request-paths st)))))
 
 (defn webapp-request-paths-are-served-check
@@ -638,8 +651,8 @@
          {:page page :cljs cljs})))
 
 (defn ^{:export "slopp.rules"} self-prefixed-links
-  "The forms in which this store calls `slopp.webapp/prefix-links` itself,
-  sorted — `[]` when it does not.
+  "The forms in which this store's APP calls `slopp.webapp/prefix-links`
+  itself, sorted — `[]` when it does not.
 
   **This is the fact that decides whether a literal `:href` can be joined
   against the served table at all.** `prefix-links` rewrites links at render,
@@ -660,12 +673,18 @@
   difference between a rule and a guess, and this rule exists to stop a report
   from being a guess.
 
+  **A -test namespace's call is not the app's.** Because one caller anywhere
+  parks every literal link in the store as :unresolved, a fixture exercising
+  `prefix-links` — slopp's own `webapp-test` does — switched the join off for
+  the whole store: every finding permanent, none of them dangling, nothing
+  saying so.
+
   Answers the FORMS rather than a boolean, so a reader is told where to look —
   and so this can grow into \"which links\" without changing its shape."
   [st]
   (vec (sort-by str
                 (distinct
-                 (for [nsx  (keys (:namespaces st))
+                 (for [nsx  (remove store.render/test-ns? (keys (:namespaces st)))
                        :let [aliases (edit/require-aliases st nsx)]
                        e    (store/forms st nsx)
                        :let [sx (try (store/form-sexpr (:node e))

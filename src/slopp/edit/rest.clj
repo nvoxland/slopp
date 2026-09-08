@@ -26,17 +26,29 @@
 
 (defn ^:export rest-path-prefix
   "The url prefix this store's REST API lives under — `rest.prefix`, or
-  `\"/api\"`.
+  `\"/api\"` — NORMALISED: trailing slashes trimmed, a leading one added.
 
   **One answer per store**, which is what makes the API/content partition
   total: every route is on exactly one side of it. A setting rather than a
   constant because a real API may live at `/v1` or `/graphql`, and a framework
   that hard-codes `/api` tells such a store its API is content.
 
-  Read here rather than at each gate so the default has one definition."
+  Normalised HERE because the partition joins on `(str prefix \"/\")`: read
+  raw, `/api/` became `/api//`, every :rest/path fell outside it and every
+  :http/path under /api passed — the partition inverted by one character in a
+  config value the registry accepts. Read here rather than at each gate so the
+  default and the spelling have one definition; the registry row
+  (`rest.prefix`) is what makes the escape the gate names a write
+  `config_file` will take."
   [candidate]
-  (or (not-empty (str (get-in candidate [:config "capabilities" :values "rest.prefix"])))
-      "/api"))
+  (let [raw (str/trim (str (get-in candidate [:config "capabilities" :values "rest.prefix"])))]
+    (if (str/blank? raw)
+      "/api"
+      (let [p (str/replace raw #"/+$" "")]
+        (cond
+          (str/blank? p)             "/"
+          (str/starts-with? p "/")   p
+          :else                      (str "/" p))))))
 
 (defn ^:export ^{:rule/applies-to :production} rest-path-partition
   "The API/CONTENT partition gate: a route is a REST API (`:rest/path`) or
@@ -72,7 +84,10 @@
           http-p  (:http/path m)
           prefix  (rest-path-prefix candidate)
           under?  (fn [p] (let [s (str p)]
-                            (or (= s prefix) (str/starts-with? s (str prefix "/")))))
+                            (or (= s prefix)
+                                ;; a root prefix owns everything; anything
+                                ;; else owns its own subtree
+                                (str/starts-with? s (if (= "/" prefix) "/" (str prefix "/"))))))
           where   (str ns-sym "/" form-name)]
       (cond
         (and rest-p http-p)

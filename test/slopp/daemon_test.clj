@@ -311,7 +311,20 @@
             (is (every? #(= :green (:status %)) results) (pr-str (mapv flags results)))
             (testing "and the joiner's verdict STANDS on its own line afterwards"
               (let [again (external/full-check! (if (:joined (first results)) a b))]
-                (is (:standing again) (pr-str (flags again))))))
+                (is (:standing again) (pr-str (flags again)))))
+            (testing "and a write that touches no FORM still retires it for the next asker"
+              ;; a tier declaration changes what the layering check says and
+              ;; touches no elements row, so the digest the queue keyed on did
+              ;; not move — and the delivered promise was never removed, so
+              ;; the next asker at that digest was handed the old verdict as
+              ;; :joined, recorded on its line as if earned
+              (let [joiner? (:joined (first results))
+                    s       (if joiner? a b)]
+                (ops/module-tier! s "fc.core" :external :agent (if joiner? "q-a" "q-b"))
+                (let [after (external/full-check! s)]
+                  (is (not (:joined after)) (pr-str (flags after)))
+                  (is (not (:standing after)) (pr-str (flags after)))
+                  (is (= :green (:status after)) (pr-str (flags after)))))))
           (finally (ops/close! a) (ops/close! b))))
       (finally (daemon/reset-all!)))))
 
@@ -623,3 +636,104 @@
         (finally
           (System/clearProperty "slopp.static-dir")
           (daemon/reset-all!))))))
+
+(deftest ^:external a-request-for-an-asset-opens-no-project
+  ;; The static mount read the daemon's OWN store through `api!`, which
+  ;; registered a project record for the daemon's dir with nothing in it but
+  ;; the reader: no slug, no sessions, no check queue. One browser hit on the
+  ;; bundle, then an attach to that dir within the minute before the reaper
+  ;; swept the husk, adopted the half-record — and detach, reap and reset then
+  ;; threw on its nil session set, which the reaper swallowed forever after.
+  ;; The daemon's own assets are read through a reader of their own now.
+  (let [told (System/getProperty "slopp.static-dir")]
+    (try
+      (System/clearProperty "slopp.static-dir")
+      (let [ctx (daemon/context)
+            r   (slopp.http/handle! ctx {:request-method :get :uri "/assets/cljs/main.js" :headers {}})]
+        (is (contains? #{200 404} (:status r)) (pr-str (dissoc r :body)))
+        (is (empty? (projects! ctx)) "an asset request is not an attachment")
+        (is (map? (daemon/reap-idle! (System/currentTimeMillis))) "and the reaper still runs"))
+      (finally
+        (when told (System/setProperty "slopp.static-dir" told))
+        (daemon/reset-all!)))))
+
+(deftest ^:external a-detach-during-the-app-boot-stops-what-the-boot-started
+  ;; The first attach boots the project's app server in the background, and
+  ;; the last detach stops "the app server the reader holds" — which is nil
+  ;; until the boot returns. A client that attached and disconnected within
+  ;; seconds (a health check, a one-shot hook) left a child JVM running that
+  ;; nothing listed and nothing would ever stop. The boot is pretended here:
+  ;; what matters is the order, not the JVM.
+  (let [d     (tmp-dir!)
+        ctx   (daemon/context)
+        stops (atom [])
+        post  (fn [msg]
+                (slopp.http/handle! ctx {:request-method :post
+                                         :uri "/api/projects/one/mcp"
+                                         :headers {"x-slopp-dir" d}
+                                         :body msg}))
+        init  {:jsonrpc "2.0" :id 1 :method "initialize"
+               :params {:protocolVersion "2025-03-26" :capabilities {}
+                        :clientInfo {:name "t" :version "0"}}}]
+    (try
+      (with-redefs [mcp/app-managed? (constantly true)
+                    mcp/start-app!   (fn [owner]
+                                       (Thread/sleep 500)
+                                       (swap! owner assoc :app-server {:image :pretend})
+                                       {:serving? true})
+                    mcp/stop-app!    (fn [owner]
+                                       (swap! stops conj (:app-server @owner))
+                                       (swap! owner dissoc :app-server)
+                                       {:stopped true})]
+        (let [sid (get-in (post init) [:headers "Mcp-Session-Id"])]
+          (is (string? sid))
+          (Thread/sleep 100)
+          (daemon/detach! sid)
+          (is (empty? (projects! ctx)) "the project closed on its last detach")
+          (Thread/sleep 1500)
+          (is (some some? @stops)
+              (str "the server the boot brought up was stopped once it existed — stop-app! saw "
+                   (pr-str @stops)))))
+      (finally (daemon/reset-all!)))))
+
+(deftest ^:external a-token-less-call-opens-nothing
+  ;; The door checked the token INSIDE http-call!, after cli-session! had
+  ;; already opened the project and minted a CLI session for it: a 403 that
+  ;; left a project open for ten minutes on a dir nobody authenticated for.
+  (let [d   (tmp-dir!)
+        ctx (daemon/context)]
+    (try
+      (let [r (slopp.http/handle! ctx {:request-method :post
+                                       :uri "/api/projects/_/call"
+                                       :headers {"x-slopp-dir" d}
+                                       :body {:tool "thread_list" :arguments {}}})]
+        (is (= 403 (:status r)) (pr-str r)))
+      (is (empty? (projects! ctx)) "nothing ran, so nothing opened")
+      (finally (daemon/reset-all!)))))
+
+(deftest the-daemon-file-is-readable-by-its-owner-only
+  ;; The file carries the write door's token. `spit` wrote it under the
+  ;; umask, -rw-r--r--, so every local USER could read the secret that exists
+  ;; so that loopback alone does not hand every local process the store.
+  (let [f (java.io.File/createTempFile "slopp-daemon-file" ".json")]
+    (try
+      ;; a world-readable file already there, as a previous daemon left it
+      (.setReadable f true false)
+      (daemon/spit-private! f "{}")
+      (is (= "{}" (slurp f)))
+      (when (contains? (.supportedFileAttributeViews (java.nio.file.FileSystems/getDefault)) "posix")
+        (is (= "rw-------"
+               (java.nio.file.attribute.PosixFilePermissions/toString
+                (java.nio.file.Files/getPosixFilePermissions
+                 (.toPath f) (make-array java.nio.file.LinkOption 0))))))
+      (finally (.delete f)))))
+
+(deftest the-port-argument-is-parsed-or-refused-with-a-sentence
+  ;; `slopp daemon seven` was an uncaught NumberFormatException — a stack
+  ;; trace where the one fact that matters is which value was wrong.
+  (is (= {:port 7358} (daemon/daemon-port "7358" nil)))
+  (is (= {:port 7400} (daemon/daemon-port nil "7400")) "the environment, when no argument")
+  (is (= {:port 7358} (daemon/daemon-port "7358" "7400")) "the argument wins")
+  (is (pos? (:port (daemon/daemon-port nil nil))) "the default otherwise")
+  (is (re-find #"not a port" (:error (daemon/daemon-port "seven" nil))))
+  (is (re-find #"not a port" (:error (daemon/daemon-port "70000" nil)))))

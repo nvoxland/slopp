@@ -613,22 +613,17 @@
       (cljnx/click! s "execute")
       (let [out (cljnx/text s "main" {:detail :prose})]
         (is (re-find #"the answer" out))
-        (is ;; the RESOLVED url, where this used to read `:path-params {:m …}`
-        ;; beside a `:path` still holding the pattern. `endpoint/request`
-        ;; resolves the whole address before the performer sees it, so what
-        ;; the panel shows is the url that will actually be fetched — which
-        ;; is strictly more of what this assertion is for.
-        ;; the RESOLVED url, where this used to read `:path-params {:m …}`
-        ;; beside a `:path` still holding the pattern. `endpoint/request`
-        ;; resolves the whole address before the performer sees it, so what
-        ;; the panel shows is the url that will actually be fetched — which
-        ;; is strictly more of what this assertion is for.
-        ;;
-        ;; `:url` rather than `:http/url`: the request is a fully namespaced
-        ;; map, so it PRINTS as `#:http{:method :get, :url "…"}` and the
-        ;; qualified spelling appears nowhere in the text.
-        (re-find #":url \"/api/module/slopp\.ops\"" out))
-        (is (re-find #"#:http\{:method :get" out))))
+        (is ;; MEASURED from the project: the request carries the project's
+            ;; `:webapp/base`, the performer records it once ADDRESSED, and so
+            ;; the panel shows the url the daemon actually answers — the mount
+            ;; joined to the endpoint's path. Built from the raw row this read
+            ;; `/api/module/slopp.ops`, which the daemon does not serve. The
+            ;; map is no longer all-`:http`, so it prints plain; read by the
+            ;; tail of the key.
+            (re-find #"url \"/api/projects/demo/module/slopp\.ops\"" out))
+        (is (re-find #"webapp/base \"/api/projects/demo\"" out)
+            "the base is on screen too — it is half of where the call goes")
+        (is (re-find #"method :get" out))))
 
     (testing "what was SENT is on screen beside what came back. A response with
               no request beside it cannot be attributed — three attempts and
@@ -647,12 +642,12 @@
         ;; used to read an empty `:query {}` map beside the path. The closing
         ;; quote is what makes it exact: without it this also matches the
         ;; `?q=rate` case below and the two assertions stop being different.
-        (re-find #":url \"/api/search\"" (cljnx/text s "main" {:detail :prose}))))
+        (re-find #"url \"/api/projects/demo/search\"" (cljnx/text s "main" {:detail :prose}))))
 
     (testing "and filled, it travels"
       (cljnx/fill! s "param-q" "rate")
       (cljnx/click! s "execute")
-      (is (re-find #":url \"/api/search\?q=rate\"" (cljnx/text s "main" {:detail :prose}))))
+      (is (re-find #"url \"/api/projects/demo/search\?q=rate\"" (cljnx/text s "main" {:detail :prose}))))
 
     (testing "leaving the endpoint clears the form — its fields are THAT
               endpoint's parameters, and carried across they would offer the
@@ -686,7 +681,7 @@
       (cljnx/fill! s "param-pid" "4131")
       (cljnx/click! s "yes — call it")
       (let [out (cljnx/text s "main" {:detail :prose})]
-        (is (re-find #":body \{:name \"slopp2\", :pid 4131\}" out)
+        (is (re-find #"body \{:name \"slopp2\", :pid 4131\}" out)
             "4131 unquoted — a number, not the text that was typed")))))
 
 (deftest a-documented-field-says-what-it-is-for-on-both-screens
@@ -1443,11 +1438,11 @@
   [state doc]
   (assoc state :loads
          {(webapp/load-key
-           ;; `""` is this app's own base — the shell is served at the root, so
-           ;; `app/wiring` answers `(or base "")` and that is what `ask!` keys
-           ;; with. The REQUEST carries its own `/api/p/<slug>` from
+           ;; `\"\"` is this app's own base — the shell is served at the root, so
+           ;; `app/wiring` answers `(or base \"\")` and that is what `ask!` keys
+           ;; with. The REQUEST carries its own `/api/projects/<slug>` from
            ;; `at-project` and `addressed` gives that the last word, so the key
-           ;; resolves to the project's address either way.
+           ;; resolves to the project's mount either way.
            ""
            (endpoint/request (views/at-project (:params state) api/rest-paths) {}))
           {:status :ready :value {:paths doc}}}))
@@ -1498,8 +1493,10 @@
                 ;; because `:main` is a key nothing looks under. See
                 ;; [[with-endpoints]] for what a literal there costs.
                 (with-endpoints
-                  {:path   (str "/endpoints/" (:method addr) "/" (:* addr))
-                   :params addr}
+                  {:path   (str "/p/demo/endpoints/" (:method addr) "/" (:* addr))
+                   ;; the slug rides in params on every address this app
+                   ;; answers, and the ad-hoc call is measured from it
+                   :params (assoc addr :slug "demo")}
                   doc)))]
 
     (testing "typing into a field is an ordinary action carrying the field name,
@@ -1515,8 +1512,13 @@
         ;; `slopp.http.endpoint/request` now, so the pattern and its captures
         ;; are already spent on one finished url — which is what the performer
         ;; needs and what this used to stop one step short of.
-        (is (= {:http/method :get :http/url "/api/module/slopp.ops"}
-               (app/try-request st "")))))
+        (is (= {:http/method :get :http/url "/module/slopp.ops"
+                :webapp/base "/api/projects/demo"}
+               (app/try-request st ""))
+            (str "measured from the PROJECT, like every other request this app"
+                 " makes: built from the raw row it went to the origin's"
+                 " /api/module/…, which the daemon does not serve — "
+                 (pr-str (app/try-request st ""))))))
 
     (testing "on a screen that is not one endpoint's page there is nothing to
               call, and asking produces nil rather than a guess"

@@ -271,7 +271,12 @@
   answer nobody was waiting on was never laid out. `ask!` takes no `:derive`,
   so the page applies it — which does mean laying out per render rather than
   per answer. See [[slopp.ui.views/with-store-picture]], including what the
-  split already cost."
+  split already cost.
+
+  `(:lens state)` is a TEST seam: the lens pages are routes of their own and
+  nothing in the app writes `:lens`, but
+  `every-declared-lens-actually-renders-something-different` renders this page
+  under each lens to prove the dedicated page and the table agree."
   [{:keys [params state] :as page}]
   (let [answer (webapp/ask! page (views/at-project params api/modules) {})]
     (chrome page :code answer
@@ -454,7 +459,8 @@
   "One form — what it is, what it calls, and its source behind a lens.
 
   `:depth 2` is this app's choice rather than the endpoint's default: the page
-  draws the form's immediate neighbourhood, and one hop would not fill it."
+  draws the form's immediate neighbourhood, and one hop would not fill it.
+  `(:lens state)` is the test seam [[code-page]] describes."
   [{:keys [params state] :as page}]
   (let [answer (webapp/ask! page (views/at-project params api/form)
                             {:id (:id params) :depth 2})]

@@ -143,6 +143,19 @@
              (set (map (juxt :path :kind) dangling)))))
     (testing "dynamic refs are named, not counted clean"
       (is (= '[shop.ui/todos-page] (mapv :form unresolved))))
+    (testing "a mount whose KEY carries a trailing slash resolves the same way too.
+              The registry doc promises a trailing slash on EITHER side is
+              trimmed, and `static-mounts` — what serves — keeps that promise;
+              this check parsed the family with a regex of its own that
+              trimmed only the value, so `http.static./assets/` served every
+              asset and reported every asset link as dangling."
+      (let [s3 (-> (store/ingest (store/empty-store) 'shop.ui src)
+                   (store/record-config-put "capabilities" :manifest "http.enabled" "true") first
+                   (store/record-config-put "capabilities" :manifest "http.static./assets/" "public") first
+                   (store/record-file-put "public/app.css" "body{}") first)]
+        (is (not-any? #(= "/assets/app.css" (:path %))
+                      (:dangling (rules.http/dangling-route-refs s3)))
+            (pr-str (:dangling (rules.http/dangling-route-refs s3))))))
     (testing "a mount written with a TRAILING SLASH resolves the same way.
               The capability's own doc line showed `http.static./assets =
               public/`, and that form built `public//app.css`, which no

@@ -322,11 +322,17 @@
     (let [m (web-name-meta e)]
       (when-let [path (route-path m)]
         (let [segs (vec (remove str/blank? (str/split (str path) #"/")))
-              bad  (first (for [[i s] (map-indexed vector segs)
-                                :when (and (str/includes? s "*")
-                                           (or (not (#{"*" "**"} s))
-                                               (not= i (dec (count segs)))))]
-                            s))]
+              bad  (or (first (for [[i s] (map-indexed vector segs)
+                                    :when (and (str/includes? s "*")
+                                               (or (not (#{"*" "**"} s))
+                                                   (not= i (dec (count segs)))))]
+                                s))
+                       ;; a query string or a fragment is part of a SEGMENT to
+                       ;; the router, and a bare `:` captures under no name —
+                       ;; none of them ever matches a request
+                       (some #(when (or (re-find #"[?#]" %) (= ":" %)) %) segs)
+                       ;; and no path at all is no route at all
+                       (when (str/blank? (str path)) ""))]
           (when bad
             (str ns-sym "/" form-name " declares " path
                  " — \"" bad "\" is not a pattern the router has, so this route"
@@ -336,31 +342,6 @@
                  " with both wildcards ANONYMOUS and at the END only —"
                  " a named splat like *path is now `**`, read from :path-params"
                  " under :*, and there is no partial-segment globbing")))))))
-
-(defn ^:export ^{:rule/applies-to :production} http-route-collision
-  "The route-uniqueness gate (D-web): a `:http/path` endpoint whose
-  method+path another FORM already claims is refused at the write — a
-  duplicate route is impossible by construction, not a startup surprise.
-  The same form re-landing (a replace) is not a collision. Inert until
-  `http.enabled`, which `edit.gates/gate-check` decides — not this gate.
-  Returns a teaching string, or nil when clean."
-  [candidate ns-sym form-name]
-  (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
-    (let [m (web-name-meta e)]
-      (when (route-path m)
-        (let [method (:http/method m)
-              path   (str (route-path m))
-              other  (some #(when (and (not= (:form-id %) (:id e))
-                                       (= method (:http/method (:meta %)))
-                                       (= path (str (route-path (:meta %)))))
-                              %)
-                           (web-endpoint-rows candidate))]
-          (when other
-            (str ns-sym "/" form-name " claims " method " " path
-                 " but " (:ns other) "/" (:name other) " already serves it —"
-                 " one method+path has one owner: change the path, change the"
-                 " method, or extend the existing handler (query_surface lists"
-                 " every claim)")))))))
 
 (defn ^:export web-context-builders
   "Every `^{:http/context true}` fn in the store, as qsyms, sorted — the
@@ -487,17 +468,23 @@
            " ^:generated marker first."))))
 
 (defn ^:export client-signature
-  "A deterministic fingerprint of the store's web endpoint CONTRACTS — the raw
-   {:ns :name :method :path :rest/request :rest/response} of every endpoint — so a
-   done-advisory can tell whether the generated typed client (generate_client) is
-   stale WITHOUT re-rendering or parsing it. generate_client records this on the
-   `client`/`generated-sig` config at generation; the staleness advisory compares
-   the recorded value with the current one. A pure function of the store value."
+  "A deterministic fingerprint of the store's REST endpoint CONTRACTS — the raw
+   {:ns :name :method :path :rest/request :rest/response} of every `:rest` row
+   — so a done-advisory can tell whether the generated typed client
+   (generate_client) is stale WITHOUT re-rendering or parsing it. generate_client
+   records this on the `client`/`generated-sig` config at generation; the
+   staleness advisory compares the recorded value with the current one. A pure
+   function of the store value.
+
+   `:rest` rows ONLY, because that is what the client is generated from: a
+   `:http/path` document is content, not contract, and hashing it too meant a
+   new stylesheet staled the client and nothing but a regenerate that changed
+   nothing could clear it."
   [store]
   (str (hash (mapv (fn [{:keys [ns name meta]}]
                      [(str ns) (str name) (:http/method meta) (route-path meta)
                       (pr-str (:rest/request meta)) (pr-str (:rest/response meta))])
-                   (web-endpoint-rows store)))))
+                   (filter #(= :rest (:kind %)) (web-endpoint-rows store))))))
 
 (defn http-react-attrs
   "Per-form write gate (D-web-html): a literal hiccup element carrying a
@@ -589,3 +576,48 @@
                " ONE zero-arg builder: (defn ^{:http/context true} app-context []"
                " {…}). Anything it allocates is new each time it runs, so keep"
                " live state outside it."))))))
+
+(defn ^:export route-shape
+  "What the router SEES in a path pattern: its non-blank segments, every
+  capture spelled the same. Two patterns with one shape match the same urls
+  at equal rank, so this is the identity a collision gate must compare —
+  comparing strings let `/users/` land beside `/users` and `/users/:uid`
+  beside `/users/:id`, and the winner of every such url was vector order,
+  which is the \"unreachable with nothing to say why\" the gates exist for."
+  [path]
+  (mapv (fn [s] (if (str/starts-with? s ":") ":" s))
+        (remove str/blank? (str/split (str path) #"/"))))
+
+(defn ^:export ^{:rule/applies-to :production} http-route-collision
+  "The route-uniqueness gate (D-web): a `:http/path` endpoint whose
+  method+path another FORM already claims is refused at the write — a
+  duplicate route is impossible by construction, not a startup surprise.
+  The same form re-landing (a replace) is not a collision. Inert until
+  `http.enabled`, which `edit.gates/gate-check` decides — not this gate.
+  Returns a teaching string, or nil when clean.
+
+  Claims are compared by [[route-shape]], not by string: the router tolerates
+  a trailing slash and binds a capture whatever it is called, so `/users/:uid`
+  IS `/users/:id` to it, and a gate that could not see that let both land."
+  [candidate ns-sym form-name]
+  (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
+    (let [m (web-name-meta e)]
+      (when (route-path m)
+        (let [method (:http/method m)
+              path   (str (route-path m))
+              shape  (route-shape path)
+              other  (some #(when (and (not= (:form-id %) (:id e))
+                                       (= method (:http/method (:meta %)))
+                                       (= shape (route-shape (route-path (:meta %)))))
+                              %)
+                           (web-endpoint-rows candidate))]
+          (when other
+            (str ns-sym "/" form-name " claims " method " " path
+                 " but " (:ns other) "/" (:name other) " already serves it"
+                 (when (not= path (str (route-path (:meta other))))
+                   (str " as " (route-path (:meta other))
+                        " — the same route to the router, which ignores a"
+                        " trailing slash and a capture's name"))
+                 " — one method+path has one owner: change the path, change the"
+                 " method, or extend the existing handler (query_surface lists"
+                 " every claim)")))))))

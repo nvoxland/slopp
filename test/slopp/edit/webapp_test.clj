@@ -315,3 +315,25 @@
                                :prompt "the replacement")]
           (is (nil? (:error r)) (pr-str r))))
       (finally (ops/close! sess)))))
+
+(deftest a-page-address-collision-is-judged-by-what-the-router-SEES
+  ;; The same string-versus-segments gap as the server gate's, and it matters
+  ;; more here: a client route has no 404 to notice, so two pages matching
+  ;; one url at equal rank means one of them is silently never shown.
+  (let [on   (first (store/record-config-put
+                     (store/ingest (store/empty-store) 'shop.ui
+                                   (str "(ns shop.ui)\n\n"
+                                        "(defn ^{:webapp/path \"/x/:id\"} first-one"
+                                        " \"F.\" [_a _p] [:main])\n"))
+                     "capabilities" :manifest "webapp.enabled" "true"))
+        land (fn [st path]
+               (store/ingest st 'shop.more
+                             (str "(ns shop.more)\n\n"
+                                  "(defn ^{:webapp/path \"" path "\"} screen"
+                                  " \"S.\" [_app _params] [:main \"s\"])\n")))
+        gate (fn [st] (edit.webapp/webapp-page-address st 'shop.more 'screen))]
+    (is (re-find #"shop\.ui/first-one" (str (gate (land on "/x/:other"))))
+        "a capture under another name is the same address")
+    (is (re-find #"shop\.ui/first-one" (str (gate (land on "/x/:id/"))))
+        "a trailing slash is the same address")
+    (is (nil? (gate (land on "/x/:id/edit"))) "and a longer one is not — the control")))

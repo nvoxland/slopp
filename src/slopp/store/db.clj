@@ -2418,3 +2418,60 @@
                                (:pid owner) (:started owner) mine])
           (catch java.sql.SQLException _ nil))
      mine)))
+
+^:reads (defn ^:export unlanded-deltas
+  "ONE LINE's own deltas — its head walked back to its base, exclusive — as
+  delta maps, oldest first. The journal of what a thread HOLDS:
+  `unlanded-count` counts these, and `done` reads them to know which forms a
+  thread has changed across EVERY episode since it forked, because a red is
+  attributed against the whole thread and a land is the whole thread. The
+  walk stops at the base for the reason `unlanded-count` gives, `IS NOT`
+  included: a line with no base is the store's first, and its whole history
+  is its own."
+  [conn line-id]
+  (let [base (line-base conn line-id)]
+    (mapv row->delta
+          (jdbc/execute! conn
+                         [(str "WITH RECURSIVE anc(id, parent) AS (
+                                  SELECT id, parent FROM deltas WHERE id = ?
+                                  UNION ALL
+                                  SELECT deltas.id, deltas.parent FROM deltas
+                                    JOIN anc ON deltas.id = anc.parent
+                                   WHERE anc.id IS NOT ?)
+                                SELECT * FROM deltas
+                                 WHERE id IN (SELECT id FROM anc) AND id IS NOT ?
+                                 ORDER BY seq")
+                          (line-head conn line-id) base base]))))
+
+^:reads (defn ^:export unlanded-work-count
+  "How many deltas hold `line-id`'s view still — everything it has written since
+  its fork that is not a marker (`fields/markers`), head walked back to base
+  exclusive, like `unlanded-count`.
+
+  `unlanded-count` counts the ops a caller NAMES, which is right for a badge:
+  the number beside a thread says how much CODE is pending. The re-fork
+  decision asks the inverse question, and it must fail the other way — an op
+  nobody listed has to PIN, because the failure of a miss is a thread quietly
+  re-forked at the branch's head with its ns_rename, deps_add or module_purity
+  dropped from the view. A deny-list of the markers is the one list that fails
+  safe here; a new marker op registers in `fields/markers` and is excluded
+  from that day, and until then it merely holds a thread that could have
+  followed."
+  [conn line-id]
+  (let [base  (one-col (jdbc/execute-one!
+                        conn ["SELECT base FROM lines WHERE id = ?" line-id]))
+        names (mapv name fields/markers)
+        holes (apply str (interpose "," (repeat (count names) "?")))]
+    (or (one-col
+         (jdbc/execute-one!
+          conn (into [(str "WITH RECURSIVE anc(id, parent, op) AS (
+                              SELECT id, parent, op FROM deltas WHERE id = ?
+                              UNION ALL
+                              SELECT deltas.id, deltas.parent, deltas.op FROM deltas
+                                JOIN anc ON deltas.id = anc.parent
+                               WHERE anc.id IS NOT ?)
+                            SELECT COUNT(*) FROM anc
+                             WHERE id IS NOT ? AND op NOT IN (" holes ")")
+                      (line-head conn line-id) base base]
+                     names)))
+        0)))

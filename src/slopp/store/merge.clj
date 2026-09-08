@@ -83,7 +83,7 @@
   Returns {:store :merged :conflicts :notes :changed-form-ids :new-nses
            :applied :fork-point} — pure; the caller owns image loads +
   verification."
-  [ours theirs & {:keys [from]}]
+  [ours theirs & {:keys [from carry-markers]}]
   (let [od         (:deltas ours)
         td         (:deltas theirs)
         ;; full-value comparison: both sides allocate the same NEXT id for
@@ -610,11 +610,45 @@
                     ;; line-scoped bookkeeping does not travel — commit-points
                     ;; deliberately (noted; the travel question is an open
                     ;; decision), verification/merge chatter silently
-                    (done st idmap merged conflicts
-                          (cond-> notes
-                            (not (contains? fields/silent-markers op))
-                            (conj {:skipped op :delta (:id d)}))
-                          changed new-nses (conj applied (:id d)))
+                    (if (and carry-markers (contains? fields/travelling-markers op))
+                      ;; …EXCEPT when the caller says the receiving line is about
+                      ;; to BECOME the source — a rebase-land, which re-points
+                      ;; the branch at the thread's head afterwards. Then the
+                      ;; markers that outlive a line (fields/travelling-markers)
+                      ;; are re-minted here like a config delta, a :commit's
+                      ;; :target re-pointed at OUR copy of what it marked.
+                      ;; Skipping them orphaned every commit point the branch
+                      ;; took while the thread worked.
+                      (let [[nid st1] (store/gen-id st "d")
+                            ;; an id THIS line holds: its own delta, or its copy
+                            ;; of theirs (delivered by an earlier merge or by
+                            ;; this one)
+                            held      (fn [their-id]
+                                        (some #(cond (= their-id (:id %))          (:id %)
+                                                     (= their-id (:merged-from %)) (:id %))
+                                              (:deltas st1)))
+                            ;; a commit's target is normally the head the done
+                            ;; just produced — a verdict marker, which does not
+                            ;; travel — so it lands on the nearest delta at or
+                            ;; before it on their line that this line holds:
+                            ;; the same state, by an id that resolves here
+                            retarget  (fn [target]
+                                        (or (some held
+                                                  (cons target
+                                                        (map :id (reverse (take-while #(not= target (:id %)) td)))))
+                                            target))
+                            d'  (cond-> (assoc d :id nid
+                                               :parent (:id (last (:deltas st1)))
+                                               :merged-from (:id d))
+                                  (:target d) (update :target retarget))
+                            st2 (store/record-delta st1 d')]
+                        (done st2 idmap (inc merged) conflicts notes changed
+                              new-nses (conj applied (:id d))))
+                      (done st idmap merged conflicts
+                            (cond-> notes
+                              (not (contains? fields/silent-markers op))
+                              (conj {:skipped op :delta (:id d)}))
+                            changed new-nses (conj applied (:id d))))
 
                     :else
                     ;; an op NO registry set knows: note it — the end of the

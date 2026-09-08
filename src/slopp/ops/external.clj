@@ -1884,13 +1884,20 @@ client-deps (merge (:client-deps st) (:client provided))
 
   **The QUEUE is the same courtesy across sessions.** A session carrying
   `:check-queue` — an atom the daemon shares among every session on a
-  project — keys a run by its line's ELEMENTS DIGEST: two threads holding
-  identical content share it, where their heads differ by markers. The
-  first asker runs and delivers; a later asker at the same digest waits on
-  that promise, records the verdict on ITS line (so it stands there, as
+  project — keys a run IN FLIGHT by its line's elements digest AND the
+  store's content signature: two threads holding identical content share it,
+  where their heads differ by markers, and two holding different edits of
+  one length (the digest alone cannot tell them apart) do not. The first
+  asker runs and delivers; a later asker at the same key waits on that
+  promise, records the verdict on ITS line (so it stands there, as
   `standing-full-check` reads a line), re-derives the live overlays, and
   answers with `:joined true`. Only a plain ask joins — `affected` narrows
-  the external tier and `force` means this session wants its own run.
+  the external tier and `force` means this session wants its own run. The
+  entry goes the moment it is delivered: only the STANDING check may hand
+  back a past verdict, because only it asks what has happened on the line
+  since. A realized promise left in the map answered a later asker with the
+  old verdict after a config write had retired it — the write moved no
+  elements row, so the key had not changed when the verdict it retired had.
 
   It REPORTS rather than refuses, which is the same stance `done` takes. An
   agent that asks again gets an answer, promptly, plus the fact that it did
@@ -1931,7 +1938,11 @@ client-deps (merge (:client-deps st) (:client provided))
           conn (:db @session)]
       (if-not (and q conn (nil? affected) (not force))
         (run-full-check! session :affected affected)
-        (let [digest (db/elements-digest conn (engine/session-line session))
+        (let [digest [(db/elements-digest conn (engine/session-line session))
+                          ;; the digest is content-blind (counts, ranks, sizes), so
+                          ;; the signature says WHICH content — two threads holding
+                          ;; different edits of one length must not share a verdict
+                          (store/content-signature (:store @session))]
               [p mine?] (locking q
                           (if-let [p (get @q digest)]
                             [p false]
@@ -1941,13 +1952,18 @@ client-deps (merge (:client-deps st) (:client provided))
                               (swap! q #(assoc (if (< 3 (count %)) {} %) digest p))
                               [p true])))]
           (if mine?
-            (let [r (try (run-full-check! session :affected nil)
-                         (catch Throwable t
-                           (locking q (swap! q dissoc digest))
-                           (deliver p t)
-                           (throw t)))]
-              (deliver p r)
-              r)
+            (try (let [r (run-full-check! session :affected nil)]
+                   (deliver p r)
+                   r)
+                 (catch Throwable t
+                   (deliver p t)
+                   (throw t))
+                 ;; delivered is DONE: the entry goes whether the run threw or
+                 ;; answered. Left in the map, a realized promise answered the
+                 ;; next asker at this key with the old verdict as :joined —
+                 ;; and a config write moves no elements row, so the key did
+                 ;; not change when the verdict it retired did
+                 (finally (locking q (swap! q dissoc digest))))
             (let [r (deref p)]
               (when (instance? Throwable r) (throw r))
               (let [st   (:store @session)
@@ -1975,6 +1991,27 @@ client-deps (merge (:client-deps st) (:client provided))
       (let [o (:app-owner @session)]
         (when (and o (or (not (delay? o)) (realized? o)))
           (:app-boot-failure @(force o))))))
+
+(defn thread-edited
+  "`edited` — the episode's changed forms as qualified symbols — widened to
+  every LIVE form this session's thread has changed since it forked. What a
+  red is attributed against: `implicate` calls a failing test foreign when its
+  trace is disjoint from the edits, and the land reads foreign as innocence.
+  Judged against the episode alone, a break from an earlier red episode on the
+  same thread graded foreign one episode later and LANDED. Copies a rebase
+  replayed in (`:merged-from`) are other people's landed work and stay out;
+  an ephemeral session has no thread and gets `edited` back as it was."
+  [session st edited]
+  (let [conn (:db @session)
+        line (when conn (engine/session-line session))
+        held (when line
+               (keep (fn [fid]
+                       (when-let [e (store/form-by-id st fid)]
+                         (symbol (str (store/ns-of-form-id st fid))
+                                 (str (or (:name e) (:id e))))))
+                     (store/suffix-touched
+                      (remove :merged-from (db/unlanded-deltas conn line)))))]
+    (vec (distinct (concat edited held)))))
 
 (defn ^:export done!
   "The DONE-POINT: call when you believe your changes are complete. Marks
@@ -2110,7 +2147,10 @@ client-deps (merge (:client-deps st) (:client provided))
                 ;; nil affected => every test in main-ns; :edited still powers
                 ;; the red :implicated correlation
                 s        (engine/run-verification! session main-ns nil
-                                            :edited qsyms
+                                            ;; against the whole THREAD's edits, not this
+                                            ;; episode's: the land is the thread, and a
+                                            ;; red from an earlier episode here is mine
+                                            :edited (thread-edited session st* qsyms)
                                             :include-integration? true
                                             :boundary? true)]  ; M5
             (engine/commit-appended! session
