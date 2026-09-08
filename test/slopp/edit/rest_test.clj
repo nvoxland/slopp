@@ -130,8 +130,9 @@
   ;; Nathan, 2026-08-23: "there should be no allowed intersection between rest
   ;; APIs and general http content." The partition is what makes `/api/*` mean
   ;; something a proxy, a CSP or a reader can rely on WITHOUT consulting
-  ;; metadata — the consuming store's hub proxies `/p/:slug/api/*path` today on
-  ;; exactly that assumption, which nothing was enforcing.
+  ;; metadata — the daemon mounts every project's API at
+  ;; `/api/projects/<slug>/<resource>` on exactly that assumption, which
+  ;; nothing was enforcing.
   ;;
   ;; Three refusals, all declaration-grounded: the author says which kind it
   ;; is, so there is no coincidence test anywhere in this (D-rule-grounding).

@@ -5,7 +5,7 @@
   (:require [cheshire.core :as json]
             [clojure.test :refer [deftest is testing]]
             [slopp.daemon :as daemon]
-            [slopp.http :as slopp.http] [slopp.ops.external :as external] [slopp.ops :as ops] [slopp.cache :as cache] [slopp.mcp :as mcp] [slopp.http.routes :as routes] [clojure.string :as str] [slopp.sync :as sync]))
+            [slopp.http :as slopp.http] [slopp.ops.external :as external] [slopp.ops :as ops] [slopp.cache :as cache] [slopp.mcp :as mcp] [slopp.http.routes :as routes] [clojure.string :as str] [slopp.sync :as sync] [slopp.store :as store]))
 
 (defn- tmp-dir!
   "A fresh empty directory: a project nobody has written to yet. Canonical,
@@ -519,27 +519,37 @@
             {:keys [session]} (daemon/attach! d "brief")
             want (str "http://127.0.0.1:" port "/api/projects/brief")]
         (is (= want (:api-url @session)))
-        (is (= want (:api (ops/session-brief session)))))
+        (let [brief (ops/session-brief session)]
+          (is (= want (:api brief)))
+          (is (= (str "http://127.0.0.1:" port "/p/brief") (:pages brief))
+              "the brief names the pages a HUMAN opens, beside the API a program reads")))
       (finally (daemon/reset-all!)))))
 
 (deftest the-daemons-surface-is-declared-not-hand-routed
   ;; The daemon is slopp itself, so its routes go through the same component
-  ;; every project's do: declared endpoints under the one root, assembled
-  ;; from the namespace's public vars, contracts enforced by the same
-  ;; validator. No hand route rows, no second prefix.
-  (let [declared (routes/from-namespaces ['slopp.daemon])
-        served   (:http/routes (daemon/context))]
+  ;; every project's do: declared endpoints and declared content, assembled
+  ;; from the served namespaces' public vars, contracts enforced by the same
+  ;; validator. The one hand-written thing is the static mount, which is what
+  ;; a mount is — a tree of files, not a declaration — and it is the same
+  ;; `mount-routes` every project's app server uses.
+  (let [declared (routes/from-namespaces ['slopp.daemon 'slopp.ui.shell 'slopp.ui.styles])
+        served   (:http/routes (daemon/context))
+        mounted  (filter #(str/starts-with? (:path %) "/assets/") served)]
     (is (= #{"/api/projects" "/api/status"
              "/api/projects/:slug/mcp" "/api/projects/:slug/call"
-             "/api/projects/:slug/**" "/api/otel/v1/logs"}
+             "/api/projects/:slug/**" "/api/otel/v1/logs"
+             "/**" "/css/style.css"}
            (set (map :path declared)))
         (pr-str (map (juxt :method :path) declared)))
-    (is (every? #(str/starts-with? (:path %) "/api/") served) (pr-str (map :path served)))
+    (is (= ["/assets/**"] (mapv :path mounted)) "one static mount, the bundle's")
     (is (= (set (map (juxt :method :path) declared))
-           (set (map (juxt :method :path) served)))
-        "what the daemon serves is exactly what it declares")
+           (set (map (juxt :method :path) (remove (set mounted) served))))
+        "what the daemon serves is exactly what it declares, plus the mount")
     (testing "the project mount is a GET: the reader behind it is read-only"
-      (is (= [:get] (mapv :method (filter #(= "/api/projects/:slug/**" (:path %)) declared)))))))
+      (is (= [:get] (mapv :method (filter #(= "/api/projects/:slug/**" (:path %)) declared)))))
+    (testing "the shell derives its status from the declared pages, which the daemon hands the context"
+      (is (seq (:webapp/routes (daemon/context))))
+      (is (some #(= "/p/:slug" (first %)) (:webapp/routes (daemon/context)))))))
 
 (deftest ^:external a-checkout-carrying-a-slopp-branch-is-imported-on-first-attach
   ;; Zero-ceremony onboarding used to ride the stdio server's start: a git
@@ -554,3 +564,62 @@
         (daemon/attach! d "imp")
         (is (= [d] @seen) "imported on the first attach and not the second"))
       (finally (daemon/reset-all!)))))
+
+(deftest ^:external the-daemon-serves-the-pages-beside-the-api
+  ;; The pages a human looks at are the daemon's now, built on slopp's own
+  ;; components and served through the same context assembly as its typed
+  ;; endpoints: the shell at every page address with the bundle script
+  ;; injected, a derived 404 where no page is declared, the stylesheet as
+  ;; content, the asset mount refusing what it does not hold.
+  (let [ctx (daemon/context)
+        get (fn [uri] (slopp.http/handle! ctx {:request-method :get :uri uri}))]
+    (try
+      (testing "the shell answers at the root and under a project, carrying the bundle's address"
+        (let [r (get "/")]
+          (is (= 200 (:status r)) (pr-str r))
+          (is (re-find #"/assets/cljs/main\.js" (str (:body r))) (pr-str (:body r))))
+        (is (= 200 (:status (get "/p/any-slug/store"))) "a declared page address, whether or not the project is open"))
+      (testing "an address no page claims is the shell's DERIVED 404 — same bytes, honest status"
+        (is (= 404 (:status (get "/p/x/nope/deeper")))))
+      (testing "the stylesheet is served content"
+        (let [r (get "/css/style.css")]
+          (is (= 200 (:status r)) (pr-str r))
+          (is (re-find #"text/css" (str (get-in r [:headers "Content-Type"]))) (pr-str (:headers r)))))
+      (testing "the asset mount answers 404 for what it does not hold, and never leaks"
+        (is (= 404 (:status (get "/assets/nope.js"))))
+        (is (= 404 (:status (get "/assets/../deps.edn")))))
+      (testing "the typed api is untouched beside the pages"
+        (is (= 200 (:status (get "/api/status")))))
+      (finally (daemon/reset-all!)))))
+
+(deftest ^:external a-managed-child-running-the-daemon-holds-what-it-serves
+  ;; The dev instance is `slopp.daemon/-main` DECLARED in slopp's own dev
+  ;; config, so it runs in a managed child that loads the daemon's require
+  ;; closure and nothing more, and has no store. Two things the kernel-booted
+  ;; daemon gets for free, that child does not — and both were measured on
+  ;; the dev instance while the stable daemon beside it was right:
+  ;;
+  ;; - the PAGES. A page declares no route the http layer scans, so nothing
+  ;;   in the served surface pulls its namespace in; the child's route table
+  ;;   was empty and every address answered 200.
+  ;; - the BUNDLE's bytes. The child has no store and no boot record, so the
+  ;;   reader fell back to a classpath with no `public/` on it: 404.
+  (let [st (external/built-store)]
+    (testing "the daemon's require closure reaches the pages, so a child loads them"
+      (is (contains? (store/ns-closure st 'slopp.daemon) 'slopp.ui.pages)
+          "slopp.daemon does not require slopp.ui.pages — a managed child running it serves no page")))
+  (testing "assets come from the dir a manager materialized, when it says where"
+    (let [dir (tmp-dir!)
+          f   (java.io.File. ^String dir "public/cljs/main.js")]
+      (.mkdirs (.getParentFile f))
+      (spit f "// the bundle a manager wrote")
+      (try
+        (System/setProperty "slopp.static-dir" dir)
+        (let [ctx (daemon/context)
+              r   (slopp.http/handle! ctx {:request-method :get :uri "/assets/cljs/main.js"})
+              b   (:body r)]
+          (is (= 200 (:status r)) (pr-str r))
+          (is (re-find #"a manager wrote" (if (string? b) b (slurp b))) (pr-str r)))
+        (finally
+          (System/clearProperty "slopp.static-dir")
+          (daemon/reset-all!))))))

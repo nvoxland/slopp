@@ -51,46 +51,6 @@
                          :node    node
                          :applied applied})))
 
-(defn with-unused-gate "Fold the unused-public report into `lint` as ERROR-grade rows — dead public
-  surface (`:unused-public`) and stale `^:unused-ok` markers on vars that ARE
-  called now (`:stale-unused-ok`). Both directions gate, so the marker can
-  never drift from the truth in either direction. Pure."
-  [lint unused-rep]
-  (into lint
-                   (concat
-                    (for [q (:unused unused-rep)]
-                      {:level :error :type :unused-public
-                       :ns (symbol (namespace q)) :form q
-                       :message (str q " is public but NOTHING in the store"
-                                     " calls it — delete it, or mark the name"
-                                     " ^:unused-ok to declare it deliberate"
-                                     " (external surface, runtime-resolved"
-                                     " entry)")})
-                    (for [q (:stale unused-rep)]
-                      {:level :error :type :stale-unused-ok
-                       :ns (symbol (namespace q)) :form q
-                       :message (str q " carries ^:unused-ok but IS called now"
-                                     " — remove the flag")}))))
-
-(defn apply-normalization! "Commit `rewrites` as one `:normalize` changeset: hot-load the rewritten
-  forms, then rebase-commit. Throws rather than returning data, deliberately —
-  a normalization that will not compile, or a store that moved underneath the
-  done-point, are both invariant violations rather than expected outcomes, and
-  continuing past either would record a boundary over code the image never
-  accepted."
-  [rewrites st label agent session]
-  (when (seq rewrites)
-                   (let [changeset   (into {} (map (juxt :form-id :node)) rewrites)
-                         main-ns     (store/ns-of-form-id st (:form-id (first rewrites)))
-                         [st' _]     (store/apply-changeset st :normalize main-ns changeset
-                                                            :prompt (or label "done normalization")
-                                                            :agent agent)
-                         touched     (distinct (map #(store/ns-of-form-id st' %) (keys changeset)))]
-                     (when-let [err (:err (engine/hot-load-all! session st' (keys changeset)))]
-                       (throw (ex-info (str "normalization failed to compile: " err) {})))
-                     (when-not (engine/try-commit! session st st' (vec touched))
-                       (throw (ex-info "store changed during done — retry" {}))))))
-
 (defn- require-specs
   "Every require spec (symbol or vector) in an ns form's sexpr."
   [ns-form]
@@ -183,34 +143,45 @@
            (get lines (dec (:row f 0)))
            (assoc :at (str/trim (nth lines (dec (:row f)))))))))
 
-(defn ^:export landed-gap
-  "Which `expected` forms — `#{[ns-sym \"name\"]}`, the live ones this episode's
-  verdict covered — are NOT in `by-ns`, the branch's own elements. Sorted, and
-  empty when the branch has them all.
+(defn with-unused-gate "Fold the unused-public report into `lint` as ERROR-grade rows — dead public
+  surface (`:unused-public`) and stale `^:unused-ok` markers on vars that ARE
+  called now (`:stale-unused-ok`). Both directions gate, so the marker can
+  never drift from the truth in either direction. Pure."
+  [lint unused-rep]
+  (into lint
+                   (concat
+                    (for [q (:unused unused-rep)]
+                      {:level :error :type :unused-public
+                       :ns (symbol (namespace q)) :form q
+                       :message (str q " is public but NOTHING in the store"
+                                     " calls it — delete it, or mark the name"
+                                     " ^:unused-ok to declare it deliberate"
+                                     " (external surface, runtime-resolved"
+                                     " entry)")})
+                    (for [q (:stale unused-rep)]
+                      {:level :error :type :stale-unused-ok
+                       :ns (symbol (namespace q)) :form q
+                       :message (str q " carries ^:unused-ok but IS called now"
+                                     " — remove the flag")}))))
 
-  A verdict is earned against the THREAD image, which holds the whole episode,
-  and the work then LANDS through a rebase that mints new form ids. If
-  anything drops between those two moments the green is honest and wrong:
-  measured with two forms, where one landed and the other did not, after which
-  every request served 200 while the commit-point read green.
-
-  `by-ns` must be read from the BRANCH rather than from the session that did
-  the work. Checking a landing against the store that produced it is the same
-  reader answering twice, which is exactly the mistake this exists to catch.
-
-  Matched by NAME, not by source bytes, and that is deliberate on both sides.
-  The measured failure is a form that did not arrive AT ALL, which a name
-  catches; and a rebase legitimately re-mints ids and can reorder a namespace,
-  so byte or id equality would report differences that are not losses. An
-  element with no `:name` — an ns form, a bare comment — can match nothing,
-  or any namespace would vouch for any form in it."
-  [expected by-ns]
-  (let [present (into #{}
-                      (for [[ns-sym m] by-ns
-                            e          (:elements m)
-                            :when      (:name e)]
-                        [ns-sym (str (:name e))]))]
-    (vec (sort (remove present expected)))))
+(defn apply-normalization! "Commit `rewrites` as one `:normalize` changeset: hot-load the rewritten
+  forms, then rebase-commit. Throws rather than returning data, deliberately —
+  a normalization that will not compile, or a store that moved underneath the
+  done-point, are both invariant violations rather than expected outcomes, and
+  continuing past either would record a boundary over code the image never
+  accepted."
+  [rewrites st label agent session]
+  (when (seq rewrites)
+                   (let [changeset   (into {} (map (juxt :form-id :node)) rewrites)
+                         main-ns     (store/ns-of-form-id st (:form-id (first rewrites)))
+                         [st' _]     (store/apply-changeset st :normalize main-ns changeset
+                                                            :prompt (or label "done normalization")
+                                                            :agent agent)
+                         touched     (distinct (map #(store/ns-of-form-id st' %) (keys changeset)))]
+                     (when-let [err (:err (engine/hot-load-all! session st' (keys changeset)))]
+                       (throw (ex-info (str "normalization failed to compile: " err) {})))
+                     (when-not (engine/try-commit! session st st' (vec touched))
+                       (throw (ex-info "store changed during done — retry" {}))))))
 
 (defn ^:export declared-edge-gap
   "Which `declared` module edges — `[{:from :to :test-only}]`, the ones this
@@ -240,6 +211,35 @@
   (vec (remove (fn [{:keys [from to test-only]}]
                  (contains? (get (if test-only test production) from) to))
                declared)))
+
+(defn ^:export landed-gap
+  "Which `expected` forms — `#{[ns-sym \"name\"]}`, the live ones this episode's
+  verdict covered — are NOT in `by-ns`, the branch's own elements. Sorted, and
+  empty when the branch has them all.
+
+  A verdict is earned against the THREAD image, which holds the whole episode,
+  and the work then LANDS through a rebase that mints new form ids. If
+  anything drops between those two moments the green is honest and wrong:
+  measured with two forms, where one landed and the other did not, after which
+  every request served 200 while the commit-point read green.
+
+  `by-ns` must be read from the BRANCH rather than from the session that did
+  the work. Checking a landing against the store that produced it is the same
+  reader answering twice, which is exactly the mistake this exists to catch.
+
+  Matched by NAME, not by source bytes, and that is deliberate on both sides.
+  The measured failure is a form that did not arrive AT ALL, which a name
+  catches; and a rebase legitimately re-mints ids and can reorder a namespace,
+  so byte or id equality would report differences that are not losses. An
+  element with no `:name` — an ns form, a bare comment — can match nothing,
+  or any namespace would vouch for any form in it."
+  [expected by-ns]
+  (let [present (into #{}
+                      (for [[ns-sym m] by-ns
+                            e          (:elements m)
+                            :when      (:name e)]
+                        [ns-sym (str (:name e))]))]
+    (vec (sort (remove present expected)))))
 
 (defn touched-namespaces
   "The namespaces this episode TOUCHED, derived from the deltas rather than

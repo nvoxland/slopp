@@ -1,3 +1,5 @@
 http.enabled: true
 http.port: 7357
+http.static./assets: public
 rest.enabled: true
+webapp.enabled: true

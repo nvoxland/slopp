@@ -127,6 +127,27 @@
                            (when (seq only) [m only]))))
                  test)}))
 
+(defn ^:export module-test-manifest
+  "The TEST-ONLY module edges — `{module-string #{dep-module-strings}}`, the
+  fold of the store's `:module-test-edge` deltas, same edge-grain CRDT as
+  [[modules-manifest]] and deliberately a SEPARATE relation from it.
+
+  A module may declare that its `-test` namespaces cross an edge its
+  production code may not. That distinction cannot be made in `:modules`,
+  because `module-of` folds a trailing `-test` off each segment — a fixture
+  shares its subject's module key, so one edge would license both.
+
+  Separate rather than nested so `:modules` keeps meaning exactly PRODUCTION
+  edges: the cycle check, the layer view, `store/module-path` and the
+  projected `modules` file all want that graph and are unchanged by this. A
+  test edge is not a production edge, so it is not a cycle — which is the
+  whole point, and why `module_dep {test-only true}` does not consult the
+  cycle check.
+
+  `{}` when nothing has declared one."
+  [store]
+  (or (:module-test-edges store) {}))
+
 (defn ^:export module-violations
   "The module system's pure RULES over resolved usage rows ({:from-ns
   :from-var :to :to-name :to-export}) — nil `manifest` = a pre-adoption
@@ -248,41 +269,6 @@
                       :else nil))))
           seq))))
 
-(defn ^:export missing-doc-warning
-  "Public-surface documentation rule (module system): a defn/defmacro on
-  the module surface — depth<=2 namespace, or a deeper var hoisted by
-  ^:export — should carry a docstring. One advisory row for the NAMED form
-  (write paths attach it to their result; it never rides ns-warnings, so
-  it nags only where you are working), or nil."
-  [store ns-sym form-name]
-  (when (and (modules-manifest store) form-name)
-    (when-let [e (store/form-named store ns-sym form-name)]
-      (let [s  (try (n/sexpr (:node e)) (catch Exception _ nil))
-            ;; the name's markers through the shared accessor, exactly as the
-            ;; docstring below goes through its own. This read was
-            ;; `(meta (second s))` three times here and at four other sites —
-            ;; the same one-line-with-three-guards shape that made
-            ;; `form-docstring` necessary
-            nm (store/form-name-meta e)]
-        (when (and (seq? s)
-                   ;; head compared by NAME-string so this form carries no
-                   ;; banned symbol literal (D4 bans defmacro even as data) and
-                   ;; so stays editable
-                   (contains? #{"defn" "defmacro"} (str (first s)))
-                   (symbol? (second s))
-                   (not (:private nm))
-                   ;; generate_client's output documents itself; never nag it
-                   (not (:generated nm))
-                   ;; via the shared accessor: (def x "a value") has a string at
-                   ;; index 2 that is NOT a docstring, and indexing cannot tell
-                   (nil? (store/form-docstring (:node e)))
-                   (or (<= (count (str/split (str ns-sym) #"\.")) 2)
-                       ;; only a WORLD export is public surface — a subtree
-                       ;; export stays internal, no docstring nag
-                       (true? (:export nm))))
-          {:var (symbol (str ns-sym) (str (second s)))
-           :missing-doc true})))))
-
 (defn ^:export module-external?
   "The single boundary predicate the write gates and the breakage classifier
    share: true when a `defn` `form` (sexpr) in `ns-sym` is reachable from OUTSIDE
@@ -327,6 +313,153 @@
       (if (vector? (first body))
         [(first body)]
         (vec (keep #(when (and (seq? %) (vector? (first %))) (first %)) body))))))
+
+(defn ^:export store-violations
+  "[[module-violations]] applied to `store`'s declared relations — the
+  reading every real caller wants, and the one place that knows WHICH
+  relations the rules consult.
+
+  It exists because that knowledge was about to be spelled out at six call
+  sites (both write gates, the whole-store debt fold, the done-time
+  relocation check, the move planner, the extract planner). Six copies of
+  \"fetch the manifests, apply the rules\" is how one of them comes to fetch
+  fewer than the others — and the failure is silent, because consulting one
+  relation too few reports MORE violations than exist, which reads exactly
+  like a strict gate rather than a broken one.
+
+  `rows` stays a parameter: the write gates pass one namespace's slice, the
+  whole-store folds pass every row. Scoping is the caller's business; which
+  declarations count is not."
+  [store rows]
+  (module-violations (modules-manifest store) (module-test-manifest store) rows))
+
+(defn ^:export module-refusal
+  "The per-form module gate over the CANDIDATE store (post-edit value):
+  applies the module rules to `form-name`'s outbound references from THE
+  graph (`slopp.index.refs` — resolved statics, un-required qualified calls,
+  and carrier positions all count; declarations aren't calls). nil when clean
+  or pre-adoption."
+  [candidate ns-sym form-name]
+  (when-let [_ (modules-manifest candidate)]
+    (let [rows (for [r (refs/ns-refs candidate ns-sym)
+                     :when (and (= form-name (:from-var r))
+                                (not= :declared (:via r)))]
+                 ;; `:to-name` because the message names the callee and this
+                 ;; path used to drop it, so every write-path refusal printed a
+                 ;; bare namespace — which reads like evidence the row lost the
+                 ;; name, when the row simply never carried it.
+                 ;;
+                 ;; `:to-missing?` because "not exported" and "not findable"
+                 ;; both reach the rule as `:to-export nil` and want opposite
+                 ;; advice.
+                 {:from-ns ns-sym :from-var (:from-var r) :to (:to-ns r)
+                  :to-name (:to-name r)
+                  :to-export (export-level candidate (:to-ns r) (:to-name r))
+                  :to-missing? (boolean
+                                (and (:to-name r)
+                                     (nil? (store/form-named candidate (:to-ns r)
+                                                             (:to-name r)))))})]
+      (when-let [vs (store-violations candidate rows)]
+        (str/join "; " (map :error vs))))))
+
+(defn ^:export module-scan
+  "The whole-namespace module gate (ingest/ns_create counterpart of
+  dialect-scan) over a candidate store value, judged from THE graph's
+  slice for the namespace: nil when clean, else every violation joined."
+  [candidate ns-sym]
+  (when-let [_ (modules-manifest candidate)]
+    (let [rows (for [r (refs/ns-refs candidate ns-sym)
+                     :when (not= :declared (:via r))]
+                 ;; same row shape as [[module-refusal]], and for the same two
+                 ;; reasons: name the callee, and say when it could not be found
+                 {:from-ns ns-sym :from-var (:from-var r) :to (:to-ns r)
+                  :to-name (:to-name r)
+                  :to-export (export-level candidate (:to-ns r) (:to-name r))
+                  :to-missing? (boolean
+                                (and (:to-name r)
+                                     (nil? (store/form-named candidate (:to-ns r)
+                                                             (:to-name r)))))})]
+      (when-let [vs (store-violations candidate rows)]
+        (str/join "; " (map :error vs))))))
+
+(defn ^:export namespace-purpose-warning
+  "Namespace-purpose rule: a namespace should state what it is FOR.
+
+  Its INVENTORY is derived — `query_project`, the module surface and the
+  outline all list its forms — so a docstring that lists them is a second
+  copy that drifts. What no tool can derive is the part worth writing: why
+  this namespace exists, what to expect inside it, and how it relates to its
+  neighbours.
+
+  Advisory, and namespace-grained. Like [[missing-doc-warning]] it is meant
+  to nag WHERE YOU ARE WORKING — the done-point reports it for namespaces the
+  episode touched — while `review_scan` and `full_check` answer the
+  whole-store question.
+
+  Deliberately NOT a shape check. A heuristic guessing whether prose is a
+  purpose or an inventory would fire on good docstrings, and the rule is
+  to fix the analysis before restricting the language. Absence is objective;
+  quality is a review question. The teaching carries the rest.
+
+  Two exemptions, both because there is no author to nag: a GENERATED
+  namespace (every named form carries `^:generated` — `generate_client`'s
+  output documents itself), and an EMPTY one (nothing to describe yet)."
+  [store ns-sym]
+  (when (contains? (:namespaces store) ns-sym)
+    (let [es      (store/forms store ns-sym)
+          named   (remove #(= (str (:name %)) (str ns-sym)) es)
+          ;; this read carried all three guards and was RIGHT, which is
+          ;; exactly why it is worth collapsing: a correct duplicate is the
+          ;; one that agrees today and drifts tomorrow
+          gen?    (fn [e] (boolean (:generated (store/form-name-meta e))))
+          ns-form (first es)]
+      (when (and ns-form
+                 (seq named)
+                 (not (every? gen? named))
+                 (nil? (some #(when (string? %) %)
+                             (take 2 (drop 2 (store/form-sexpr (:node ns-form)))))))
+        {:ns ns-sym
+         :missing-purpose true
+         :teach (str ns-sym " states no purpose. Add a docstring to its ns form"
+                     " saying WHY it exists, what to expect inside, and how it"
+                     " relates to its neighbours — NOT a list of what it"
+                     " contains, which query_project and the module surface"
+                     " already derive and show.")}))))
+
+(defn ^:export missing-doc-warning
+  "Public-surface documentation rule (module system): a defn/defmacro on
+  the module surface — depth<=2 namespace, or a deeper var hoisted by
+  ^:export — should carry a docstring. One advisory row for the NAMED form
+  (write paths attach it to their result; it never rides ns-warnings, so
+  it nags only where you are working), or nil."
+  [store ns-sym form-name]
+  (when (and (modules-manifest store) form-name)
+    (when-let [e (store/form-named store ns-sym form-name)]
+      (let [s  (try (n/sexpr (:node e)) (catch Exception _ nil))
+            ;; the name's markers through the shared accessor, exactly as the
+            ;; docstring below goes through its own. This read was
+            ;; `(meta (second s))` three times here and at four other sites —
+            ;; the same one-line-with-three-guards shape that made
+            ;; `form-docstring` necessary
+            nm (store/form-name-meta e)]
+        (when (and (seq? s)
+                   ;; head compared by NAME-string so this form carries no
+                   ;; banned symbol literal (D4 bans defmacro even as data) and
+                   ;; so stays editable
+                   (contains? #{"defn" "defmacro"} (str (first s)))
+                   (symbol? (second s))
+                   (not (:private nm))
+                   ;; generate_client's output documents itself; never nag it
+                   (not (:generated nm))
+                   ;; via the shared accessor: (def x "a value") has a string at
+                   ;; index 2 that is NOT a docstring, and indexing cannot tell
+                   (nil? (store/form-docstring (:node e)))
+                   (or (<= (count (str/split (str ns-sym) #"\.")) 2)
+                       ;; only a WORLD export is public surface — a subtree
+                       ;; export stays internal, no docstring nag
+                       (true? (:export nm))))
+          {:var (symbol (str ns-sym) (str (second s)))
+           :missing-doc true})))))
 
 (defn ^:export schema-refusal
   "The opt-in per-form BOUNDARY-SCHEMA gate over the CANDIDATE store (D9/D2): when
@@ -466,50 +599,6 @@
                " ^:foreign-keys; or opt out with config_file: path `gates` key"
                " `require-namespaced-keys` unset true"))))))
 
-(defn ^:export namespace-purpose-warning
-  "Namespace-purpose rule: a namespace should state what it is FOR.
-
-  Its INVENTORY is derived — `query_project`, the module surface and the
-  outline all list its forms — so a docstring that lists them is a second
-  copy that drifts. What no tool can derive is the part worth writing: why
-  this namespace exists, what to expect inside it, and how it relates to its
-  neighbours.
-
-  Advisory, and namespace-grained. Like [[missing-doc-warning]] it is meant
-  to nag WHERE YOU ARE WORKING — the done-point reports it for namespaces the
-  episode touched — while `review_scan` and `full_check` answer the
-  whole-store question.
-
-  Deliberately NOT a shape check. A heuristic guessing whether prose is a
-  purpose or an inventory would fire on good docstrings, and the rule is
-  to fix the analysis before restricting the language. Absence is objective;
-  quality is a review question. The teaching carries the rest.
-
-  Two exemptions, both because there is no author to nag: a GENERATED
-  namespace (every named form carries `^:generated` — `generate_client`'s
-  output documents itself), and an EMPTY one (nothing to describe yet)."
-  [store ns-sym]
-  (when (contains? (:namespaces store) ns-sym)
-    (let [es      (store/forms store ns-sym)
-          named   (remove #(= (str (:name %)) (str ns-sym)) es)
-          ;; this read carried all three guards and was RIGHT, which is
-          ;; exactly why it is worth collapsing: a correct duplicate is the
-          ;; one that agrees today and drifts tomorrow
-          gen?    (fn [e] (boolean (:generated (store/form-name-meta e))))
-          ns-form (first es)]
-      (when (and ns-form
-                 (seq named)
-                 (not (every? gen? named))
-                 (nil? (some #(when (string? %) %)
-                             (take 2 (drop 2 (store/form-sexpr (:node ns-form)))))))
-        {:ns ns-sym
-         :missing-purpose true
-         :teach (str ns-sym " states no purpose. Add a docstring to its ns form"
-                     " saying WHY it exists, what to expect inside, and how it"
-                     " relates to its neighbours — NOT a list of what it"
-                     " contains, which query_project and the module surface"
-                     " already derive and show.")}))))
-
 (defn ^:export module-usage-rows
   "Every store-internal usage row ({:from-ns :from-var :to :to-export}) —
   consumed from THE reference graph (`slopp.index.refs`), so carrier
@@ -531,95 +620,6 @@
           :to        (:to-ns r)
           :to-name   (:to-name r)
           :to-export (export-level store (:to-ns r) (:to-name r))})))
-
-(defn ^:export module-test-manifest
-  "The TEST-ONLY module edges — `{module-string #{dep-module-strings}}`, the
-  fold of the store's `:module-test-edge` deltas, same edge-grain CRDT as
-  [[modules-manifest]] and deliberately a SEPARATE relation from it.
-
-  A module may declare that its `-test` namespaces cross an edge its
-  production code may not. That distinction cannot be made in `:modules`,
-  because `module-of` folds a trailing `-test` off each segment — a fixture
-  shares its subject's module key, so one edge would license both.
-
-  Separate rather than nested so `:modules` keeps meaning exactly PRODUCTION
-  edges: the cycle check, the layer view, `store/module-path` and the
-  projected `modules` file all want that graph and are unchanged by this. A
-  test edge is not a production edge, so it is not a cycle — which is the
-  whole point, and why `module_dep {test-only true}` does not consult the
-  cycle check.
-
-  `{}` when nothing has declared one."
-  [store]
-  (or (:module-test-edges store) {}))
-
-(defn ^:export store-violations
-  "[[module-violations]] applied to `store`'s declared relations — the
-  reading every real caller wants, and the one place that knows WHICH
-  relations the rules consult.
-
-  It exists because that knowledge was about to be spelled out at six call
-  sites (both write gates, the whole-store debt fold, the done-time
-  relocation check, the move planner, the extract planner). Six copies of
-  \"fetch the manifests, apply the rules\" is how one of them comes to fetch
-  fewer than the others — and the failure is silent, because consulting one
-  relation too few reports MORE violations than exist, which reads exactly
-  like a strict gate rather than a broken one.
-
-  `rows` stays a parameter: the write gates pass one namespace's slice, the
-  whole-store folds pass every row. Scoping is the caller's business; which
-  declarations count is not."
-  [store rows]
-  (module-violations (modules-manifest store) (module-test-manifest store) rows))
-
-(defn ^:export module-refusal
-  "The per-form module gate over the CANDIDATE store (post-edit value):
-  applies the module rules to `form-name`'s outbound references from THE
-  graph (`slopp.index.refs` — resolved statics, un-required qualified calls,
-  and carrier positions all count; declarations aren't calls). nil when clean
-  or pre-adoption."
-  [candidate ns-sym form-name]
-  (when-let [_ (modules-manifest candidate)]
-    (let [rows (for [r (refs/ns-refs candidate ns-sym)
-                     :when (and (= form-name (:from-var r))
-                                (not= :declared (:via r)))]
-                 ;; `:to-name` because the message names the callee and this
-                 ;; path used to drop it, so every write-path refusal printed a
-                 ;; bare namespace — which reads like evidence the row lost the
-                 ;; name, when the row simply never carried it.
-                 ;;
-                 ;; `:to-missing?` because "not exported" and "not findable"
-                 ;; both reach the rule as `:to-export nil` and want opposite
-                 ;; advice.
-                 {:from-ns ns-sym :from-var (:from-var r) :to (:to-ns r)
-                  :to-name (:to-name r)
-                  :to-export (export-level candidate (:to-ns r) (:to-name r))
-                  :to-missing? (boolean
-                                (and (:to-name r)
-                                     (nil? (store/form-named candidate (:to-ns r)
-                                                             (:to-name r)))))})]
-      (when-let [vs (store-violations candidate rows)]
-        (str/join "; " (map :error vs))))))
-
-(defn ^:export module-scan
-  "The whole-namespace module gate (ingest/ns_create counterpart of
-  dialect-scan) over a candidate store value, judged from THE graph's
-  slice for the namespace: nil when clean, else every violation joined."
-  [candidate ns-sym]
-  (when-let [_ (modules-manifest candidate)]
-    (let [rows (for [r (refs/ns-refs candidate ns-sym)
-                     :when (not= :declared (:via r))]
-                 ;; same row shape as [[module-refusal]], and for the same two
-                 ;; reasons: name the callee, and say when it could not be found
-                 {:from-ns ns-sym :from-var (:from-var r) :to (:to-ns r)
-                  :to-name (:to-name r)
-                  :to-export (export-level candidate (:to-ns r) (:to-name r))
-                  :to-missing? (boolean
-                                (and (:to-name r)
-                                     (nil? (store/form-named candidate (:to-ns r)
-                                                             (:to-name r)))))})]
-      (when-let [vs (store-violations candidate rows)]
-        (str/join "; " (map :error vs))))))
 
 (defn ^:export relocation-debt
   "The module debt standing on `ns-sym` after a RELOCATION moved it — the

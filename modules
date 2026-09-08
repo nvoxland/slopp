@@ -9,7 +9,7 @@ slopp.coldload-gate: slopp.edit slopp.read slopp.store slopp.ops (test)
 slopp.commit: slopp.mcp slopp.read slopp.store slopp.ops (test)
 slopp.concurrency: slopp.read slopp.store slopp.ops (test)
 slopp.currency: slopp.store
-slopp.daemon: slopp.api slopp.cache slopp.http slopp.mcp slopp.ops slopp.otel slopp.rest slopp.store slopp.sync
+slopp.daemon: slopp.api slopp.cache slopp.cljnx slopp.http slopp.kernel slopp.mcp slopp.ops slopp.otel slopp.rest slopp.store slopp.sync slopp.ui
 slopp.edit: slopp.image slopp.index slopp.project slopp.store slopp.ops (test)
 slopp.edit-group: slopp.read slopp.store slopp.ops (test)
 slopp.effect-boundary: slopp.edit slopp.read slopp.ops (test)
@@ -54,6 +54,7 @@ slopp.sync: slopp.edit slopp.git slopp.kernel slopp.ops slopp.read slopp.store
 slopp.sync-plan: slopp.sync slopp.store (test)
 slopp.thread: slopp.ops (test) slopp.store (test)
 slopp.trace: slopp.ops (test)
+slopp.ui: slopp.http slopp.lang slopp.rest slopp.webapp slopp.cljnx (test)
 slopp.unsafe: slopp.edit slopp.read slopp.store slopp.ops (test)
 slopp.verification: slopp.image slopp.kernel slopp.read slopp.store slopp.ops (test)
 slopp.warm-spare: slopp.ops (test)

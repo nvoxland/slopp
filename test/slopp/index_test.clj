@@ -89,6 +89,15 @@
       (let [an2 (analyze/analyze "(ns app)\n(defn go [a] (reset! a 1))\n")]
         (is (some #(= 'app/go (:var %)) (derive/effect-violations an2)))))))
 
+(deftest lint-honours-the-platform-lang
+  (let [src "(ns x)\n(defn f [] (js/alert 1) (.-value (js/document.getElementById \"q\")))\n"]
+    (testing "default (:clj) lang flags js/* as an unresolved namespace"
+      (is (some #(= :unresolved-namespace (:type %)) (index/lint src))
+          "clj lint can't resolve js"))
+    (testing ":cljs lang resolves js/* — no false unresolved-namespace finding"
+      (is (not (some #(= :unresolved-namespace (:type %)) (index/lint src :cljs)))
+          "cljs lint knows js"))))
+
 (deftest analysis-and-lint-are-memoized-separately
   ;; These used to share ONE cached kondo pass, to hold per-write kondo cost
   ;; at a single run. That coupling is RETIRED: `:findings` depend on
@@ -265,15 +274,6 @@
     (testing "a real MUTATION still demands the !"
       (let [an2 (analyze/analyze "(ns c2)\n(defn bump [a] (swap! a inc))\n")]
         (is (some #(= 'c2/bump (:var %)) (derive/effect-violations an2)))))))
-
-(deftest lint-honours-the-platform-lang
-  (let [src "(ns x)\n(defn f [] (js/alert 1) (.-value (js/document.getElementById \"q\")))\n"]
-    (testing "default (:clj) lang flags js/* as an unresolved namespace"
-      (is (some #(= :unresolved-namespace (:type %)) (index/lint src))
-          "clj lint can't resolve js"))
-    (testing ":cljs lang resolves js/* — no false unresolved-namespace finding"
-      (is (not (some #(= :unresolved-namespace (:type %)) (index/lint src :cljs)))
-          "cljs lint knows js"))))
 
 (deftest reset-kondo-cache-clears-stale-cross-ns-facts
   ;; A restarted server produced FOUR confident lint ERRORS — "slopp.index/lint

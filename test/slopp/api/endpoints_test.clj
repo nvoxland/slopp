@@ -163,10 +163,11 @@
                                                     :uri uri})))]
       (is (= 200 (get* "/api/namespaces")))
       (is (= 200 (get* "/api/rest/paths")))
-      ;; the pages moved out. Asserting their ABSENCE is the half worth
-      ;; keeping: a page reappearing here would mean slopp had quietly grown a
-      ;; second renderer alongside the hub's, which is the drift the :cljc
-      ;; views were split out to prevent in the first place.
+      ;; the pages are the DAEMON's, served beside its registry. Asserting
+      ;; their ABSENCE here is the half worth keeping: a page reappearing on a
+      ;; project's own context would mean slopp had quietly grown a second
+      ;; renderer alongside the daemon's, which is the drift the :cljc views
+      ;; were split out to prevent in the first place.
       (is (= 404 (get* "/")))
       (is (= 404 (get* "/store")))
       (is (= 404 (get* "/css/style.css")))

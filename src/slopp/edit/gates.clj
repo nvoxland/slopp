@@ -64,6 +64,29 @@
    #'edit.http/http-unsafe-get #'edit.http/http-unknown-group #'edit.http/http-react-attrs
    #'edit.cli/cli-args-schema #'edit.cli/cli-command-collision #'edit.cli/cli-direct-stdio])
 
+(defn ^:export write-gate-namespaces
+  "`{rule-key defining-ns-sym}` for the registered per-form write gates — where
+   each gate is IMPLEMENTED, which is what says who OWNS it (R6: support for an
+   app TYPE lives in a namespace named for that type, so a gate defined in
+   `slopp.edit.http` is the http app type's). The done-grain sibling reads the
+   same fact off `rules/done-advisories`' `:check` vars.
+
+   The rule KEY is the gate var's own name, which is why `write-gate-names` is
+   this map's keys rather than a second walk of the registry."
+  []
+  (into {} (for [v per-form-write-gates
+                 :let [m (meta v)]]
+             [(keyword (:name m)) (ns-name (:ns m))])))
+
+(defn ^:export write-gate-names
+  "The keyword rule-names of the registered per-form write gates — the
+   enumeration the unified rule catalog + its drift-guard use without reaching
+   the package-private `per-form-write-gates`. The keys of
+   `write-gate-namespaces`, so a gate can never appear in one and not the
+   other."
+  []
+  (vec (keys (write-gate-namespaces))))
+
 (defn ^:export rule-applies-to-platform?
   "Whether a rule scoped to `rule-scope` (:everywhere / :clojure / :clojurescript)
   fires for a form on `platform` (:jvm / :cljc / :cljs) — the platform axis of a
@@ -88,29 +111,6 @@
   (into {} (map (fn [g] [(keyword (:name (meta g)))
                          (:rule/severity (meta g) :refuse)]))
         per-form-write-gates))
-
-(defn ^:export write-gate-namespaces
-  "`{rule-key defining-ns-sym}` for the registered per-form write gates — where
-   each gate is IMPLEMENTED, which is what says who OWNS it (R6: support for an
-   app TYPE lives in a namespace named for that type, so a gate defined in
-   `slopp.edit.http` is the http app type's). The done-grain sibling reads the
-   same fact off `rules/done-advisories`' `:check` vars.
-
-   The rule KEY is the gate var's own name, which is why `write-gate-names` is
-   this map's keys rather than a second walk of the registry."
-  []
-  (into {} (for [v per-form-write-gates
-                 :let [m (meta v)]]
-             [(keyword (:name m)) (ns-name (:ns m))])))
-
-(defn ^:export write-gate-names
-  "The keyword rule-names of the registered per-form write gates — the
-   enumeration the unified rule catalog + its drift-guard use without reaching
-   the package-private `per-form-write-gates`. The keys of
-   `write-gate-namespaces`, so a gate can never appear in one and not the
-   other."
-  []
-  (vec (keys (write-gate-namespaces))))
 
 (defn ^:export gate-capability
   "The capability that owns write gate `gate` — the opt-in a store must declare

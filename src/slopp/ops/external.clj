@@ -43,132 +43,6 @@
       (when (and nm em)
         {:name nm :email em}))))
 
-(defn ^:export config!
-  "Read or set store config (the meta k/v side-table): keys `user.name` /
-  `user.email` — the git author identity commit-points are stamped with (G5).
-  A key unset or set to \"<git>\" defers to `git config <key>` in the project
-  dir, resolved AT COMMIT-POINT TIME. With no `v`: read —
-  {:key :configured :effective}. Durable sessions only."
-  [session k & [v]]
-  (let [allowed #{"user.name" "user.email" "git-remote"}]
-    (cond
-      (not (contains? allowed (str k)))
-      {:error (str "unknown config key " k " — allowed: "
-                   (str/join ", " (sort allowed)))}
-
-      (not (:db @session))
-      {:error "config lives in the durable store (this session has no db)"}
-
-      (some? v)
-      (do (db/set-meta! (:db @session) (str k) (str v))
-          {:key (str k) :configured (str v)})
-
-      :else
-      (let [conf (db/get-meta (:db @session) (str k))]
-        {:key (str k)
-         :configured conf
-         :effective (if (or (nil? conf) (= conf "<git>"))
-                      (git-config-value (:dir @session) (str k))
-                      conf)}))))
-
-(defn- boot-image!
-  "Bring the session's image up: spawn it, warm a spare, schedule the branch
-  reaper, load every namespace (dependency order, stubbing red-first specs),
-  and adopt modules. THE slow part of open! (loading N namespaces into a
-  child JVM). On the SYNC path (no :image-ready) a failure throws, as open!
-  always did; on the ASYNC path (a background thread) the failure is
-  delivered to the ready-promise so `api/await-image!` surfaces it on first
-  oracle use instead of killing the server at startup. Returns the session.
-
-  Every boot is RECORDED as an `image-boot` measurement — `{:ms :namespaces
-  :recycled? :failures :head}` — beside the journal. The JVM-budget A/B was
-  one careful experiment done by hand; a row per boot makes every boot an
-  observation, and variance-vs-drift a query rather than a re-run."
-  [session store conn agent-id ttl]
-  (try
-    (let [t0    (System/nanoTime)
-          ;; A recycled image carrying EXACTLY this store's classpath, or nil
-          ;; and a real boot. `add-libs!` cannot be undone, so an image that
-          ;; carried deps is no longer the baseline it was parked against.
-          ;; Keying by deps is what makes reuse apply to a real project: the
-          ;; first cut refused any store with dependencies, so it only ever
-          ;; helped dep-free stores — slopp's own fixtures and nothing a user
-          ;; has.
-          ;;
-          ;; DELIBERATELY only here, at session creation. `fresh-image!` is the
-          ;; D5 staleness backstop, where a genuinely new process IS the point;
-          ;; recycling there would undermine the diagnostic that catches a
-          ;; stale image, which is the opposite of what this is for.
-          ;;
-          ;; And a store needing the FRAMEWORK never recycles either: a parked
-          ;; image has its own dir with nothing vendored, and a JVM cannot pick
-          ;; up a relative classpath dir after launch — so reuse would hand back
-          ;; an image missing the framework, surfacing as a missing namespace at
-          ;; first use, far from here. Recycling exists for dep-free fixture
-          ;; stores, which by definition need no framework, so nothing that
-          ;; benefits today loses anything.
-          ;;
-          ;; The dir is the SESSION's, not a private one: every image this
-          ;; session boots reuses it, which is what makes a restart work. A
-          ;; private dir here is exactly why restart booted without the
-          ;; framework at all.
-          vdir     (engine/framework-dir! session store)
-          recycled (when-not vdir (repl/unpark! (engine/image-deps store)))
-          image    (or recycled (engine/start-image! session store))]
-      (swap! session assoc :image image)
-      (engine/start-spare! session)
-      (let [t      (java.util.Timer. "slopp-branch-reaper" true)
-            period (long (max 1000 (quot ttl 3)))]
-        (.schedule t
-                   (proxy [java.util.TimerTask] []
-                     (run [] (try (ops/reap-idle-images! session)
-                                  (catch Throwable _))))
-                   period period)
-        (swap! session assoc :reaper t))
-      ;; No reset: a fresh image is minted with an empty record and a recycled
-      ;; one was emptied by `reset-to-baseline!`, which is where its handle
-      ;; changed tenant. This used to reset a process-global atom, because the
-      ;; stamps it carried described an image that no longer existed.
-      ;; note-and-continue, kernel-host parity: a namespace that fails to load
-      ;; is RECORDED, not thrown. The throw parked its Throwable in
-      ;; :image-ready and await-image! rethrew it in front of every non-read
-      ;; tool — including the edit that would fix the namespace (a real
-      ;; consumer's wedge, 2026-08-06). Process-level failures still throw
-      ;; through the outer catch; a per-namespace compile failure is the
-      ;; store's business, and the store stays open to fix it.
-      (let [fails (engine/load-all-namespaces! image store)]
-        (swap! session assoc :image-load-failures (not-empty fails))
-        (when conn
-          (db/record-measurement!
-           conn "image-boot" nil
-           {:ms         (quot (- (System/nanoTime) t0) 1000000)
-            :namespaces (count (:namespaces store))
-            :recycled?  (some? recycled)
-            :failures   (count fails)
-            :head       (:head store)})))
-      ;; ARM only now, with everything stamped: from here an unstamped form
-      ;; means never-loaded rather than not-yet-looked-at. Without this the
-      ;; registry stayed unarmed for a whole session and every currency
-      ;; surface honestly reported "not measured" — correct, and useless,
-      ;; because only a restart (through fresh-image!) ever armed it.
-      (image.currency/arm! image)
-      ;; module adoption: a populated store from a pre-module db (:modules
-      ;; nil) gets its manifest derived from reality, once — fresh stores
-      ;; are born with {} and enforcement already on
-      (when (and conn (seq (:namespaces store))
-                 (or (nil? (:modules store))
-                     (and (empty? (:modules store))
-                          ;; "has any module edge ever been declared" is one indexed read
-                          (nil? (db/last-marker conn (or (:line @session) (db/trunk-line-id! conn))
-                                                :module-edge)))))
-        (ops/adopt-modules! session :agent (or agent-id "slopp")))
-      (when-let [p (:image-ready @session)] (deliver p :ok))
-      session)
-    (catch Throwable t
-      (if-let [p (:image-ready @session)]
-        (do (deliver p t) session)   ; async: rides home to await-image!
-        (throw t)))))
-
 (defn ^:export client-build-deps
   "slopp's OWN toolchain deps for a BUILD of `store`, injected at build time —
    NEVER user manifest deltas — when the store carries CLIENT code (:cljc/:cljs):
@@ -186,147 +60,6 @@
       {:runtime (select-keys repl/inherent-deps '[metosin/malli])
        :client  (if clib {clib ccoord} {})})
     {:runtime {} :client {}}))
-
-(defn ^:export store-health
-  "What this store CARRIES, in bytes — the journal per op (heaviest first), the
-  materialized state, the blob table, and the on-disk artifact cache. Cheap:
-  SQLite LENGTH and `File.length` only, nothing parsed.
-
-  Reach for it when a session feels slow to open, before growing what a delta
-  carries, and periodically. `full_check` answers whether the store is CORRECT;
-  this answers what it COSTS, and nothing else did — which is how a byte-exact
-  tree snapshot in every commit-point reached 94% of a 344MB journal, unnoticed
-  across 239 of them, against a design note estimating \"tens of KB\". Naming it
-  was not enough either: it was still 82MB, 39% of the journal, when the
-  snapshot was finally removed rather than made cheaper. A store can rot by
-  growing.
-
-  `:artifacts` is here because derived files now live OUTSIDE the journal. That
-  change removed 30MB from the delta log, and would have re-created the very
-  blind spot this tool was built for if the bytes had simply moved somewhere
-  nothing counted. Its `:orphaned` figure is the reclaimable one."
-  [session]
-  (let [{:keys [db dir store]} @session]
-    (merge (if db
-             (db/journal-stats db)
-             {:note "no durable store on disk yet — nothing has been written"})
-           {:artifacts (artifacts/cache-stats dir store)})))
-
-(defn- host-warning-now
-  "The host code-currency warning for a verdict produced right now, or nil.
-
-  The kernel namespace exists only in a process that BOOTED from a store (the
-  MCP server, a jar launch), so the carrier is reached defensively and any
-  failure reads as absence — a test JVM cannot be stale, because nothing
-  hot-reloaded into it. One resolver for every verdict surface: done,
-  full_check and test_run must not disagree about whether the host is
-  current.
-
-  That guard is also what makes it safe to COMPARE rather than count. An
-  empty record honestly means \"this image loaded nothing\", which is true and
-  useless in a plain test JVM; gating on the boot record means drift is only
-  ever computed where an empty record would be news.
-
-  Takes the SESSION: the count of code deltas since boot is a journal read
-  (`db/code-deltas-after`, by clock), and the image whose record is read is
-  the session's oracle. It used to be implied, because the record was a
-  process-global atom and \"the image\" meant the oracle by convention — the
-  assumption that broke the day a second image started running on purpose."
-  [session st]
-  (when-let [info (try ((store/late-ref 'slopp.kernel.boot/current-boot-info))
-                       (catch Throwable _ nil))]
-    (orient/host-warning info
-                         (db/code-deltas-after (:db @session) (engine/session-line session)
-                                               {:at (:booted-at info 0)})
-                         (rules.currency/drift (:image @session) st))))
-
-(def ^:export external-slice-cap
-  "How many impacted `^:external` tests `done` will run before deferring to
-  `full_check`.
-
-  It was 40, and the reason was mechanical rather than principled: a narrowed
-  run could not shard (`:only` forced `par` = 1 and one serial JVM), so a
-  large impacted set cost MORE than the sharded full suite and deferring was
-  the least-bad option available. `testrun/only-shards` removed that, so the
-  number is re-derived from what deferrals actually looked like.
-
-  Measured over 40 consecutive dones: 15 deferred, and they cluster at both
-  ends — six between 52 and 136 tests, nine between 339 and 394 of 409. The
-  first group is real narrowing the trace map had computed correctly and
-  nothing ran; 150 converts all of it. The second is a change to the core,
-  where the impacted set IS the suite and narrowing saves nothing — that is
-  what `full_check` is for, and no selection can improve on it.
-
-  A var so a test can bind it rather than build 151 fixture tests to cross it."
-  150)
-
-^:reads (defn ^:export built-store
-  "The store value reconstructed from the MATERIALIZED PROJECT at `dir`
-  (default: the working directory) — the seam a whole-store invariant test
-  needs, and the thing every own-store guard has been missing.
-
-  **The problem it solves.** A guard that wants to assert something about the
-  whole store — no prose naming a tool that does not exist, every form
-  certifying or marked fallback — cannot reach one. The `^:external` tier runs
-  in a temp dir that `build!` filled with SOURCE and no `.slopp/store.db`, so
-  `(open! {:slopp.ops/dir \".\"})` hands back an EMPTY store, the scan finds
-  nothing, and the guard passes on nothing. `slopp-prose-never-names-a-tool-
-  that-does-not-exist` has been green that way since it was written, and
-  `root-cause-fix-plan` item 2 has been blocked on exactly this.
-
-  The store is recoverable without any of it: the code is on disk, and
-  ingesting it back yields what a code-shaped invariant needs — namespaces,
-  forms, CSTs. No db, no origin path plumbed through the runner, no marker
-  file in a user's build output.
-
-  **REFUSES rather than returning an empty store.** A directory with no
-  Clojure under `src/` throws. That is the whole point: vacuity has to be
-  loud, because a guard scanning nothing is indistinguishable from a guard
-  finding nothing wrong, and this seam exists to end that.
-
-  **What it is NOT.** Deltas, module registers, purity tiers and form IDS do
-  not survive the round trip — `ingest` re-mints ids, and the journal is not
-  in the build at all. This answers questions about CODE. A question about
-  history or provenance needs the live store and is not what this is for."
-  ([] (built-store "."))
-  ([dir]
-   (let [root  (io/file dir)
-         ;; `.cljs` too, and it is the reason this line has a comment. A `:cljs`
-         ;; namespace invisible here is invisible to EVERY whole-store guard
-         ;; standing on this seam, and each one then reports clean on a
-         ;; population that silently excludes browser code — the failure this
-         ;; function was written to end, recurring inside it one extension wide.
-         ;; Found by a guard that asserts its own population before it asserts
-         ;; anything else, on the run that should have gone green.
-         clj?  #(and (.isFile ^java.io.File %)
-                     (re-find #"\.clj[cs]?$" (.getName ^java.io.File %)))
-         srcs  (for [sub ;; `cljs-src` is the third root, and the one that was missing.
-                      ;; `build!` renders a `:cljs` namespace there rather than
-                      ;; under `src/`, off the JVM classpath by design — so
-                      ;; browser code was invisible to every whole-store guard
-                      ;; standing on this seam, and each reported clean on a
-                      ;; population that quietly excluded it
-                      ["src" "test" "cljs-src" "cljs-test"]
-                     :let [d (io/file root sub)]
-                     :when (.isDirectory ^java.io.File d)
-                     f (file-seq d)
-                     :when (clj? f)]
-                 [(->> (.relativize (.toPath (io/file root sub)) (.toPath ^java.io.File f))
-                       str
-                       (#(str/replace % #"\.clj[cs]?$" ""))
-                       (#(str/replace % #"/" "."))
-                       (#(str/replace % #"_" "-"))
-                       symbol)
-                  (slurp f)])]
-     (when-not (seq srcs)
-       (throw (ex-info (str "no source under " (.getPath root) "/src — this is"
-                            " not a materialized slopp project, and returning an"
-                            " empty store here is how a whole-store guard comes"
-                            " to pass on nothing")
-                       {:dir (.getPath root)})))
-     (reduce (fn [st [ns-sym src]] (store/ingest st ns-sym src))
-             (store/empty-store)
-             srcs))))
 
 (defn- materialize-artifacts!
   "Copy every registered artifact into `target`, returning what could NOT be
@@ -358,53 +91,6 @@
                 :why    (or (:why r) (:error r))
                 :refill (artifacts/refill-instruction (str path) (:recipe r))})))
          (:artifacts st))))
-
-(defn- unchanged-since-done
-  "The STANDING done result when nothing has happened since it, else nil.
-
-  Three callers each reasonably ask for a done-point and none can see that the
-  others just did: the agent, the plugin's Stop hook, and `commit-point!`, which
-  runs `done!` itself because the commit-point has no gates of its own. Measured on
-  slopp's own store, that left five `:done` deltas in the last eight, every one
-  recording `:test-status :none` — the representation that means this judged
-  nothing. A log of markers asserting nothing is worse than quiet: it is what
-  `session_brief`'s `:last-done` reads, so a `:none` can surface while a real
-  verdict sits behind it.
-
-  Making the no-op the CALLEE's job is what lets all three keep calling. The
-  alternative — each caller checking whether a done is still current — is three
-  places reasoning about verdict freshness, which is the second-bar shape
-  `commit-point!`'s own docstring warns about.
-
-  The condition is NOT that the previous delta is a done: `:turn-begin`,
-  `:turn-end` and `:verify` markers interleave, so that test misses the ordinary
-  case. It is that every delta since the last done is [[bookkeeping-ops]] — an
-  allow-list, for the reason recorded there. `:normalize` is emitted by done
-  itself but lands BEFORE the boundary marker, so a done that rewrote something
-  is correctly not seen as unchanged.
-
-  And the done has to be `agent`'s OWN. A child thread's done marker lands into
-  its parent's line with the work it graded, and the parent's next done is the
-  one that has to grade that work as a whole — a marker some other agent left
-  cannot stand for this one."
-  [st agent]
-  (let [back  (reverse (:recent st))
-        tail  (take-while #(not= :done (:op %)) back)
-        prior (first (drop-while #(not= :done (:op %)) back))]
-    (when (and prior
-               (= agent (:agent prior))
-               (every? #(contains? fields/bookkeeping-ops (:op %)) tail))
-      {:done     (:id prior)
-       :normalized 0
-       :rewrites []
-       :lint     []
-       :findings (:findings prior)
-       :note     (str "nothing has happened since the done-point "
-                      (:id prior)
-                      (when-let [l (:label prior)] (str " (" l ")"))
-                      " — its verdict still stands and no second boundary was"
-                      " recorded. A done that judged nothing must not supersede"
-                      " one that judged something.")})))
 
 (defn- clear-source-roots!
   "Delete the materialized source roots under `target` so the tree about to be
@@ -775,77 +461,374 @@ client-deps (merge (:client-deps st) (:client provided))
                                      " — the native build may need a tracing-agent run")
                                 :metadata-missing warns))))))))))
 
-(defn delete-dir! [^java.io.File f]
-  (when (.exists f)
-    (doseq [^java.io.File c (reverse (file-seq f))] (.delete c))))
+(defn- host-warning-now
+  "The host code-currency warning for a verdict produced right now, or nil.
 
-(defn ^:export currency-now
-  "The CURRENCY half of a whole-store verdict — `:host-stale`, `:bundle` and
-  `:app` — each present only when it has something to say.
+  The kernel namespace exists only in a process that BOOTED from a store (the
+  MCP server, a jar launch), so the carrier is reached defensively and any
+  failure reads as absence — a test JVM cannot be stale, because nothing
+  hot-reloaded into it. One resolver for every verdict surface: done,
+  full_check and test_run must not disagree about whether the host is
+  current.
 
-  These are the fields a check REPORTS rather than EARNS, and the distinction
-  decides whether a verdict may be reused. Everything else in a verdict is a
-  function of store CONTENT — lint, layering, the rule sweep, the test results
-  — so for unchanged content it stays true however much later it is read. These
-  three describe artifacts OUTSIDE the store: the running host's image, the
-  compiled browser bundle, the served app. They go stale with no delta at all,
-  because serving an app or rebuilding a bundle is not a write.
+  That guard is also what makes it safe to COMPARE rather than count. An
+  empty record honestly means \"this image loaded nothing\", which is true and
+  useless in a plain test JVM; gating on the boot record means drift is only
+  ever computed where an empty record would be news.
 
-  So this is a function rather than three clauses inline, and the reason is
-  concrete: `full-check!` hands back a verdict that still STANDS without
-  re-running anything, and must overlay these fresh or it describes a world
-  that has moved on. It shipped without doing so, and the report went nil the
-  first time an app server appeared between two checks — the guard was right
-  and the payload was stale. Computing currency in two places is how the two
-  answers drift, which is what this exists to make impossible.
-
-  Every count here is a journal read by index (`db/code-deltas-after`,
-  `db/last-artifact-put`, `db/ops-after`) — the value no longer carries the
-  history a count over the whole line would need."
+  Takes the SESSION: the count of code deltas since boot is a journal read
+  (`db/code-deltas-after`, by clock), and the image whose record is read is
+  the session's oracle. It used to be implied, because the record was a
+  process-global atom and \"the image\" meant the oracle by convention — the
+  assumption that broke the day a second image started running on purpose."
   [session st]
-  (let [conn   (:db @session)
-        line   (engine/session-line session)
-        app    (ops/app-behind session (:app-server @session))
-        art    (db/last-artifact-put conn line "public/cljs/main.js")
-        bundle (orient/bundle-currency st art (when art (db/ops-after conn line (:id art))))
-        host   (host-warning-now session st)]
-    (cond-> {}
-      host (assoc :host-stale host)
-      ;; The BROWSER's artifact, third after the host and the jar and the only
-      ;; one that had no report. Reported only when BEHIND, unlike :app: a
-      ;; store with no client code has no bundle and must not be told about
-      ;; one, and `bundle-currency` answers nil there rather than 0 for the
-      ;; same reason. A store once took a green done, a green commit_point, a
-      ;; green whole-store check AND :app {:behind 0} while the page served a
-      ;; bundle from before ten screens were rewritten — nothing was wrong,
-      ;; because :app measures the IMAGE and its zero was honest about a
-      ;; different artifact.
-      (and bundle (pos? (:behind bundle)))
-      (assoc :bundle
-             (assoc bundle :note
-                    (str (:behind bundle) " CLIENT code change(s) since the browser"
-                         " bundle was compiled — the page is serving JavaScript"
-                         " from before them. compile_client rebuilds it. Nothing"
-                         " else here can tell you: :app tracks the IMAGE, and a"
-                         " green there is honest about a different artifact.")))
-      ;; slopp-ui friction #5, bitten twice: a restyled page passed the
-      ;; whole-store check, compile_client and a bundle copy, and the SERVED
-      ;; stylesheet was still the old one. Markup that has moved on from its
-      ;; stylesheet does not render as an old page, it renders as a broken one
-      ;; — and nothing said so, because `done` fixes it silently. `app` is 0
-      ;; rather than nil when current, deliberately: silence would put the
-      ;; reader back to curling the endpoint, which is the friction itself.
-      app (assoc :app
-                 (cond-> {:behind app
-                          :url (:url (:app-server @session))}
-                   (pos? app)
-                   (assoc :note
-                          (str app " code change(s) since the app"
-                               " image was built. It is rebuilt at"
-                               " DONE grain, so call done to"
-                               " re-serve — until then the browser"
-                               " is showing an older store than"
-                               " this verdict describes")))))))
+  (when-let [info (try ((store/late-ref 'slopp.kernel.boot/current-boot-info))
+                       (catch Throwable _ nil))]
+    (orient/host-warning info
+                         (db/code-deltas-after (:db @session) (engine/session-line session)
+                                               {:at (:booted-at info 0)})
+                         (rules.currency/drift (:image @session) st))))
+
+(def ^:export external-slice-cap
+  "How many impacted `^:external` tests `done` will run before deferring to
+  `full_check`.
+
+  It was 40, and the reason was mechanical rather than principled: a narrowed
+  run could not shard (`:only` forced `par` = 1 and one serial JVM), so a
+  large impacted set cost MORE than the sharded full suite and deferring was
+  the least-bad option available. `testrun/only-shards` removed that, so the
+  number is re-derived from what deferrals actually looked like.
+
+  Measured over 40 consecutive dones: 15 deferred, and they cluster at both
+  ends — six between 52 and 136 tests, nine between 339 and 394 of 409. The
+  first group is real narrowing the trace map had computed correctly and
+  nothing ran; 150 converts all of it. The second is a change to the core,
+  where the impacted set IS the suite and narrowing saves nothing — that is
+  what `full_check` is for, and no selection can improve on it.
+
+  A var so a test can bind it rather than build 151 fixture tests to cross it."
+  150)
+
+(defn- unchanged-since-done
+  "The STANDING done result when nothing has happened since it, else nil.
+
+  Three callers each reasonably ask for a done-point and none can see that the
+  others just did: the agent, the plugin's Stop hook, and `commit-point!`, which
+  runs `done!` itself because the commit-point has no gates of its own. Measured on
+  slopp's own store, that left five `:done` deltas in the last eight, every one
+  recording `:test-status :none` — the representation that means this judged
+  nothing. A log of markers asserting nothing is worse than quiet: it is what
+  `session_brief`'s `:last-done` reads, so a `:none` can surface while a real
+  verdict sits behind it.
+
+  Making the no-op the CALLEE's job is what lets all three keep calling. The
+  alternative — each caller checking whether a done is still current — is three
+  places reasoning about verdict freshness, which is the second-bar shape
+  `commit-point!`'s own docstring warns about.
+
+  The condition is NOT that the previous delta is a done: `:turn-begin`,
+  `:turn-end` and `:verify` markers interleave, so that test misses the ordinary
+  case. It is that every delta since the last done is [[bookkeeping-ops]] — an
+  allow-list, for the reason recorded there. `:normalize` is emitted by done
+  itself but lands BEFORE the boundary marker, so a done that rewrote something
+  is correctly not seen as unchanged.
+
+  And the done has to be `agent`'s OWN. A child thread's done marker lands into
+  its parent's line with the work it graded, and the parent's next done is the
+  one that has to grade that work as a whole — a marker some other agent left
+  cannot stand for this one."
+  [st agent]
+  (let [back  (reverse (:recent st))
+        tail  (take-while #(not= :done (:op %)) back)
+        prior (first (drop-while #(not= :done (:op %)) back))]
+    (when (and prior
+               (= agent (:agent prior))
+               (every? #(contains? fields/bookkeeping-ops (:op %)) tail))
+      {:done     (:id prior)
+       :normalized 0
+       :rewrites []
+       :lint     []
+       :findings (:findings prior)
+       :note     (str "nothing has happened since the done-point "
+                      (:id prior)
+                      (when-let [l (:label prior)] (str " (" l ")"))
+                      " — its verdict still stands and no second boundary was"
+                      " recorded. A done that judged nothing must not supersede"
+                      " one that judged something.")})))
+
+(defn ^:export record-or-keep!
+  "Run `record!` to journal `res`, and return `res` EITHER WAY — marked
+  `:recorded false` when the append lost its compare-and-swap.
+
+  **A completed answer must outlive its bookkeeping.** `full_check` spends
+  three to four minutes computing a whole-store verdict and then appends one
+  delta saying it happened. That append is a CAS against the branch head, and
+  on a busy branch it can lose twelve times and throw. It used to throw
+  THROUGH the verdict: the caller asked whether the store was green, the
+  answer was computed and correct, and it was discarded because a note about
+  it could not be written. Measured on this store in one evening: four
+  refusals, about nine minutes of real verification thrown away, and the
+  caller told only *call again* — which meant re-running the same four
+  minutes into the same contention.
+
+  **Only RETRYABLE failures are absorbed**, and the narrowness is the whole
+  design. `engine/commit-appended!` marks ordinary head contention
+  `{:retryable true}`; anything else — a corrupt store, a bug in the append
+  path — propagates untouched. Swallowing those would turn a broken journal
+  into a cheerful green verdict, which is worse than the problem this fixes.
+
+  `:recorded false` rides the result rather than being logged and forgotten,
+  because a reader counting whole-store checks in the journal would otherwise
+  be quietly short one, with nothing to say so."
+  [res record!]
+  (try
+    (record!)
+    res
+    (catch clojure.lang.ExceptionInfo e
+      (if (:retryable (ex-data e))
+        (assoc res
+               :recorded false
+               :record-note (str "this verdict is CORRECT and was not journaled:"
+                                 " the branch head moved under every attempt to"
+                                 " append it, which happens when another writer"
+                                 " is landing continuously. Nothing about the"
+                                 " check itself is in doubt — only the record"
+                                 " that it ran. Ask again later if the journal"
+                                 " needs the entry; do not re-run for the"
+                                 " verdict, which you already have."))
+        (throw e)))))
+
+(defn- record-full-check!
+  "Stamp the whole-store verdict with its wall cost and land it in the journal
+  as a `:verify` delta scoped `:full-check`.
+
+  Two things were missing and they are the same thing. `full_check` is the
+  most expensive operation slopp performs — ~190s on a 125-namespace store,
+  almost entirely the external tier's fresh-JVM boots — and it wrote NOTHING,
+  so the only after-the-fact attribution was the gap before whatever delta
+  landed next. It is also the verdict most worth standing behind, and
+  \"when did this store last pass a whole-store check, and was it green?\" had
+  no answer in the log either.
+
+  Only the SHAPE of the verdict is recorded, never the finding lists: the
+  journal is append-only and a red full_check's lint rows can be large."
+  [res session nses t0]
+  (let [res (assoc res :ms (- (System/currentTimeMillis) t0))]
+    ;; through [[record-or-keep!]], because the ANSWER is what was expensive.
+    ;; This append is a CAS against the branch head; losing it used to throw
+    ;; through the verdict and discard three to four minutes of whole-store
+    ;; verification over a note that could not be written.
+    (record-or-keep!
+     res
+     #(engine/commit-appended!
+       session
+       (fn [st]
+         (store/record-verification
+          st (vec nses)
+          ;; the SHAPE includes what a standing answer has to hand back:
+          ;; the populations and the counts, never the finding lists
+          ;; (eval24 opus: a standing verdict without :checked or a
+          ;; test count sent the model to test_run for the number)
+          (cond-> (assoc (select-keys res [:status :ms :namespaces :lint-errors
+                                            :lint-warnings :checked])
+                         :scope :full-check)
+            (:test res)     (assoc :test (select-keys (:test res) [:test :pass :fail :error]))
+            (:external res) (assoc :external (select-keys (:external res) [:ran :status])))))
+       []))))
+
+(defn ^:export config!
+  "Read or set store config (the meta k/v side-table): keys `user.name` /
+  `user.email` — the git author identity commit-points are stamped with (G5).
+  A key unset or set to \"<git>\" defers to `git config <key>` in the project
+  dir, resolved AT COMMIT-POINT TIME. With no `v`: read —
+  {:key :configured :effective}. Durable sessions only."
+  [session k & [v]]
+  (let [allowed #{"user.name" "user.email" "git-remote"}]
+    (cond
+      (not (contains? allowed (str k)))
+      {:error (str "unknown config key " k " — allowed: "
+                   (str/join ", " (sort allowed)))}
+
+      (not (:db @session))
+      {:error "config lives in the durable store (this session has no db)"}
+
+      (some? v)
+      (do (db/set-meta! (:db @session) (str k) (str v))
+          {:key (str k) :configured (str v)})
+
+      :else
+      (let [conf (db/get-meta (:db @session) (str k))]
+        {:key (str k)
+         :configured conf
+         :effective (if (or (nil? conf) (= conf "<git>"))
+                      (git-config-value (:dir @session) (str k))
+                      conf)}))))
+
+(defn- boot-image!
+  "Bring the session's image up: spawn it, warm a spare, schedule the branch
+  reaper, load every namespace (dependency order, stubbing red-first specs),
+  and adopt modules. THE slow part of open! (loading N namespaces into a
+  child JVM). On the SYNC path (no :image-ready) a failure throws, as open!
+  always did; on the ASYNC path (a background thread) the failure is
+  delivered to the ready-promise so `api/await-image!` surfaces it on first
+  oracle use instead of killing the server at startup. Returns the session.
+
+  Every boot is RECORDED as an `image-boot` measurement — `{:ms :namespaces
+  :recycled? :failures :head}` — beside the journal. The JVM-budget A/B was
+  one careful experiment done by hand; a row per boot makes every boot an
+  observation, and variance-vs-drift a query rather than a re-run."
+  [session store conn agent-id ttl]
+  (try
+    (let [t0    (System/nanoTime)
+          ;; A recycled image carrying EXACTLY this store's classpath, or nil
+          ;; and a real boot. `add-libs!` cannot be undone, so an image that
+          ;; carried deps is no longer the baseline it was parked against.
+          ;; Keying by deps is what makes reuse apply to a real project: the
+          ;; first cut refused any store with dependencies, so it only ever
+          ;; helped dep-free stores — slopp's own fixtures and nothing a user
+          ;; has.
+          ;;
+          ;; DELIBERATELY only here, at session creation. `fresh-image!` is the
+          ;; D5 staleness backstop, where a genuinely new process IS the point;
+          ;; recycling there would undermine the diagnostic that catches a
+          ;; stale image, which is the opposite of what this is for.
+          ;;
+          ;; And a store needing the FRAMEWORK never recycles either: a parked
+          ;; image has its own dir with nothing vendored, and a JVM cannot pick
+          ;; up a relative classpath dir after launch — so reuse would hand back
+          ;; an image missing the framework, surfacing as a missing namespace at
+          ;; first use, far from here. Recycling exists for dep-free fixture
+          ;; stores, which by definition need no framework, so nothing that
+          ;; benefits today loses anything.
+          ;;
+          ;; The dir is the SESSION's, not a private one: every image this
+          ;; session boots reuses it, which is what makes a restart work. A
+          ;; private dir here is exactly why restart booted without the
+          ;; framework at all.
+          vdir     (engine/framework-dir! session store)
+          recycled (when-not vdir (repl/unpark! (engine/image-deps store)))
+          image    (or recycled (engine/start-image! session store))]
+      (swap! session assoc :image image)
+      (engine/start-spare! session)
+      (let [t      (java.util.Timer. "slopp-branch-reaper" true)
+            period (long (max 1000 (quot ttl 3)))]
+        (.schedule t
+                   (proxy [java.util.TimerTask] []
+                     (run [] (try (ops/reap-idle-images! session)
+                                  (catch Throwable _))))
+                   period period)
+        (swap! session assoc :reaper t))
+      ;; No reset: a fresh image is minted with an empty record and a recycled
+      ;; one was emptied by `reset-to-baseline!`, which is where its handle
+      ;; changed tenant. This used to reset a process-global atom, because the
+      ;; stamps it carried described an image that no longer existed.
+      ;; note-and-continue, kernel-host parity: a namespace that fails to load
+      ;; is RECORDED, not thrown. The throw parked its Throwable in
+      ;; :image-ready and await-image! rethrew it in front of every non-read
+      ;; tool — including the edit that would fix the namespace (a real
+      ;; consumer's wedge, 2026-08-06). Process-level failures still throw
+      ;; through the outer catch; a per-namespace compile failure is the
+      ;; store's business, and the store stays open to fix it.
+      (let [fails (engine/load-all-namespaces! image store)]
+        (swap! session assoc :image-load-failures (not-empty fails))
+        (when conn
+          (db/record-measurement!
+           conn "image-boot" nil
+           {:ms         (quot (- (System/nanoTime) t0) 1000000)
+            :namespaces (count (:namespaces store))
+            :recycled?  (some? recycled)
+            :failures   (count fails)
+            :head       (:head store)})))
+      ;; ARM only now, with everything stamped: from here an unstamped form
+      ;; means never-loaded rather than not-yet-looked-at. Without this the
+      ;; registry stayed unarmed for a whole session and every currency
+      ;; surface honestly reported "not measured" — correct, and useless,
+      ;; because only a restart (through fresh-image!) ever armed it.
+      (image.currency/arm! image)
+      ;; module adoption: a populated store from a pre-module db (:modules
+      ;; nil) gets its manifest derived from reality, once — fresh stores
+      ;; are born with {} and enforcement already on
+      (when (and conn (seq (:namespaces store))
+                 (or (nil? (:modules store))
+                     (and (empty? (:modules store))
+                          ;; "has any module edge ever been declared" is one indexed read
+                          (nil? (db/last-marker conn (or (:line @session) (db/trunk-line-id! conn))
+                                                :module-edge)))))
+        (ops/adopt-modules! session :agent (or agent-id "slopp")))
+      (when-let [p (:image-ready @session)] (deliver p :ok))
+      session)
+    (catch Throwable t
+      (if-let [p (:image-ready @session)]
+        (do (deliver p t) session)   ; async: rides home to await-image!
+        (throw t)))))
+
+^:reads (defn ^:export built-store
+  "The store value reconstructed from the MATERIALIZED PROJECT at `dir`
+  (default: the working directory) — the seam a whole-store invariant test
+  needs, and the thing every own-store guard has been missing.
+
+  **The problem it solves.** A guard that wants to assert something about the
+  whole store — no prose naming a tool that does not exist, every form
+  certifying or marked fallback — cannot reach one. The `^:external` tier runs
+  in a temp dir that `build!` filled with SOURCE and no `.slopp/store.db`, so
+  `(open! {:slopp.ops/dir \".\"})` hands back an EMPTY store, the scan finds
+  nothing, and the guard passes on nothing. `slopp-prose-never-names-a-tool-
+  that-does-not-exist` has been green that way since it was written, and
+  `root-cause-fix-plan` item 2 has been blocked on exactly this.
+
+  The store is recoverable without any of it: the code is on disk, and
+  ingesting it back yields what a code-shaped invariant needs — namespaces,
+  forms, CSTs. No db, no origin path plumbed through the runner, no marker
+  file in a user's build output.
+
+  **REFUSES rather than returning an empty store.** A directory with no
+  Clojure under `src/` throws. That is the whole point: vacuity has to be
+  loud, because a guard scanning nothing is indistinguishable from a guard
+  finding nothing wrong, and this seam exists to end that.
+
+  **What it is NOT.** Deltas, module registers, purity tiers and form IDS do
+  not survive the round trip — `ingest` re-mints ids, and the journal is not
+  in the build at all. This answers questions about CODE. A question about
+  history or provenance needs the live store and is not what this is for."
+  ([] (built-store "."))
+  ([dir]
+   (let [root  (io/file dir)
+         ;; `.cljs` too, and it is the reason this line has a comment. A `:cljs`
+         ;; namespace invisible here is invisible to EVERY whole-store guard
+         ;; standing on this seam, and each one then reports clean on a
+         ;; population that silently excludes browser code — the failure this
+         ;; function was written to end, recurring inside it one extension wide.
+         ;; Found by a guard that asserts its own population before it asserts
+         ;; anything else, on the run that should have gone green.
+         clj?  #(and (.isFile ^java.io.File %)
+                     (re-find #"\.clj[cs]?$" (.getName ^java.io.File %)))
+         srcs  (for [sub ;; `cljs-src` is the third root, and the one that was missing.
+                      ;; `build!` renders a `:cljs` namespace there rather than
+                      ;; under `src/`, off the JVM classpath by design — so
+                      ;; browser code was invisible to every whole-store guard
+                      ;; standing on this seam, and each reported clean on a
+                      ;; population that quietly excluded it
+                      ["src" "test" "cljs-src" "cljs-test"]
+                     :let [d (io/file root sub)]
+                     :when (.isDirectory ^java.io.File d)
+                     f (file-seq d)
+                     :when (clj? f)]
+                 [(->> (.relativize (.toPath (io/file root sub)) (.toPath ^java.io.File f))
+                       str
+                       (#(str/replace % #"\.clj[cs]?$" ""))
+                       (#(str/replace % #"/" "."))
+                       (#(str/replace % #"_" "-"))
+                       symbol)
+                  (slurp f)])]
+     (when-not (seq srcs)
+       (throw (ex-info (str "no source under " (.getPath root) "/src — this is"
+                            " not a materialized slopp project, and returning an"
+                            " empty store here is how a whole-store guard comes"
+                            " to pass on nothing")
+                       {:dir (.getPath root)})))
+     (reduce (fn [st [ns-sym src]] (store/ingest st ns-sym src))
+             (store/empty-store)
+             srcs))))
 
 (def ^:export default-branch-image-ttl-ms
   "How long an idle per-branch image is held before `reap-idle-images!` stops
@@ -1027,85 +1010,102 @@ client-deps (merge (:client-deps st) (:client provided))
          (ops/close! session)
          (throw t))))))
 
-(defn ^:export record-or-keep!
-  "Run `record!` to journal `res`, and return `res` EITHER WAY — marked
-  `:recorded false` when the append lost its compare-and-swap.
+(defn ^:export store-health
+  "What this store CARRIES, in bytes — the journal per op (heaviest first), the
+  materialized state, the blob table, and the on-disk artifact cache. Cheap:
+  SQLite LENGTH and `File.length` only, nothing parsed.
 
-  **A completed answer must outlive its bookkeeping.** `full_check` spends
-  three to four minutes computing a whole-store verdict and then appends one
-  delta saying it happened. That append is a CAS against the branch head, and
-  on a busy branch it can lose twelve times and throw. It used to throw
-  THROUGH the verdict: the caller asked whether the store was green, the
-  answer was computed and correct, and it was discarded because a note about
-  it could not be written. Measured on this store in one evening: four
-  refusals, about nine minutes of real verification thrown away, and the
-  caller told only *call again* — which meant re-running the same four
-  minutes into the same contention.
+  Reach for it when a session feels slow to open, before growing what a delta
+  carries, and periodically. `full_check` answers whether the store is CORRECT;
+  this answers what it COSTS, and nothing else did — which is how a byte-exact
+  tree snapshot in every commit-point reached 94% of a 344MB journal, unnoticed
+  across 239 of them, against a design note estimating \"tens of KB\". Naming it
+  was not enough either: it was still 82MB, 39% of the journal, when the
+  snapshot was finally removed rather than made cheaper. A store can rot by
+  growing.
 
-  **Only RETRYABLE failures are absorbed**, and the narrowness is the whole
-  design. `engine/commit-appended!` marks ordinary head contention
-  `{:retryable true}`; anything else — a corrupt store, a bug in the append
-  path — propagates untouched. Swallowing those would turn a broken journal
-  into a cheerful green verdict, which is worse than the problem this fixes.
+  `:artifacts` is here because derived files now live OUTSIDE the journal. That
+  change removed 30MB from the delta log, and would have re-created the very
+  blind spot this tool was built for if the bytes had simply moved somewhere
+  nothing counted. Its `:orphaned` figure is the reclaimable one."
+  [session]
+  (let [{:keys [db dir store]} @session]
+    (merge (if db
+             (db/journal-stats db)
+             {:note "no durable store on disk yet — nothing has been written"})
+           {:artifacts (artifacts/cache-stats dir store)})))
 
-  `:recorded false` rides the result rather than being logged and forgotten,
-  because a reader counting whole-store checks in the journal would otherwise
-  be quietly short one, with nothing to say so."
-  [res record!]
-  (try
-    (record!)
-    res
-    (catch clojure.lang.ExceptionInfo e
-      (if (:retryable (ex-data e))
-        (assoc res
-               :recorded false
-               :record-note (str "this verdict is CORRECT and was not journaled:"
-                                 " the branch head moved under every attempt to"
-                                 " append it, which happens when another writer"
-                                 " is landing continuously. Nothing about the"
-                                 " check itself is in doubt — only the record"
-                                 " that it ran. Ask again later if the journal"
-                                 " needs the entry; do not re-run for the"
-                                 " verdict, which you already have."))
-        (throw e)))))
+(defn delete-dir! [^java.io.File f]
+  (when (.exists f)
+    (doseq [^java.io.File c (reverse (file-seq f))] (.delete c))))
 
-(defn- record-full-check!
-  "Stamp the whole-store verdict with its wall cost and land it in the journal
-  as a `:verify` delta scoped `:full-check`.
+(defn ^:export currency-now
+  "The CURRENCY half of a whole-store verdict — `:host-stale`, `:bundle` and
+  `:app` — each present only when it has something to say.
 
-  Two things were missing and they are the same thing. `full_check` is the
-  most expensive operation slopp performs — ~190s on a 125-namespace store,
-  almost entirely the external tier's fresh-JVM boots — and it wrote NOTHING,
-  so the only after-the-fact attribution was the gap before whatever delta
-  landed next. It is also the verdict most worth standing behind, and
-  \"when did this store last pass a whole-store check, and was it green?\" had
-  no answer in the log either.
+  These are the fields a check REPORTS rather than EARNS, and the distinction
+  decides whether a verdict may be reused. Everything else in a verdict is a
+  function of store CONTENT — lint, layering, the rule sweep, the test results
+  — so for unchanged content it stays true however much later it is read. These
+  three describe artifacts OUTSIDE the store: the running host's image, the
+  compiled browser bundle, the served app. They go stale with no delta at all,
+  because serving an app or rebuilding a bundle is not a write.
 
-  Only the SHAPE of the verdict is recorded, never the finding lists: the
-  journal is append-only and a red full_check's lint rows can be large."
-  [res session nses t0]
-  (let [res (assoc res :ms (- (System/currentTimeMillis) t0))]
-    ;; through [[record-or-keep!]], because the ANSWER is what was expensive.
-    ;; This append is a CAS against the branch head; losing it used to throw
-    ;; through the verdict and discard three to four minutes of whole-store
-    ;; verification over a note that could not be written.
-    (record-or-keep!
-     res
-     #(engine/commit-appended!
-       session
-       (fn [st]
-         (store/record-verification
-          st (vec nses)
-          ;; the SHAPE includes what a standing answer has to hand back:
-          ;; the populations and the counts, never the finding lists
-          ;; (eval24 opus: a standing verdict without :checked or a
-          ;; test count sent the model to test_run for the number)
-          (cond-> (assoc (select-keys res [:status :ms :namespaces :lint-errors
-                                            :lint-warnings :checked])
-                         :scope :full-check)
-            (:test res)     (assoc :test (select-keys (:test res) [:test :pass :fail :error]))
-            (:external res) (assoc :external (select-keys (:external res) [:ran :status])))))
-       []))))
+  So this is a function rather than three clauses inline, and the reason is
+  concrete: `full-check!` hands back a verdict that still STANDS without
+  re-running anything, and must overlay these fresh or it describes a world
+  that has moved on. It shipped without doing so, and the report went nil the
+  first time an app server appeared between two checks — the guard was right
+  and the payload was stale. Computing currency in two places is how the two
+  answers drift, which is what this exists to make impossible.
+
+  Every count here is a journal read by index (`db/code-deltas-after`,
+  `db/last-artifact-put`, `db/ops-after`) — the value no longer carries the
+  history a count over the whole line would need."
+  [session st]
+  (let [conn   (:db @session)
+        line   (engine/session-line session)
+        app    (ops/app-behind session (:app-server @session))
+        art    (db/last-artifact-put conn line "public/cljs/main.js")
+        bundle (orient/bundle-currency st art (when art (db/ops-after conn line (:id art))))
+        host   (host-warning-now session st)]
+    (cond-> {}
+      host (assoc :host-stale host)
+      ;; The BROWSER's artifact, third after the host and the jar and the only
+      ;; one that had no report. Reported only when BEHIND, unlike :app: a
+      ;; store with no client code has no bundle and must not be told about
+      ;; one, and `bundle-currency` answers nil there rather than 0 for the
+      ;; same reason. A store once took a green done, a green commit_point, a
+      ;; green whole-store check AND :app {:behind 0} while the page served a
+      ;; bundle from before ten screens were rewritten — nothing was wrong,
+      ;; because :app measures the IMAGE and its zero was honest about a
+      ;; different artifact.
+      (and bundle (pos? (:behind bundle)))
+      (assoc :bundle
+             (assoc bundle :note
+                    (str (:behind bundle) " CLIENT code change(s) since the browser"
+                         " bundle was compiled — the page is serving JavaScript"
+                         " from before them. compile_client rebuilds it. Nothing"
+                         " else here can tell you: :app tracks the IMAGE, and a"
+                         " green there is honest about a different artifact.")))
+      ;; slopp-ui friction #5, bitten twice: a restyled page passed the
+      ;; whole-store check, compile_client and a bundle copy, and the SERVED
+      ;; stylesheet was still the old one. Markup that has moved on from its
+      ;; stylesheet does not render as an old page, it renders as a broken one
+      ;; — and nothing said so, because `done` fixes it silently. `app` is 0
+      ;; rather than nil when current, deliberately: silence would put the
+      ;; reader back to curling the endpoint, which is the friction itself.
+      app (assoc :app
+                 (cond-> {:behind app
+                          :url (:url (:app-server @session))}
+                   (pos? app)
+                   (assoc :note
+                          (str app " code change(s) since the app"
+                               " image was built. It is rebuilt at"
+                               " DONE grain, so call done to"
+                               " re-serve — until then the browser"
+                               " is showing an older store than"
+                               " this verdict describes")))))))
 
 (defn ^:export compact-store!
   "Reclaim the views settled lines still carry and vacuum the file — the

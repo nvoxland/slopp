@@ -30,9 +30,10 @@
   Goes through the `:browse/namespaces` read rather than reading the store
   here. Reads are addressed by VOCABULARY rather than by var, so a performer
   is shared store-wide and any endpoint answering the same question answers it
-  the same way — which mattered more when an HTML page in this store declared
-  the same read, and is still what keeps the read reusable now that the pages
-  belong to the hub (D-hub part 4).
+  the same way — which mattered more when an HTML page in this context
+  declared the same read, and is still what keeps the read reusable now that
+  the pages are a browser app over this API rather than a second reader of
+  the store.
 
   `:ns` is stringified HERE because the wire is JSON and JSON has no symbols.
   Doing it at the boundary rather than in the read leaves the read's own value
@@ -173,55 +174,6 @@
   [req]
   {:status 200 :body (:modules (:http/reads req))})
 
-(defn ^{:http/method :get :rest/path "/api/module/:m" :http/auth :public
-        :rest/request contracts/module-request
-        :rest/response contracts/module-detail
-        :http/reads {:detail [:browse/module [:path-params :m]]}}
-  module
-  "GET /api/module/:m — one module from the inside: its namespaces, the edges
-  among them, the layering, and what crosses its boundary.
-
-  The level below `/api/modules`, which ships module→module `:deps` and so
-  stops exactly where the next question starts — descending into a box on the
-  diagram had nothing behind it.
-
-  An unknown module is a 404, not an empty frame, on the same reasoning
-  `ns-outline` uses: `{:namespaces []}` would say the module exists and holds
-  nothing, which is a different statement and a false one."
-  [req]
-  (if-let [d (:detail (:http/reads req))]
-    {:status 200 :body d}
-    {:status 404 :body {:error "no such module"}}))
-
-(defn ^{:http/method :get :rest/path "/api/search" :http/auth :public
-        :rest/request contracts/search-request
-        :rest/response contracts/search-results
-        :http/reads {:results [:browse/search []]}}
-  search
-  "GET /api/search?q=&limit= — the door: everything whose name, docstring,
-  recorded why or source matches, ranked across all three grains at once.
-
-  Every other read here answers a question a reader already knows how to ask.
-  This is the one that finds the ADDRESS, which is why it is the entry that
-  decides whether the rest of the reader API has a way in at all — `/store`
-  opening on a module diagram with no way to ask a question was the finding
-  that drove the wave.
-
-  **Always 200, including for a blank query and for no matches.** The search
-  screen is reachable by URL, so a reader can arrive having asked nothing; the
-  honest answer to that is the empty state, and a 400 would put an error panel
-  in front of someone who did nothing wrong. No-match is 200 for the ordinary
-  reason. There is no 404 here at all — unlike `/api/module/:m`, this endpoint
-  has no subject that can fail to exist, only a question that can go
-  unanswered, and those are different things.
-
-  `:rest/request` is declared for the same reason `form`'s is: without it the
-  generated client takes a params map nothing reads from, so `?q=` answers on
-  the wire and is unreachable through the typed client — which pushes a
-  consumer toward the hand-rolled fetch `direct-http` refuses."
-  [req]
-  {:status 200 :body (:results (:http/reads req))})
-
 (defn ^{:http/method :get :rest/path "/api/rest/paths" :http/auth :public
         :rest/media-type "application/edn"
         :rest/response contracts/rest-paths-document
@@ -333,6 +285,55 @@
    :http/raw true
    :headers {"Content-Type" "application/edn"}
    :body (pr-str (:doc (:http/reads req)))})
+
+(defn ^{:http/method :get :rest/path "/api/module/:m" :http/auth :public
+        :rest/request contracts/module-request
+        :rest/response contracts/module-detail
+        :http/reads {:detail [:browse/module [:path-params :m]]}}
+  module
+  "GET /api/module/:m — one module from the inside: its namespaces, the edges
+  among them, the layering, and what crosses its boundary.
+
+  The level below `/api/modules`, which ships module→module `:deps` and so
+  stops exactly where the next question starts — descending into a box on the
+  diagram had nothing behind it.
+
+  An unknown module is a 404, not an empty frame, on the same reasoning
+  `ns-outline` uses: `{:namespaces []}` would say the module exists and holds
+  nothing, which is a different statement and a false one."
+  [req]
+  (if-let [d (:detail (:http/reads req))]
+    {:status 200 :body d}
+    {:status 404 :body {:error "no such module"}}))
+
+(defn ^{:http/method :get :rest/path "/api/search" :http/auth :public
+        :rest/request contracts/search-request
+        :rest/response contracts/search-results
+        :http/reads {:results [:browse/search []]}}
+  search
+  "GET /api/search?q=&limit= — the door: everything whose name, docstring,
+  recorded why or source matches, ranked across all three grains at once.
+
+  Every other read here answers a question a reader already knows how to ask.
+  This is the one that finds the ADDRESS, which is why it is the entry that
+  decides whether the rest of the reader API has a way in at all — `/store`
+  opening on a module diagram with no way to ask a question was the finding
+  that drove the wave.
+
+  **Always 200, including for a blank query and for no matches.** The search
+  screen is reachable by URL, so a reader can arrive having asked nothing; the
+  honest answer to that is the empty state, and a 400 would put an error panel
+  in front of someone who did nothing wrong. No-match is 200 for the ordinary
+  reason. There is no 404 here at all — unlike `/api/module/:m`, this endpoint
+  has no subject that can fail to exist, only a question that can go
+  unanswered, and those are different things.
+
+  `:rest/request` is declared for the same reason `form`'s is: without it the
+  generated client takes a params map nothing reads from, so `?q=` answers on
+  the wire and is unreachable through the typed client — which pushes a
+  consumer toward the hand-rolled fetch `direct-http` refuses."
+  [req]
+  {:status 200 :body (:results (:http/reads req))})
 
 (defn ^{:rest/unconstrained-ok
         "`:config → :default` and `:config → :effective` ONLY. A setting's value has the type ITS OWN registry entry declares — most are scalars and http.auth.providers is a SET — so there is no common type to name, and the registry is open: the next capability may declare a map. Constraining them to a scalar union was tried and REFUSED a real document, 500ing this endpoint against its own contract. Every other field here IS named: :value is the raw stored string, :owners is string to string, :orphaned/:value is a string."}

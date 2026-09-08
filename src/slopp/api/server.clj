@@ -42,8 +42,9 @@
   than 404, which is a much worse way to find out.
 
   It is a short list now and stays that way: a project serves JSON and the
-  EDN contract, nothing else. The pages a human looks at are slopp-ui's, a
-  separate application that reads the daemon's registry."
+  EDN contract, nothing else. The pages a human looks at are the daemon's
+  own (`slopp.ui.*`), served beside its registry from the daemon's assembly
+  and reading this API through the mount — never from a project's context."
   ['slopp.api.reads 'slopp.api.endpoints])
 
 (defn ^:export serving-opts

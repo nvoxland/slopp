@@ -197,185 +197,6 @@
        "    (.start srv)\n"
        "    {:port (.getPort (.getAddress srv))}))\n"))
 
-(deftest whether-slopp-manages-a-dev-server-is-its-own-question
-  ;; http.enabled means "this project serves HTTP". It does NOT mean "slopp
-  ;; should run that server for you", and the two came apart on the first
-  ;; store we looked at — slopp's own. Its web surface IS the reviewer API,
-  ;; which the live session already serves over the LIVE store; a managed
-  ;; server there would boot a second image and serve a snapshot of the page
-  ;; you are looking at, one done point behind it.
-  ;;
-  ;; That used to be the `dev.server` capability. It is now DERIVED, because
-  ;; the exemption is a fact about the running process and never a project's
-  ;; preference — see `the-only-store-that-should-not-be-managed-is-derivable`
-  ;; for why a knob only one store should touch is a footgun for everyone.
-  ;;
-  ;; Deliberately NOT folded into serve-plan: that answers "what would this
-  ;; store serve", which production will need too, and a dev-only exemption
-  ;; does not belong in it.
-  (let [web (-> (store/empty-store)
-                (store/ingest 'app.api
-                              (str "(ns app.api)\n\n"
-                                   "(defn ^{:http/method :get :http/path \"/hi\"\n"
-                                   "        :malli/schema [:=> [:cat :map] :map]\n"
-                                   "        :rest/response :map} hi \"H.\" [req] {:ok true})\n"))
-                (#(first (store/record-config-put % "capabilities" :manifest
-                                                  "http.enabled" "true"))))]
-    (testing "a web project is managed, and the app does not have to ask —
-              nothing it can configure turns this off any more"
-      (is (live/managed? web #{'something.else})))
-    (testing "a store this process already serves is exempt, and stays a web
-              project while it is"
-      (is (not (live/managed? web #{'app.api})))
-      (is (:enabled? (live/serve-plan web "/tmp/x")))
-      (testing "and the plan still says where it WOULD serve, because that is
-                what production asks"
-        (is (pos? (:port (live/serve-plan web "/tmp/x"))))))
-    (testing "a store that serves no HTTP at all is not managed either"
-      (is (not (live/managed? (store/empty-store) #{}))))))
-
-(deftest ^{:correspondence "the options webdev.live/serve-code GENERATES vs the */keys arglists of web/serve! + web/context (the destructuring IS the implementation, and the malli schemas drift from it) — plus the only exemption cross-check in the store: nothing may be both generated and declared-dropped"}
-  the-generated-serve-call-accounts-for-every-option-it-could-carry
-  ;; The generalisation of `catalog-covers-every-registered-rule`, which is
-  ;; the one completeness test this codebase had and the only reason the new
-  ;; write gate could not ship uncataloged.
-  ;;
-  ;; This is the instance that was MISSING: `serve-code` enumerated four of
-  ;; the eight options by hand, and the four it dropped were every option
-  ;; describing the APP rather than its address. Nothing compared the two, so
-  ;; it took a real app measuring a live server to find it — and the loudest
-  ;; symptom was the quiet one, `/api/contracts` answering 200 with an empty
-  ;; document that `generate_client` reads as success.
-  ;;
-  ;; Derived from the ARGLISTS rather than from the malli schemas: the
-  ;; destructuring IS the implementation, so it cannot drift from what the
-  ;; functions actually read. The schemas can and do — `serve!`'s omits
-  ;; :http/routes and :http/max-body-bytes, which `context` destructures.
-  (let [;; EVERY `*/keys` entry, with its qualifier taken from the entry rather
-        ;; than assumed. It read `:web/keys` and minted `(keyword "web" …)`,
-        ;; which was true while one prefix owned the whole vocabulary — until
-        ;; the marker wave moved options between prefixes and the assumed
-        ;; qualifier silently dropped every option that had moved. The
-        ;; vocabulary has since landed back under ONE prefix (`:http/*`), so
-        ;; that bug is no longer reproducible from today's arglists — which is
-        ;; the reason to say why this stays: it is not defending against a
-        ;; mixture that exists now, it is defending against the next split,
-        ;; and reading the entry means nothing here changes when one comes.
-                opt-keys  (fn [v]
-                    (let [m (->> (:arglists (meta v)) first first)]
-                      (into
-                       ;; the */keys families…
-                       (set (for [[entry syms] m
-                                  :when (and (keyword? entry)
-                                             (= "keys" (name entry))
-                                             (namespace entry))
-                                  s syms]
-                              (keyword (namespace entry) (name s))))
-                       ;; …AND the rename entries (`client-routes :webapp/routes`):
-                       ;; an option read under a local name is still an option the
-                       ;; function reads, and this guard not seeing those is how
-                       ;; the managed server shipped answering 200 to every
-                       ;; address — :webapp/routes was destructured exactly there
-                       (for [[sym k] m
-                             :when (and (simple-symbol? sym)
-                                        (keyword? k) (namespace k))]
-                         k))))
-        ;; serve! reads the address options and hands the whole map to
-        ;; context, which reads the rest. Both, because either alone is half.
-        accepted  (into (opt-keys #'slopp.http/serve!) (opt-keys #'slopp.http/context))
-                ;; every option it COULD carry, so the plan has to exercise them all —
-        ;; a plan missing :static made :http/routes look ungenerated and let the
-        ;; stale "deliberately dropped" entry survive the change that generated it
-        plan      {:namespaces ['demo.app] :host "127.0.0.1" :port 1234
-                   :adapter :http-kit :max-body-bytes 42
-                   :context-builder 'demo.sys/deps
-                   :validate? true
-                   :bundle "/assets/cljs/main.js"
-                   :static {"/assets" "public"} :static-dir "/tmp/x"
-                   :page-routes [["/app" 'demo.ui/home]]}
-        generated (->> (edn/read-string {:default (fn [_ v] v)}
-                                        (live/serve-code plan))
-                       (tree-seq coll? seq)
-                       (filter map?)
-                       first keys set)
-        dropped   (set (keys live/unserved-options))]
-    (testing "every option is either generated or declared deliberately dropped"
-      (is (= accepted (into generated dropped))
-          (str "unaccounted for: " (set/difference accepted generated dropped))))
-    (testing "and a dropped one says WHY, so the gap is a decision and not an omission"
-      ;; the rule `crossings/internal-markers` already follows: a partial
-      ;; classification is worse than none, because the one real hole drowns
-      ;; in the entries nobody explained
-      (is (every? #(and (string? %) (seq %)) (vals live/unserved-options))))
-    (testing "nothing is BOTH generated and declared dropped"
-      ;; The union check above cannot see this: a key in both sets still
-      ;; satisfies it, so prose explaining why an option is missing survives
-      ;; the write that stops it being missing. Same hand-kept-twin shape
-      ;; this test exists to kill, one level up — the classification is
-      ;; itself a list that has to track the code.
-      (is (empty? (set/intersection generated dropped))
-          (str "declared dropped but actually generated: "
-               (set/intersection generated dropped))))))
-
-(deftest a-managed-app-serves-the-static-assets-it-declares
-  ;; The managed server answered 404 for every static mount, because mounts
-  ;; read the store's file manifest and the child image has no store. The
-  ;; project that hurt is the one whose whole purpose is to be LOOKED AT: a
-  ;; UI's stylesheet and its cljs bundle are the product, so "managed" meant
-  ;; an unstyled page with a dead bundle. That project switched dev.server
-  ;; off, which reads as "the feature does not apply to me" and is really
-  ;; "the feature is broken for me" — the switch hid the bug.
-  ;;
-  ;; The seam was already right: `mount-routes` takes a READER fn, not a
-  ;; store, and `file-or-resource-reader` is the filesystem one. So the fix
-  ;; is materialize-then-point, not a new mechanism.
-  (let [plan {:namespaces ['demo.app] :host "127.0.0.1" :port 1234
-              :adapter :http-kit
-              :static {"/assets" "public"}
-              :static-dir "/tmp/slopp-static-probe"}
-        code (live/serve-code plan)]
-    (testing "the generated call mounts the prefixes the store declared"
-      (is (str/includes? code "mount-routes") "no mount call was generated")
-      (is (str/includes? code "/assets"))
-      (is (str/includes? code "public")))
-    (testing "reading from the dir the parent materialized, since the child has no store"
-      (is (str/includes? code "file-or-resource-reader"))
-      (is (str/includes? code "/tmp/slopp-static-probe")))
-    (testing "and the namespace providing both is REQUIRED in the child"
-      ;; Asserting the substring "slopp.http.static" passes on the qualified
-      ;; symbol alone, so the first version of this went green while the
-      ;; generated code would still have thrown at runtime — the child had
-      ;; the symbol and not the namespace. Match the require FORM.
-      (is (str/includes? code "(require (quote slopp.http.static))")
-          "the child resolves slopp.http.static/mount-routes only if it required it"))
-    (testing "a plan with no mounts generates no routes key at all"
-      (is (not (str/includes? (live/serve-code (dissoc plan :static :static-dir))
-                              "mount-routes"))
-          "an app without mounts must not pay for the machinery"))))
-
-(deftest static-bytes-are-materialized-for-a-child-that-has-no-store
-  ;; The whole reason mounts were unserved. The child image is a separate JVM
-  ;; with no store, so the bytes have to be somewhere it can read them —
-  ;; which `file-or-resource-reader` already does, given a dir.
-  (let [put  (fn [s k v] (first (store/record-config-put s "capabilities" :manifest k v)))
-        s    (-> (store/empty-store)
-                 (put "http.enabled" "true")
-                 (put "http.static./assets" "public"))
-        s    (first (store/record-file-put s "public/app.css" "body{}"))
-        s    (first (store/record-file-put s "public/deep/x.txt" "hi"))
-        s    (first (store/record-file-put s "src/notes.md" "# not mounted"))
-        ;; tracked files carry their content inline, so the blob fallback is
-        ;; never consulted here — artifacts are the case that needs it
-        dir  (live/materialize-static! s {"/assets" "public"} (constantly nil))]
-    (testing "a mounted file lands under the dir at its manifest path"
-      (is (= "body{}" (slurp (str dir "/public/app.css")))))
-    (testing "nested paths keep their shape, so one mount serves a TREE"
-      (is (= "hi" (slurp (str dir "/public/deep/x.txt")))))
-    (testing "a file no mount covers is not copied — the dir is the mount, not the store"
-      (is (not (.exists (java.io.File. (str dir "/src/notes.md"))))))
-    (testing "no mounts means no dir, so an app without assets allocates nothing"
-      (is (nil? (live/materialize-static! s {} (constantly nil)))))))
-
 (def fake-static-src
   "A stand-in `slopp.http.static` for the app-image test, as store source.
 
@@ -525,6 +346,43 @@
               (is (= v2 (:app-server @sess)))))))
       (finally (live/stop! (:app-server @sess))))))
 
+(deftest whether-slopp-manages-a-dev-server-is-its-own-question
+  ;; http.enabled means "this project serves HTTP". It does NOT mean "slopp
+  ;; should run that server for you", and the two came apart on the first
+  ;; store we looked at — slopp's own. Its web surface IS the reviewer API,
+  ;; which the live session already serves over the LIVE store; a managed
+  ;; server there would boot a second image and serve a snapshot of the page
+  ;; you are looking at, one done point behind it.
+  ;;
+  ;; That used to be the `dev.server` capability. It is now DERIVED, because
+  ;; the exemption is a fact about the running process and never a project's
+  ;; preference — see `the-only-store-that-should-not-be-managed-is-derivable`
+  ;; for why a knob only one store should touch is a footgun for everyone.
+  ;;
+  ;; Deliberately NOT folded into serve-plan: that answers "what would this
+  ;; store serve", which production will need too, and a dev-only exemption
+  ;; does not belong in it.
+  (let [web (-> (store/empty-store)
+                (store/ingest 'app.api
+                              (str "(ns app.api)\n\n"
+                                   "(defn ^{:http/method :get :http/path \"/hi\"\n"
+                                   "        :malli/schema [:=> [:cat :map] :map]\n"
+                                   "        :rest/response :map} hi \"H.\" [req] {:ok true})\n"))
+                (#(first (store/record-config-put % "capabilities" :manifest
+                                                  "http.enabled" "true"))))]
+    (testing "a web project is managed, and the app does not have to ask —
+              nothing it can configure turns this off any more"
+      (is (live/managed? web #{'something.else})))
+    (testing "a store this process already serves is exempt, and stays a web
+              project while it is"
+      (is (not (live/managed? web #{'app.api})))
+      (is (:enabled? (live/serve-plan web "/tmp/x")))
+      (testing "and the plan still says where it WOULD serve, because that is
+                what production asks"
+        (is (pos? (:port (live/serve-plan web "/tmp/x"))))))
+    (testing "a store that serves no HTTP at all is not managed either"
+      (is (not (live/managed? (store/empty-store) #{}))))))
+
 (deftest ^:external a-refresh-reports-what-it-cost
   ;; slopp-ui asked "measure app-image boot cost, and let the number pick the
   ;; project" — ~2s means state is the only argument for hot-loading a refresh
@@ -566,6 +424,148 @@
         (is (= (:head-at s) (:served-at r))
             "served at the head's time — the stamp is the store's, not the clock's"))
       (finally (live/stop! r)))))
+
+(deftest ^{:correspondence "the options webdev.live/serve-code GENERATES vs the */keys arglists of web/serve! + web/context (the destructuring IS the implementation, and the malli schemas drift from it) — plus the only exemption cross-check in the store: nothing may be both generated and declared-dropped"}
+  the-generated-serve-call-accounts-for-every-option-it-could-carry
+  ;; The generalisation of `catalog-covers-every-registered-rule`, which is
+  ;; the one completeness test this codebase had and the only reason the new
+  ;; write gate could not ship uncataloged.
+  ;;
+  ;; This is the instance that was MISSING: `serve-code` enumerated four of
+  ;; the eight options by hand, and the four it dropped were every option
+  ;; describing the APP rather than its address. Nothing compared the two, so
+  ;; it took a real app measuring a live server to find it — and the loudest
+  ;; symptom was the quiet one, `/api/contracts` answering 200 with an empty
+  ;; document that `generate_client` reads as success.
+  ;;
+  ;; Derived from the ARGLISTS rather than from the malli schemas: the
+  ;; destructuring IS the implementation, so it cannot drift from what the
+  ;; functions actually read. The schemas can and do — `serve!`'s omits
+  ;; :http/routes and :http/max-body-bytes, which `context` destructures.
+  (let [;; EVERY `*/keys` entry, with its qualifier taken from the entry rather
+        ;; than assumed. It read `:web/keys` and minted `(keyword "web" …)`,
+        ;; which was true while one prefix owned the whole vocabulary — until
+        ;; the marker wave moved options between prefixes and the assumed
+        ;; qualifier silently dropped every option that had moved. The
+        ;; vocabulary has since landed back under ONE prefix (`:http/*`), so
+        ;; that bug is no longer reproducible from today's arglists — which is
+        ;; the reason to say why this stays: it is not defending against a
+        ;; mixture that exists now, it is defending against the next split,
+        ;; and reading the entry means nothing here changes when one comes.
+                opt-keys  (fn [v]
+                    (let [m (->> (:arglists (meta v)) first first)]
+                      (into
+                       ;; the */keys families…
+                       (set (for [[entry syms] m
+                                  :when (and (keyword? entry)
+                                             (= "keys" (name entry))
+                                             (namespace entry))
+                                  s syms]
+                              (keyword (namespace entry) (name s))))
+                       ;; …AND the rename entries (`client-routes :webapp/routes`):
+                       ;; an option read under a local name is still an option the
+                       ;; function reads, and this guard not seeing those is how
+                       ;; the managed server shipped answering 200 to every
+                       ;; address — :webapp/routes was destructured exactly there
+                       (for [[sym k] m
+                             :when (and (simple-symbol? sym)
+                                        (keyword? k) (namespace k))]
+                         k))))
+        ;; serve! reads the address options and hands the whole map to
+        ;; context, which reads the rest. Both, because either alone is half.
+        accepted  (into (opt-keys #'slopp.http/serve!) (opt-keys #'slopp.http/context))
+                ;; every option it COULD carry, so the plan has to exercise them all —
+        ;; a plan missing :static made :http/routes look ungenerated and let the
+        ;; stale "deliberately dropped" entry survive the change that generated it
+        plan      {:namespaces ['demo.app] :host "127.0.0.1" :port 1234
+                   :adapter :http-kit :max-body-bytes 42
+                   :context-builder 'demo.sys/deps
+                   :validate? true
+                   :bundle "/assets/cljs/main.js"
+                   :static {"/assets" "public"} :static-dir "/tmp/x"
+                   :page-routes [["/app" 'demo.ui/home]]}
+        generated (->> (edn/read-string {:default (fn [_ v] v)}
+                                        (live/serve-code plan))
+                       (tree-seq coll? seq)
+                       (filter map?)
+                       first keys set)
+        dropped   (set (keys live/unserved-options))]
+    (testing "every option is either generated or declared deliberately dropped"
+      (is (= accepted (into generated dropped))
+          (str "unaccounted for: " (set/difference accepted generated dropped))))
+    (testing "and a dropped one says WHY, so the gap is a decision and not an omission"
+      ;; the rule `crossings/internal-markers` already follows: a partial
+      ;; classification is worse than none, because the one real hole drowns
+      ;; in the entries nobody explained
+      (is (every? #(and (string? %) (seq %)) (vals live/unserved-options))))
+    (testing "nothing is BOTH generated and declared dropped"
+      ;; The union check above cannot see this: a key in both sets still
+      ;; satisfies it, so prose explaining why an option is missing survives
+      ;; the write that stops it being missing. Same hand-kept-twin shape
+      ;; this test exists to kill, one level up — the classification is
+      ;; itself a list that has to track the code.
+      (is (empty? (set/intersection generated dropped))
+          (str "declared dropped but actually generated: "
+               (set/intersection generated dropped))))))
+
+(deftest a-managed-app-serves-the-static-assets-it-declares
+  ;; The managed server answered 404 for every static mount, because mounts
+  ;; read the store's file manifest and the child image has no store. The
+  ;; project that hurt is the one whose whole purpose is to be LOOKED AT: a
+  ;; UI's stylesheet and its cljs bundle are the product, so "managed" meant
+  ;; an unstyled page with a dead bundle. That project switched dev.server
+  ;; off, which reads as "the feature does not apply to me" and is really
+  ;; "the feature is broken for me" — the switch hid the bug.
+  ;;
+  ;; The seam was already right: `mount-routes` takes a READER fn, not a
+  ;; store, and `file-or-resource-reader` is the filesystem one. So the fix
+  ;; is materialize-then-point, not a new mechanism.
+  (let [plan {:namespaces ['demo.app] :host "127.0.0.1" :port 1234
+              :adapter :http-kit
+              :static {"/assets" "public"}
+              :static-dir "/tmp/slopp-static-probe"}
+        code (live/serve-code plan)]
+    (testing "the generated call mounts the prefixes the store declared"
+      (is (str/includes? code "mount-routes") "no mount call was generated")
+      (is (str/includes? code "/assets"))
+      (is (str/includes? code "public")))
+    (testing "reading from the dir the parent materialized, since the child has no store"
+      (is (str/includes? code "file-or-resource-reader"))
+      (is (str/includes? code "/tmp/slopp-static-probe")))
+    (testing "and the namespace providing both is REQUIRED in the child"
+      ;; Asserting the substring "slopp.http.static" passes on the qualified
+      ;; symbol alone, so the first version of this went green while the
+      ;; generated code would still have thrown at runtime — the child had
+      ;; the symbol and not the namespace. Match the require FORM.
+      (is (str/includes? code "(require (quote slopp.http.static))")
+          "the child resolves slopp.http.static/mount-routes only if it required it"))
+    (testing "a plan with no mounts generates no routes key at all"
+      (is (not (str/includes? (live/serve-code (dissoc plan :static :static-dir))
+                              "mount-routes"))
+          "an app without mounts must not pay for the machinery"))))
+
+(deftest static-bytes-are-materialized-for-a-child-that-has-no-store
+  ;; The whole reason mounts were unserved. The child image is a separate JVM
+  ;; with no store, so the bytes have to be somewhere it can read them —
+  ;; which `file-or-resource-reader` already does, given a dir.
+  (let [put  (fn [s k v] (first (store/record-config-put s "capabilities" :manifest k v)))
+        s    (-> (store/empty-store)
+                 (put "http.enabled" "true")
+                 (put "http.static./assets" "public"))
+        s    (first (store/record-file-put s "public/app.css" "body{}"))
+        s    (first (store/record-file-put s "public/deep/x.txt" "hi"))
+        s    (first (store/record-file-put s "src/notes.md" "# not mounted"))
+        ;; tracked files carry their content inline, so the blob fallback is
+        ;; never consulted here — artifacts are the case that needs it
+        dir  (live/materialize-static! s {"/assets" "public"} (constantly nil))]
+    (testing "a mounted file lands under the dir at its manifest path"
+      (is (= "body{}" (slurp (str dir "/public/app.css")))))
+    (testing "nested paths keep their shape, so one mount serves a TREE"
+      (is (= "hi" (slurp (str dir "/public/deep/x.txt")))))
+    (testing "a file no mount covers is not copied — the dir is the mount, not the store"
+      (is (not (.exists (java.io.File. (str dir "/src/notes.md"))))))
+    (testing "no mounts means no dir, so an app without assets allocates nothing"
+      (is (nil? (live/materialize-static! s {} (constantly nil)))))))
 
 (deftest ^:external a-managed-server-carries-the-apps-assets-all-the-way-into-the-child
   ;; The wiring test. The unit tests prove `serve-code` generates a mount and
@@ -1247,3 +1247,24 @@
     (is (live/managed? st []) "a declared entry, no HTTP: managed")
     (is (live/managed? st ['w.core]) "self-served HTTP does not silence a declared entry")
     (is (not (live/managed? (store/empty-store) [])) "nothing declared, no HTTP: not managed")))
+
+(deftest a-declared-entry-is-told-where-its-assets-were-materialized
+  ;; A generated `serve!` call carries the materialized dir inside its static
+  ;; mount. A declared entry assembles its own server, and nothing told it
+  ;; where the bytes went — slopp's own dev instance 404'd its own bundle. So
+  ;; the child is told FIRST, as a system property, before any entry runs;
+  ;; and only when there is a dir to name, because a property naming nothing
+  ;; is a lie the entry would act on.
+  (let [declared {:namespaces ['demo.app] :host "127.0.0.1" :port 1234
+                  :adapter :http-kit
+                  :runnables {"app" {:main 'shop.core/-main :args [] :enabled? true}}}]
+    (testing "the property precedes every entry and names the dir"
+      (let [code (live/startup-code (assoc declared :static-dir "/tmp/x"))]
+        (is (= 2 (count code)) (pr-str code))
+        (is (str/includes? (first code) "\"slopp.static-dir\"") (pr-str code))
+        (is (str/includes? (first code) "\"/tmp/x\"") (pr-str code))
+        (is (str/includes? (second code) "shop.core/-main") (pr-str code))))
+    (testing "no dir, no property"
+      (let [code (live/startup-code declared)]
+        (is (= 1 (count code)) (pr-str code))
+        (is (not-any? #(str/includes? % "slopp.static-dir") code) (pr-str code))))))
