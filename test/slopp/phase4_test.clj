@@ -2,10 +2,11 @@
   "Per-agent attribution on every write, and fork/edit/merge end to end.
 
   Named for Phase 4 m1, which was \"many agents, ONE store/image\" over an
-  HTTP MCP transport. That transport is retired: MCP is stdio and one agent
-  per server (user, 2026-08-01). What survived is what was never about the
-  transport — attribution rides the DELTA, so it holds whoever wrote it and
-  however they connected."
+  HTTP MCP transport. That transport was retired for stdio and one agent per
+  server (user, 2026-08-01), then came back as the daemon — one process per
+  machine, MCP over HTTP, a session per agent (D-daemon, 2026-09-06). What
+  held through both is what was never about the transport — attribution
+  rides the DELTA, so it holds whoever wrote it and however they connected."
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.java.shell]
             [slopp.ops :as ops]

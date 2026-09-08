@@ -28,20 +28,19 @@
   "The identity a fresh session starts with when the caller names none: a
   generated unique id.
 
-  **The harness's conversation id is NOT read here, deliberately.** Identity
-  keys a THREAD, so it must belong to a conversation — and most sessions are
-  not one. Hundreds of tests call `open!` with no agent, and every image and
-  test-runner JVM inherits its parent's environment, so a conversation id
-  read at this depth is adopted by every subprocess slopp spawns: each one
-  claims the driving agent's thread and stamps its deltas. That was measured,
-  not feared — four mcp-tests went red the moment this function read the
-  environment, every one of them because a test session had become the
-  developer's own session.
+  **No environment is read here, deliberately.** Identity keys a THREAD, so
+  it must belong to a conversation — and most sessions are not one. Hundreds
+  of tests call `open!` with no agent, and every image and test-runner JVM
+  inherits its parent's environment, so an id read at this depth would be
+  adopted by every subprocess slopp spawns: each one would claim the driving
+  agent's thread and stamp its deltas. That was measured, not feared — four
+  mcp-tests went red the moment this function read the environment, every
+  one of them because a test session had become the developer's own session.
 
-  So the read lives at the MCP server's entry point, which is the only place
-  that genuinely knows a harness is driving it, and it arrives here as an
-  explicit `:slopp.ops/agent-id`. What is left is the honest default for
-  everyone else: this session is nobody's continuation, and it says so
+  So the thread an agent writes on is what the agent PASSES on every write,
+  and the daemon mints each session's own label at attach; both arrive here
+  as an explicit `:slopp.ops/agent-id`. What is left is the honest default
+  for everyone else: this session is nobody's continuation, and it says so
   instead of borrowing a name."
   []
   (str "s-" (subs (str (java.util.UUID/randomUUID)) 0 8)))

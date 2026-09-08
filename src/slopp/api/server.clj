@@ -18,23 +18,21 @@
   project's API wants; an agent's un-landed work is its own to read through
   its thread."
   (:require [slopp.http :as slopp.http]
-            [slopp.api.reads] [slopp.api.endpoints] [slopp.rest :as slopp.rest] [slopp.api.otel :as otel]))
+            [slopp.api.reads] [slopp.api.endpoints] [slopp.rest :as slopp.rest]))
 
 (def ^:export served-namespaces
   "Every namespace this project's API serves — endpoints AND read performers.
 
-  ONE list, exported. It had two mounts — `serve!` here and the MCP http
-  transport — and a literal repeated at both is how a namespace ends up
-  served by nobody: the compiled client bundle 404'd on every page for two
-  waves behind a 200 for the page itself, because one list got a new entry
-  and the other did not.
+  ONE list, exported. It once had two mounts — a per-session listener and
+  an MCP-over-HTTP transport — and a literal repeated at both is how a
+  namespace ends up served by nobody: the compiled client bundle 404'd on
+  every page for two waves behind a 200 for the page itself, because one
+  list got a new entry and the other did not.
 
-  The transport is retired (D-mcp-stdio-only), so `serve!` is the only mount
-  now, and that is the POINT rather than an excuse to inline it: mounting the
-  reviewer API anywhere else is what the decision rules out. This API is a
-  distinct custom API for the UI, not part of what counts as a web project,
-  and one exported list is what makes a second mount a visible choice rather
-  than a copied literal.
+  There is one mount again — the daemon, which assembles [[serving-opts]]
+  per project and delegates into it — and that is the POINT rather than an
+  excuse to inline it: one exported list is what makes a second mount a
+  visible choice rather than a copied literal.
 
   Both halves of a request live here. `slopp.api.endpoints` declares the
   `/api/*` routes; `slopp.api.reads` declares the `:http/read` performers they resolve
@@ -44,8 +42,8 @@
   than 404, which is a much worse way to find out.
 
   It is a short list now and stays that way: a project serves JSON and the
-  EDN contract, nothing else. The pages a human looks at belong to the hub,
-  which is a separate application (D-hub part 4)."
+  EDN contract, nothing else. The pages a human looks at are slopp-ui's, a
+  separate application that reads the daemon's registry."
   ['slopp.api.reads 'slopp.api.endpoints])
 
 (defn ^:export serving-opts
@@ -60,23 +58,11 @@
   Exported for the daemon, which assembles one such context PER PROJECT
   over a reader session and delegates each project's requests into it —
   the same app, the same validation, mounted at `/api/projects/<slug>/`
-  in place of the `/api/` declared here."
+  in place of the `/api/` declared here. The harness's telemetry sink is
+  NOT here: it is the daemon's own endpoint, one per machine, routing each
+  record to the project holding its thread."
   [session]
   {:http/namespaces served-namespaces
-   ;; The harness's telemetry receiver, mounted as an explicit row rather than
-   ;; declared like an endpoint. It is not part of what this project PUBLISHES
-   ;; — no contract, no generated client, a schema slopp does not own — and the
-   ;; served list above is documented to stay short for exactly that reason.
-   ;; An explicit row also keeps OTLP's own path, so the standard
-   ;; OTEL_EXPORTER_OTLP_ENDPOINT variable works with no per-signal override.
-   ;; the VAR, not the function: a bare `otel/logs` captures the value at
-   ;; serve! time, so a `--live` reload of the receiver would never reach the
-   ;; running listener. This is the blessed carrier for an in-process
-   ;; reference held in DATA, and it is what makes editing the handler take
-   ;; effect without re-serving. Adding or removing a route still needs a
-   ;; re-serve — the route TABLE is built here and the running server holds it.
-   :http/routes [{:method :post :path "/v1/logs" :auth :public
-                  :handler #'otel/logs}]
    ;; the reviewer API publishes typed contracts; anything serving them
    ;; unvalidated answers 200s nobody checked
    :http/wrap-context slopp.rest/validating

@@ -51,8 +51,8 @@
                                         'y "(ns y (:require [x :as x]))"}))))))
 
 (deftest parse-args-trampolines-main-args
-  (testing "default: mcp main, dir as the only arg"
-    (is (= {:dir "." :live? false :main 'slopp.mcp/-main :args ["."]}
+  (testing "default: the DAEMON, with no args — the dir is what boot loads, not the port"
+    (is (= {:dir "." :live? false :main 'slopp.daemon/-main :args []}
            (boot/parse-args ["." "--snapshot"]))))
   (testing "--main with NO extra args keeps the dir-arg convention"
     (is (= {:dir "/p" :live? true :main 'app.core/-main :args ["/p"]}
@@ -62,13 +62,9 @@
             :args ["push" "." "https://x/y.git"]}
            (boot/parse-args ["." "--main" "slopp.sync/-main"
                              "push" "." "https://x/y.git"]))))
-  (testing "--call is sugar for --main slopp.mcp/call-main! dir tool [args]"
-    (is (= {:dir "." :live? false :main 'slopp.mcp/call-main!
-            :args ["." "query_project"]}
-           (boot/parse-args ["." "--call" "query_project"])))
-    (is (= {:dir "/p" :live? false :main 'slopp.mcp/call-main!
-            :args ["/p" "edit_replace_form" "@/tmp/a.json"]}
-           (boot/parse-args ["/p" "--call" "edit_replace_form" "@/tmp/a.json"])))))
+  (testing "--call is retired: refused with the routed spelling, never a silent daemon"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"slopp <op>"
+                          (boot/parse-args ["." "--call" "query_project"])))))
 
 (deftest jvm-loadable-skips-cljs-namespaces
   ;; F5: the kernel boot path must NEVER JVM-load a :cljs namespace — it

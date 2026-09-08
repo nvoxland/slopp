@@ -5,7 +5,7 @@
   (:require [cheshire.core :as json]
             [clojure.test :refer [deftest is testing]]
             [slopp.daemon :as daemon]
-            [slopp.http :as slopp.http] [slopp.ops.external :as external] [slopp.ops :as ops] [slopp.cache :as cache] [slopp.mcp :as mcp] [slopp.http.routes :as routes] [clojure.string :as str]))
+            [slopp.http :as slopp.http] [slopp.ops.external :as external] [slopp.ops :as ops] [slopp.cache :as cache] [slopp.mcp :as mcp] [slopp.http.routes :as routes] [clojure.string :as str] [slopp.sync :as sync]))
 
 (defn- tmp-dir!
   "A fresh empty directory: a project nobody has written to yet. Canonical,
@@ -540,3 +540,17 @@
         "what the daemon serves is exactly what it declares")
     (testing "the project mount is a GET: the reader behind it is read-only"
       (is (= [:get] (mapv :method (filter #(= "/api/projects/:slug/**" (:path %)) declared)))))))
+
+(deftest ^:external a-checkout-carrying-a-slopp-branch-is-imported-on-first-attach
+  ;; Zero-ceremony onboarding used to ride the stdio server's start: a git
+  ;; clone carrying a slopp branch with no store was imported before serving.
+  ;; The daemon opens a project on its first attach, so that is where the
+  ;; import happens now — once per open, never again for a second attach.
+  (let [d    (tmp-dir!)
+        seen (atom [])]
+    (try
+      (with-redefs [sync/maybe-auto-import! (fn [dir] (swap! seen conj dir) nil)]
+        (daemon/attach! d "imp")
+        (daemon/attach! d "imp")
+        (is (= [d] @seen) "imported on the first attach and not the second"))
+      (finally (daemon/reset-all!)))))

@@ -122,40 +122,6 @@
           (is (seq (get-in r [:test :failures])))))
       (finally (ops/close! sess)))))
 
-(deftest parse-call-args-shapes
-  (testing "nil/blank → {}"
-    (is (= {} (mcp/parse-call-args nil)))
-    (is (= {} (mcp/parse-call-args "  "))))
-  (testing "JSON and EDN both parse, keys keywordized"
-    (is (= {:ns "demo" :limit 5} (mcp/parse-call-args "{\"ns\":\"demo\",\"limit\":5}")))
-    (is (= {:ns "demo" :limit 5} (mcp/parse-call-args "{:ns \"demo\" :limit 5}"))))
-  (testing "@file reads the file first"
-    (let [f (java.io.File/createTempFile "callargs" ".json")]
-      (spit f "{\"ns\":\"demo\"}")
-      (is (= {:ns "demo"} (mcp/parse-call-args (str "@" f))))))
-  (testing "non-map input is a clear error"
-    (is (thrown-with-msg? Exception #"JSON or EDN map"
-                          (mcp/parse-call-args "[1 2 3]")))))
-
-(deftest ^:external one-shot-call
-  (let [dir (str (java.nio.file.Files/createTempDirectory
-                  "slopp-call" (make-array java.nio.file.attribute.FileAttribute 0)))]
-    (testing "a query works with no MCP connection and returns the wire shape"
-      (let [r (mcp/call! dir "query_project" {})]
-        (is (not (:isError r)))
-        (is (string? (get-in r [:content 0 :text])))))
-    (testing "writes stay turn-gated: no open turn → tool error, not a write"
-      (let [r (mcp/call! dir "ns_create" {:ns "demo" :source "(ns demo)"
-                                          :agent "probe"})]
-        (is (:isError r))
-        (is (re-find #"turn" (get-in r [:content 0 :text])))))
-    (testing "turn_begin in one call!, the write in the NEXT (turns are durable)"
-      (mcp/call! dir "turn_begin" {:agent "probe" :intent "one-shot test"})
-      (let [r (mcp/call! dir "ns_create" {:ns "demo"
-                                          :source "(ns demo)\n(defn f [x] x)\n"
-                                          :agent "probe"})]
-        (is (not (:isError r)) (get-in r [:content 0 :text]))))))
-
 (deftest ^:external pending-intent-opens-the-turn
   ;; the plugin's UserPromptSubmit hook drops {session-id, prompt} JSON in
   ;; .slopp/pending-intent; the turn gate opens the turn from it and the
@@ -606,28 +572,6 @@
         (is (re-find #":flagged" r) r)
         (is (re-find #"rw.io/zap!" r) "the effectful undocumented fn is flagged"))
       (finally (ops/close! sess)))))
-
-(deftest tool-registry-changes-notify-the-client
-  ;; a live reload can rename/add tools (edit_move_forms replaced
-  ;; edit_extract_ns mid-session and no client could see it) — the server
-  ;; must declare tools.listChanged and emit the notification when the
-  ;; registry drifts from what it last advertised.
-  (let [sess (atom {})]
-    (testing "the capability is declared"
-      (is (true? (get-in (mcp/handle! sess {:id 1 :method "initialize"})
-                         [:result :capabilities :tools :listChanged]))))
-    (testing "no baseline advertised → nothing to invalidate"
-      (is (nil? (#'mcp/tools-note! sess))))
-    (testing "tools/list records the advertised baseline"
-      (mcp/handle! sess {:id 2 :method "tools/list"})
-      (is (some? (:slopp.mcp/tools-hash @sess)))
-      (is (nil? (#'mcp/tools-note! sess)) "freshly advertised → current"))
-    (testing "a drifted registry emits the notification, once"
-      (swap! sess assoc :slopp.mcp/tools-hash -1)
-      (let [n (#'mcp/tools-note! sess)]
-        (is (= "notifications/tools/list_changed" (:method n)))
-        (is (nil? (:id n)) "a notification carries no id"))
-      (is (nil? (#'mcp/tools-note! sess)) "baseline updated after emitting"))))
 
 (deftest query-store-rides-the-wire-read-only
   (is (some #(= "query_store" (:name %)) tools/registry)
@@ -1412,27 +1356,6 @@
           (is (re-find #":cljs-deferred-to-compile" r) r)
           (is (not (re-find #"form failed to compile" r)) r)))
       (finally (ops/close! sess)))))
-
-(deftest ^:external one-shot-call-errors-stay-readable
-  ;; The turn gate on --call is DELIBERATE (see one-shot-call: reads are free,
-  ;; writes carry provenance, and turns are durable across one-shot processes,
-  ;; so a script opens ONE turn then writes). What was broken is the error path:
-  ;; call! reported stack frames, and every result flows through text!, whose
-  ;; boundary-leak guard refuses a file:line coordinate — so a refused write
-  ;; blew up with "boundary leak — a file/line coordinate reached an agent
-  ;; response" INSTEAD of the actual reason. The gate's teaching has to survive
-  ;; its own trip through the wire.
-  (let [dir (str (java.nio.file.Files/createTempDirectory
-                  "slopp-oneshot" (make-array java.nio.file.attribute.FileAttribute 0)))
-        r   (mcp/call! dir "ns_create"
-                       {:ns "oc.core" :source "(ns oc.core)\n" :agent "probe"})
-        txt (get-in r [:content 0 :text])]
-    (is (:isError r) "an unturned write is still refused")
-    (is (re-find #"turn" txt) "and says WHY, in words the caller can act on")
-    (is (not (re-find #"boundary leak" txt))
-        "the refusal must not be replaced by the guard that its own frames tripped")
-    (is (not (re-find #"\.clj:\d+" txt))
-        "no file:line coordinate survives to the caller")))
 
 (deftest a-hint-fires-only-on-the-call-that-earned-it
   (testing "a stale streak does not attach to a call that could not have earned it"
@@ -2346,40 +2269,6 @@
 
       (finally (ops/close! sess)))))
 
-(deftest ^:external a-one-shot-CALL-says-when-another-thread-holds-work-it-cannot-see
-  ;; `--call` opens its own durable session, so it reads the BRANCH. A session
-  ;; writing through MCP reads its own THREAD. When the thread holds un-landed
-  ;; work the two disagree, and nothing said so — the CLI answer looks
-  ;; authoritative because it IS authoritative, about a different store.
-  ;;
-  ;; Measured cost, this session: roughly an hour. A write-path gate refused a
-  ;; form; I reproduced the gate over the CLI, got CLEAN, and filed the
-  ;; contradiction as a mystery. The gate was judging a half-renamed session and
-  ;; the CLI was judging the branch. Both readings were correct. The consuming
-  ;; store said it would have made the identical mistake and had avoided it only
-  ;; by habit.
-  ;;
-  ;; SILENT AT ZERO on purpose: a CI run or a fresh clone has no other threads
-  ;; and gets nothing, so the note appears exactly when it is the answer.
-  (let [dir (str (System/getProperty "java.io.tmpdir") "/slopp-callnote-" (System/nanoTime))]
-    (try
-      (let [sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "holder"})]
-        (try
-          (ops/ingest! sess 'cn.core "(ns cn.core)\n\n(defn f \"F.\" [x] x)\n")
-          (testing "the fixture really is un-landed work on a thread"
-            ;; population control: with nothing un-landed there is no
-            ;; disagreement to warn about, and the assertion below would be
-            ;; asserting the absence of a note for the wrong reason
-            (is (pos? (:unlanded (first (filter :mine (:threads (branch/thread-list sess))))))))
-
-          (let [out (str/join "\n" (map :text (:content (mcp/call! dir "query_project" {:agent "other"}))))]
-            (testing "the one-shot read SAYS it cannot see that thread"
-              (is (re-find #"(?i)un-?landed" out)
-                  (str "a one-shot read gave no sign that another thread holds work"
-                       " it cannot see, so it reads as the whole truth: " out))))
-          (finally (ops/close! sess))))
-      (finally (clojure.java.shell/sh "rm" "-rf" dir)))))
-
 (deftest a-re-serve-that-did-not-FINISH-says-so-rather-than-nothing
   ;; slopp-ui, 2026-08-23: a done went green and the app image was not
   ;; replaced, and the store served old code for twenty minutes while every
@@ -2569,102 +2458,6 @@
         (is (true? (.exists pi)))
         (is (re-find #"B's own ask" (slurp pi))))
       (finally (ops/close! sess)))))
-
-(deftest ^:external a-server-whose-CLIENT-IS-GONE-says-so-and-EXITS
-  ;; EOF on stdin is the ordinary end of an MCP server's life: the editor
-  ;; closed the pipe, or nobody was on the other end at all. `-main` handles it
-  ;; correctly — the `finally` deregisters from the hub and stops the UI
-  ;; listener, which is right, because the UI serves the LIVE session and dies
-  ;; with it by design.
-  ;;
-  ;; Two things were wrong with it and both cost a full evening across three
-  ;; agents on 2026-08-27:
-  ;;
-  ;; 1. **It said nothing.** A manual or scripted launch prints
-  ;;    `slopp UI: http://127.0.0.1:PORT/` during boot, then withdraws that
-  ;;    listener on EOF without a word. Everyone who curled the announced url
-  ;;    got nothing and concluded the code was broken — a consumer twice, and
-  ;;    this store's own agents three times between them.
-  ;; 2. **It lingered ~60s.** `(future (start-app! session))` runs on Clojure's
-  ;;    send-off pool, whose worker threads are NON-DAEMON with a 60s keepalive,
-  ;;    and nothing called `shutdown-agents`. A thread dump caught it exactly:
-  ;;    `DestroyJavaVM` RUNNABLE — main had already returned — held open by
-  ;;    `clojure-agent-send-off-pool-0` parked in `SynchronousQueue.poll`, the
-  ;;    same stack and the same `cpu=365.70ms` twelve seconds apart. An idle
-  ;;    pool worker waiting for a task that was never coming.
-  ;;
-  ;; So: alive, announced, serving nothing, silent. This test is the one
-  ;; nobody had.
-  ;;
-  ;; An EMPTY dir on purpose — the boot path is identical and there is no store
-  ;; to load, so this costs a JVM rather than a JVM plus 279 namespaces.
-  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-eof-" (System/nanoTime))
-        cp   (System/getProperty "java.class.path")
-        pb   (ProcessBuilder. ["java" "-cp" cp "clojure.main" "-e"
-                               (str "(require 'slopp.mcp) (slopp.mcp/-main \"" dir "\")")])
-        _    (.mkdirs (io/file dir))
-        proc (.start pb)]
-    (try
-      ;; close stdin immediately: this IS the condition under test
-      (.close (.getOutputStream proc))
-
-      (testing "it exits rather than lingering on an idle pool thread"
-        ;; 40s: comfortably past a correct exit and comfortably short of the
-        ;; 60s keepalive that used to hold it, so this discriminates rather
-        ;; than merely waiting long enough for anything to finish.
-        (let [done? (.waitFor proc 40 java.util.concurrent.TimeUnit/SECONDS)]
-          (when-not done? (.destroyForcibly proc))
-          (is done?
-              (str "the server was still alive 40s after its client went away."
-                   " A process that has torn down its listener and returned from"
-                   " -main is holding the JVM open on a non-daemon pool thread"))))
-
-      (testing "and it SAYS why, so a launcher is not left guessing"
-        ;; the announced url is on stderr from boot; the withdrawal has to be
-        ;; there too, or the last word anyone reads is a url that stopped
-        ;; working without comment
-        (let [err (slurp (.getErrorStream proc))]
-          (is (re-find #"(?i)stdin|client" err)
-              (str "nothing on stderr names the client going away — the last"
-                   " thing a launcher reads is the url that just stopped"
-                   " working. stderr was: " (pr-str err)))))
-
-      (finally
-        (.destroyForcibly proc)
-        (sh/sh "rm" "-rf" dir)))))
-
-(deftest a-host-can-turn-down-the-idle-images-a-server-holds
-  ;; A writer does not cost one JVM. It costs the active image, a warm spare
-  ;; that `-main` switches on for every server, and one parked image per branch
-  ;; line held for the reap TTL. Scaling writers multiplies the IDLE ones, and
-  ;; idle is where the waste is: the spare exists only to keep a JVM boot off
-  ;; the critical path, which is a latency trade nobody asked for when the
-  ;; binding constraint is memory.
-  ;;
-  ;; Both knobs are already `open!` options; only `-main` hardcoded them. The
-  ;; DEFAULTS do not move — they are what was measured — so a single-writer
-  ;; host sees no change and a swarm operator gets a dial.
-  (let [opts #'slopp.mcp/host-image-options]
-    (testing "unset: exactly today's behaviour"
-      (is (= {:slopp.ops/warm-spare? true :slopp.ops/branch-image-ttl-ms 600000}
-             (opts (constantly nil)))))
-
-    (testing "a host running many writers drops the spare and shortens the lease"
-      (is (= {:slopp.ops/warm-spare? false :slopp.ops/branch-image-ttl-ms 60000}
-             (opts {"SLOPP_WARM_SPARE" "0"
-                    "SLOPP_BRANCH_IMAGE_TTL_MS" "60000"}))))
-
-    (testing "off is spelled the two ways people spell it, and nothing else is off"
-      (is (false? (:slopp.ops/warm-spare? (opts {"SLOPP_WARM_SPARE" "false"}))))
-      (is (true? (:slopp.ops/warm-spare? (opts {"SLOPP_WARM_SPARE" "1"})))))
-
-    (testing "a TTL that is not a number keeps the default instead of becoming zero"
-      ;; The failure this refuses: a typo'd lease parsed as 0 reaps every branch
-      ;; image the instant it is parked, which reads as "branch switching got
-      ;; slow" and never as "the variable was misspelt". An unreadable setting
-      ;; must not be obeyed as its most destructive reading.
-      (is (= 600000 (:slopp.ops/branch-image-ttl-ms
-                     (opts {"SLOPP_BRANCH_IMAGE_TTL_MS" "soon"})))))))
 
 (deftest ^:external restart-can-reach-the-APP-server-not-only-the-oracle
   ;; `restart` re-images the ORACLE — the image verification runs in. It has
@@ -3678,7 +3471,7 @@
       (call! sess "ns_create" {:ns "cd.a" :source "(ns cd.a (:require [cd.b :as b]))\n(defn a \"A.\" [x] (b/b x))\n"})
       (swap! sess assoc :call-token "tok-1")
       (let [post! (fn [body]
-                    (#'mcp/http-call! {:body body :http/deps {:session sess}}))]
+                    (#'mcp/http-call! {:body body} sess))]
         (testing "a wrong or missing token is refused, and runs nothing"
           (is (= 403 (:status (post! {:tool "query_source"
                                       :arguments {:ns "cd.a"}}))))
@@ -3822,7 +3615,7 @@
   (let [sess (external/open!)]
     (try
       (swap! sess assoc :call-token "t2")
-      (let [post! (fn [body] (#'mcp/http-call! {:body body :http/deps {:session sess}}))]
+      (let [post! (fn [body] (#'mcp/http-call! {:body body} sess))]
         (testing "a FAMILY call with {op} routes exactly like the wire"
           (let [r (post! {:tool "read" :token "t2"
                           :arguments {:op "query_project"}})]
@@ -3842,7 +3635,7 @@
   (let [sess (external/open!)]
     (try
       (swap! sess assoc :call-token "t3")
-      (let [post! (fn [body] (#'mcp/http-call! {:body body :http/deps {:session sess}}))
+      (let [post! (fn [body] (#'mcp/http-call! {:body body} sess))
             r1 (post! {:tool "ns_create" :token "t3"
                        :arguments {:ns "ht.core"
                                    :source "(ns ht.core)\n(defn f \"F.\" [x] x)\n"
@@ -4159,27 +3952,6 @@
           "no scratch namespace lingers past its answer")
       (finally (ops/close! sess)))))
 
-(deftest ^:external a-read-only-one-shot-mints-no-thread
-  ;; s16 probes: thread_list after one probe showed seven lines — two agents
-  ;; and FIVE read-only one-shots (query_history, report, query_source …),
-  ;; each adopting a thread it would never write to. A one-shot read answers
-  ;; from the branch; only a write needs a line of its own.
-  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-ro-oneshot-" (System/nanoTime))
-        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "seed"})]
-    (try
-      (ops/ingest! sess 'ro.core "(ns ro.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n" :agent "seed")
-      (is (= "main" (:landed (branch/land-thread! sess))) "fixture: the seed reached main")
-      (let [conn   (:db @sess)
-            before (count (db/lines conn))]
-        (is (re-find #"ro.core" (get-in (mcp/call! dir "query_project" {}) [:content 0 :text])))
-        (is (re-find #"defn" (get-in (mcp/call! dir "read" {:op "query_search" :pattern "defn"}) [:content 0 :text])))
-        (is (= before (count (db/lines conn)))
-            (str "two reads, no new line: " (pr-str (mapv (juxt :kind :agent :status) (db/lines conn)))))
-        (mcp/call! dir "ns_add_require" {:ns "ro.core" :require "[clojure.string :as str]" :prompt "a write" :agent "w"})
-        (is (< before (count (db/lines conn))) "a one-shot write still gets its own thread"))
-      (finally (ops/close! sess)
-               (clojure.java.shell/sh "rm" "-rf" dir)))))
-
 (deftest ^:external a-tests-only-change-lands-the-red-and-waits-for-the-impl
   ;; s17 grid: \"change needs :impl steps\" was the top residual refusal (5
   ;; in one cell) — an agent landing its failing tests BEFORE writing the
@@ -4199,43 +3971,6 @@
         (is (re-find #":ok true" r) r)
         (is (re-find #":status :green" r) r))
       (finally (ops/close! sess)))))
-
-(deftest ^:external a-pinned-session-never-eats-another-sessions-ask
-  ;; s18 forensics: a five-ask lifetime landed on main with ONE turn-begin.
-  ;; The prompt hook writes the next session's ask into the shared slot,
-  ;; and the PREVIOUS session's Stop-hook `done` — a one-shot that opens
-  ;; with `:agent <its sid>` pinned, but with no claimed intent-sid — read
-  ;; it as its own: the file vanished, the next session opened no turn,
-  ;; and every form it wrote belonged to no ask. The same unowned slot is
-  ;; how s16's concurrent sessions cross-attributed a write. A pinned
-  ;; identity IS a claim.
-  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-pinned-mailbox-" (System/nanoTime))
-        a    (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "sess-A"})
-        pi   (io/file dir ".slopp" "pending-intent")]
-    (try
-      (swap! a assoc :require-turns? true)
-      (ops/ingest! a 'pm.core "(ns pm.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n" :agent "sess-A")
-      (is (= "main" (:landed (branch/land-thread! a))) "fixture: the seed reached main")
-      ;; B's hook has just written B's ask; A's one-shot done runs meanwhile
-      (spit pi "{\"session-id\":\"sess-B\",\"prompt\":\"B's ask: add g\"}")
-      (spit (io/file dir ".slopp" "pending-intent.sess-B") "{\"session-id\":\"sess-B\",\"prompt\":\"B's ask: add g\"}")
-      (mcp/call! dir "done" {:agent "sess-A" :label "A pauses"})
-      (testing "A's one-shot left B's ask where it lay"
-        (is (true? (.exists pi)))
-        (is (re-find #"B's ask" (slurp pi))))
-      (testing "and A's own session, pinned, does not take it either"
-        (call! a "query_brief" {})
-        (is (true? (.exists pi)))
-        (is (not= "B's ask: add g" (:last-intent @a))))
-      (testing "B opens pinned, reads ITS mailbox, and its write carries its ask"
-        (let [b (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "sess-B"})]
-          (try
-            (swap! b assoc :require-turns? true)
-            (is (re-find #":ok true" (call! b "edit_add_form" {:ns "pm.core" :source "(defn ^:unused-ok g \"G.\" [] 1)"})))
-            (is (re-find #":turn-intent \"B's ask" (call! b "query_history" {:ns "pm.core" :name "g"})))
-            (finally (ops/close! b)))))
-      (finally (ops/close! a)
-               (clojure.java.shell/sh "rm" "-rf" dir)))))
 
 (deftest ^:external a-handoff-arrives-with-every-ask-first-and-whole
   ;; s18 forensics over the s15/s17 handoff cells: the injected report was
@@ -4775,30 +4510,6 @@
           (is (re-find #":closed \{:closed false" r) r)))
       (finally (ops/close! sess)))))
 
-(deftest ^:external a-server-lands-its-thread-when-stdin-closes
-  ;; eval26 sonnet e26s1: sixteen green writes on a thread, the session
-  ;; ended, the async Stop hook's separate process landed nothing, and the
-  ;; next step started from a branch without them (9/11). The landing floor
-  ;; is the server's own exit path, not a hook.
-  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-land-" (System/nanoTime))
-        _    (.mkdirs (java.io.File. dir))
-        sess (external/open! {:slopp.ops/dir dir})]
-    (try
-      (call! sess "ns_create" {:ns "lx.core" :source "(ns lx.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n"})
-      (call! sess "edit_replace_form" {:ns "lx.core" :name "f" :source "(defn ^:unused-ok f \"F!\" [x] (inc x))" :prompt "never closed by the agent"})
-      (testing "the exit path lands what the agent left green on its thread"
-        (let [r (mcp/land-on-exit! sess)]
-          (is (= "main" (get-in r [:land :landed])) (pr-str r))))
-      (ops/close! sess)
-      (testing "a fresh session on the same store sees it on the branch"
-        (let [s2 (external/open! {:slopp.ops/dir dir})]
-          (try
-            (is (re-find #"\(inc x\)" (call! s2 "query_source" {:ns "lx.core" :full true})))
-            (finally (ops/close! s2)))))
-      (finally
-        (try (ops/close! sess) (catch Exception _ nil))
-        (doseq [f (reverse (file-seq (java.io.File. dir)))] (.delete ^java.io.File f))))))
-
 (deftest ^:external a-namespace-creation-sent-as-a-step-is-a-creation
   ;; eval26 opus e26o2 step 1: a change whose first step was {action
   ;; ns_create ns requires} was refused (\"unknown action\"), then one with
@@ -4914,30 +4625,6 @@
         (is (re-find #"\(ns nd\.core\s+\"Owns the eco discount rule\.\"" src) src)
         (is (not (re-find #"add the discount namespace" src)) "the doc wins over the prompt"))
       (finally (ops/close! sess)))))
-
-(deftest ^:external the-exit-landing-is-idempotent-so-a-shutdown-hook-can-share-it
-  ;; eval31 e31o3: the harness SIGTERMed the server while the stdio loop's
-  ;; finally was still landing, and fourteen green writes stayed on the
-  ;; thread. The landing runs from a JVM shutdown hook too; the two share
-  ;; one idempotent function.
-  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-hook-" (System/nanoTime))
-        _    (.mkdirs (java.io.File. dir))
-        sess (external/open! {:slopp.ops/dir dir})]
-    (try
-      (call! sess "ns_create" {:ns "hk.core" :source "(ns hk.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n"})
-      (let [first-run (mcp/land-on-exit! sess)
-            second    (mcp/land-on-exit! sess)]
-        (is (= "main" (get-in first-run [:land :landed])) (pr-str first-run))
-        (is (nil? second) "nothing left to land the second time"))
-      (testing "the hook installs once and is a thread that runs the same landing"
-        (let [t (mcp/exit-landing-hook! sess)]
-          (is (instance? Thread t))
-          (is (identical? t (mcp/exit-landing-hook! sess)) "installed once per session")
-          (.run t)
-          (is (true? (Runtime/.removeShutdownHook (Runtime/getRuntime) t)))))
-      (finally
-        (try (ops/close! sess) (catch Exception _ nil))
-        (doseq [f (reverse (file-seq (java.io.File. dir)))] (.delete ^java.io.File f))))))
 
 (deftest
   ^{:correspondence "the image-currency keys slopp.ops' write paths produce vs the wire-keys allowlist that lets a key reach the agent — a key built one layer down and dropped here is invisible, and the result LOOKS green"}
@@ -5058,40 +4745,6 @@
           (is (= 1 (:unlanded (by-id "t-one"))) (pr-str (by-id "t-one")))
           (is (= 1 (:unlanded (by-id "t-two"))) (pr-str (by-id "t-two")))))
       (finally (ops/close! sess)))))
-
-(deftest ^:external a-one-shot-write-must-name-its-thread
-  ;; A one-shot process exits without landing. A write it makes under a
-  ;; generated identity therefore sits on a line no process holds and none
-  ;; will ever land — `{:ok true}`, green, and gone. That happened twice on
-  ;; 2026-09-04, and the recovery was thread_drop by hand. So the door refuses
-  ;; the write outright and names BOTH ways to get a thread: the [slopp] block
-  ;; at the top of a hooked ask, and thread_open for a script or another
-  ;; harness — which is exactly the caller this door exists for.
-  (let [dir  (str (java.nio.file.Files/createTempDirectory
-                   "slopp-oneshot" (make-array java.nio.file.attribute.FileAttribute 0)))
-        seed (external/open! {:slopp.ops/dir dir})]
-    (try
-      (ops/ingest! seed 'os.core "(ns os.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n")
-      (finally (ops/close! seed)))
-    (let [text (fn [r] (str (:text (first (:content r)))))]
-      (testing "a write naming neither thread nor agent is REFUSED"
-        (let [r (mcp/call! dir "ns_create"
-                           {:ns "os.two" :prompt "no thread"
-                            :source "(ns os.two)\n(defn ^:unused-ok g \"G.\" [] 2)\n"})]
-          (is (:isError r) (text r))
-          (testing "and the refusal names the argument and the door that mints one"
-            (is (re-find #"thread" (text r)) (text r))
-            (is (re-find #"thread_open" (text r)) (text r)))))
-      (testing "a write naming its thread lands on that thread"
-        (let [r (mcp/call! dir "ns_create"
-                           {:ns "os.two" :thread "t-script" :prompt "scripted"
-                            :source "(ns os.two)\n(defn ^:unused-ok g \"G.\" [] 2)\n"})]
-          (is (not (:isError r)) (text r))
-          (let [rows (:threads (edn/read-string (text (mcp/call! dir "thread_list" {}))))]
-            (is (some #(= "t-script" (:thread %)) rows) (pr-str rows)))))
-      (testing "a read one-shot needs nothing — it answers from the branch and mints no thread"
-        (let [r (mcp/call! dir "query_project" {})]
-          (is (not (:isError r)) (text r)))))))
 
 (deftest ^:external thread-open-mints-or-adopts-a-line-to-write-on
   ;; The prompt hook mints a thread for a hooked ask. Everything else — a

@@ -3506,12 +3506,13 @@
       ;; drift in a since-retired check-in protocol instead, because the fact
       ;; it needed was not here to read.
       unread     (assoc :unread-declarations unread)
-      ;; this project's READ API on the daemon — `/slopp/projects/<slug>/api`:
-      ;; JSON, plus the surface documents under it. The address to hand a
-      ;; PROGRAM (a client generator, a script, slopp-ui); a human wants
-      ;; slopp-ui's pages, which read the same registry. Set by the daemon at
-      ;; attach, so a self-contained stdio server — which serves nothing over
-      ;; HTTP — has no line here to hand out.
+      ;; this project's READ API on the daemon — `/api/projects/<slug>`, the
+      ;; `/api/<resource>` of its contract mounted there: JSON, plus the
+      ;; surface documents under it. The address to hand a PROGRAM (a client
+      ;; generator, a script, slopp-ui); a human wants slopp-ui's pages, which
+      ;; read the same registry. Set by the daemon at attach, so a
+      ;; self-contained stdio server — which serves nothing over HTTP — has no
+      ;; line here to hand out.
       (:api-url @session) (assoc :api (:api-url @session))
       ;; the APP slopp is running for this project, when it is running one.
       ;; Its only other announcement is a line on the server's stderr, which

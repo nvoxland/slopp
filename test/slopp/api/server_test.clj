@@ -1,7 +1,7 @@
 (ns slopp.api.server-test
-  "The project listener's two promises: it serves the CALLER's session (the
-  reason it is not the MCP transport), and its address is derived rather than
-  fixed, so two projects on one machine never fight for a port."
+  "The project API's one remaining promise: the list of namespaces it serves
+  is checked against what declares endpoints, so a route cannot be served by
+  nobody. The listener that used to live here is the daemon's now."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.api.server :as server]
             [clojure.set :as set] [clojure.string :as str]))

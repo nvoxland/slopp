@@ -68,9 +68,13 @@
         roots   (into #{'slopp.mcp/call-tool!}
                       (for [nsx  prod
                             e    (store/forms st nsx)
-                            :let [nm (store/form-symbol (:node e))]
-                            :when (= '-main nm)]
-                        (symbol (str nsx) "-main")))
+                            :let [nm (store/form-symbol (:node e))
+                                  m  (store/form-name-meta e)]
+                            ;; the mains, and every DECLARED endpoint: the
+                            ;; daemon's surface is assembled from metadata,
+                            ;; so no call edge reaches a route from -main
+                            :when (and nm (or (= '-main nm) (:rest/path m) (:http/read m)))]
+                        (symbol (str nsx) (str nm))))
         reached (loop [seen #{} todo (vec roots)]
                   (if-let [v (peek todo)]
                     (if (seen v)

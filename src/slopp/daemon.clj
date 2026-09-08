@@ -10,7 +10,7 @@
             [slopp.http :as slopp.http]
             [slopp.mcp.http :as mcp.http]
             [slopp.ops :as ops]
-            [slopp.ops.external :as external] [cheshire.core :as json] [slopp.api.otel :as api.otel] [slopp.otel :as slopp.otel] [slopp.store.db :as db] [slopp.api.server :as server] [slopp.mcp :as mcp] [slopp.rest :as slopp.rest]))
+            [slopp.ops.external :as external] [cheshire.core :as json] [slopp.api.otel :as api.otel] [slopp.otel :as slopp.otel] [slopp.store.db :as db] [slopp.api.server :as server] [slopp.mcp :as mcp] [slopp.rest :as slopp.rest] [slopp.sync :as sync]))
 
 (defonce ^:private state
   ;; `:projects` {dir {:slug :dir :opened-at :sessions #{sid}
@@ -187,11 +187,18 @@
   the dir's basename) when this is the first thing to reach for it:
   `[proj first?]`. The record carries the project's CHECK QUEUE — the atom
   every session on it shares, so two full_checks at one content are one
-  run. Under the lock; the caller holds it."
+  run. Under the lock; the caller holds it.
+
+  The first open is also where zero-ceremony onboarding happens: a git
+  checkout carrying a slopp branch whose store is absent or empty is
+  imported before anything reads it (`sync/maybe-auto-import!`, a no-op
+  for everything else). It rode the stdio server's start once; a project
+  is opened here now."
   [dir slug]
   (if-let [p (get-in @state [:projects dir])]
     [p false]
-    (let [p {:slug        (slug-for slug dir (set (map :slug (vals (:projects @state)))))
+    (let [_ (sync/maybe-auto-import! dir)
+          p {:slug        (slug-for slug dir (set (map :slug (vals (:projects @state)))))
              :dir         dir
              :opened-at   (System/currentTimeMillis)
              :sessions    #{}
@@ -587,8 +594,9 @@
   through a connection opened for the batch and closed after it. What
   names no thread this daemon has ever placed is counted and dropped,
   never guessed at. A body that is not an OTLP export is the contract's
-  400, the non-retryable answer; anything that is answers 200, as
-  [[slopp.api.otel/logs]] explains."
+  400, the non-retryable answer; anything that is answers 200 — an
+  exporter retries on anything else, and a batch this daemon could not
+  place is not one it wants again."
   [req]
   (let [r (api.otel/decode (:body req))]
     (if (:bad r)
