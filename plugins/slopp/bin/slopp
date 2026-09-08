@@ -1,7 +1,7 @@
 #!/bin/bash
 # slopp CLI — the same release jar the MCP server runs, for direct use:
-#   slopp <dir>                                serve MCP on a store (stdio)
-#   slopp --call <tool> [json|edn|@file]       one-shot tool call, no session
+#   slopp <op> [json|edn|@file]                one tool call, routed to the machine's daemon (started on demand)
+#   slopp --call <op> [json|edn|@file]         the same call, the long-standing spelling
 #   slopp --main slopp.sync/-main import .     build the store from the repo's slopp branch
 #   slopp --main slopp.sync/-main test .       isolated suite from a store build
 #   slopp --doctor                             self-check the plugin wiring end-to-end
@@ -156,34 +156,55 @@ PYEOF
     ;;
 esac
 
-# ---- route the normalized call to the RUNNING server, else the JVM ----
+# ---- route the call to the machine's daemon, starting one if none answers ----
+# There is no other way to run a tool call: the one-shot JVM that used to
+# open the store here stranded its writes on a thread nothing landed, and
+# the kernel refuses --call by name now. A call with no daemon STARTS one
+# (the same on-demand start the plugin's pipe does) and waits for it.
 if [ -n "$TOOL" ] && [ -s "$ARGSFILE" ]; then
-  if [ -z "${SLOPP_NO_ROUTE:-}" ] && [ -f "$HOME/.slopp/daemon.json" ]; then
-    set +e
-    python3 - "$TOOL" "$ARGSFILE" <<'PYEOF'
-import json, os, sys, time, threading, urllib.request
-tool, argsfile = sys.argv[1], sys.argv[2]
-headers = {"Content-Type": "application/json"}
-def live(path):
-    pf = json.load(open(path))
+  python3 - "$TOOL" "$ARGSFILE" "$0" <<'PYEOF'
+import json, os, subprocess, sys, time, threading, urllib.request
+tool, argsfile, me = sys.argv[1], sys.argv[2], sys.argv[3]
+headers = {"Content-Type": "application/json", "X-Slopp-Dir": os.getcwd()}
+DAEMON_FILE = os.path.expanduser("~/.slopp/daemon.json")
+def live():
+    pf = json.load(open(DAEMON_FILE))
     os.kill(int(pf["pid"]), 0)
+    with urllib.request.urlopen(pf["url"].rstrip("/") + "/status", timeout=2) as r:
+        if r.status != 200:
+            raise RuntimeError("daemon not answering")
     if not pf.get("token"):
         raise RuntimeError("daemon file carries no token")
     return pf
+def ensure():
+    try:
+        return live()
+    except Exception:
+        pass
+    port = os.environ.get("SLOPP_DAEMON_PORT", "7357")
+    print(f"slopp: no daemon answering — starting one on port {port}", file=sys.stderr)
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+    subprocess.Popen([me, "daemon", port], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, env=env, start_new_session=True)
+    deadline = time.time() + 90
+    while time.time() < deadline:
+        try:
+            return live()
+        except Exception:
+            time.sleep(0.3)
+    raise RuntimeError("the daemon did not come up in 90s")
 try:
-    # THE DAEMON: one slopp for the machine, every project by dir.
+    pf = ensure()
     # `slopp <op>` names its project by cwd (X-Slopp-Dir), so a project
     # nobody has attached is opened for the call and reaped when idle.
-    pf = live(os.path.expanduser("~/.slopp/daemon.json"))
     url = pf["url"].rstrip("/") + "/projects/_/call"
-    headers["X-Slopp-Dir"] = os.getcwd()
     token = pf["token"]
     args = json.load(open(argsfile))
     if not isinstance(args, dict):
         raise RuntimeError("arguments must be a JSON object")
 except Exception as e:
-    print(f"slopp: fast path unavailable ({e})", file=sys.stderr)
-    sys.exit(3)
+    print(f"slopp: cannot reach a daemon ({e}) — `slopp daemon status` says what is recorded", file=sys.stderr)
+    sys.exit(2)
 body = json.dumps({"tool": tool, "arguments": args, "token": token}).encode()
 stop = threading.Event()
 def beat():
@@ -197,18 +218,24 @@ try:
         out = json.load(r)
 except Exception as e:
     stop.set()
-    print(f"slopp: fast path failed ({e})", file=sys.stderr)
-    sys.exit(3)
+    print(f"slopp: the daemon refused or dropped the call ({e})", file=sys.stderr)
+    sys.exit(2)
 stop.set()
 print(out.get("text", ""))
 sys.exit(1 if out.get("isError") else 0)
 PYEOF
-    rc=$?
-    set -e
-    if [ "$rc" -ne 3 ]; then rm -f "$ARGSFILE"; exit "$rc"; fi
-    echo "slopp: falling back to the one-shot JVM (slower; no progress until it answers)" >&2
-  fi
-  set -- --call "$TOOL" "@$ARGSFILE"
+  rc=$?
+  rm -f "$ARGSFILE"
+  exit "$rc"
+fi
+
+# A bare <dir> used to serve MCP over stdio on that store, one JVM per
+# session. That server is retired: the daemon is the only server, and the
+# plugin's entry is a pipe onto it. Say so rather than boot the kernel with
+# a project dir as if it were the daemon's own.
+if [ -d "${1:-}" ] && ! printf '%s\n' "$@" | grep -qx -- '--main'; then
+  echo "slopp: the per-session stdio server is retired — 'slopp daemon' runs the machine's one slopp, and the plugin's server entry is a pipe onto it" >&2
+  exit 2
 fi
 
 checksum() {
@@ -241,14 +268,14 @@ if [ "${1:-}" = "--doctor" ]; then
   [ -n "${SLOPP_LIVE:-}" ] && say "ok " "SLOPP_LIVE set — server tracks the store live"
   if [ -f ".slopp/store.db" ]; then
     if [ -n "${SLOPP_JAR:-}" ] || [ -f "$JAR" ]; then
-      probe_jar="${SLOPP_JAR:-$JAR}"
       # query_project, not query_namespaces — the latter has never been a
       # tool, so this probe reported FAIL on every healthy install with a
-      # store. A self-check that names a tool must name a real one.
-      if out=$(java -jar "$probe_jar" --call query_project 2>/dev/null | tail -1); then
-        say "ok " "store probe: query_project -> ${out:0:60}…"
+      # store. A self-check that names a tool must name a real one. Routed
+      # through the daemon like every call, so it also proves the daemon.
+      if out=$("$0" query_project '{}' 2>/dev/null | tail -1); then
+        say "ok " "store probe via the daemon: query_project -> ${out:0:60}…"
       else
-        say "FAIL" "store at .slopp/store.db but the probe call failed"; rc=1
+        say "FAIL" "store at .slopp/store.db but the routed probe call failed ('slopp daemon status')"; rc=1
       fi
     fi
   else

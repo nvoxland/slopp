@@ -269,9 +269,12 @@ about verification.
 ## Server flags
 
 ```sh
-slopp <dir>              # serve MCP over stdio
-slopp <dir> --live       # hot-reload the server's own namespaces as the store changes
-slopp <dir> --snapshot   # freeze the loaded version at startup
-slopp --call <tool> ...  # one-shot call, no session
-slopp --doctor           # self-check java, jar, hooks, skills, store probe
+slopp daemon [port]      # the daemon: one slopp for the machine (the plugin starts it on demand)
+slopp daemon stop        # stop the recorded one; `status` asks it
+slopp <op> [json]        # one tool call, routed to the daemon
+slopp --doctor           # self-check java, jar, hooks, skills, store probe (through the daemon)
 ```
+
+`SLOPP_LIVE=1` makes the daemon hot-reload its own namespaces as the store
+it booted from changes (the self-host loop); the default freezes the loaded
+version at startup.

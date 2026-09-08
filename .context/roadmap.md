@@ -730,9 +730,12 @@ cannot tell them apart.
   external suite green against the daemon. **Retired 2026-09-07 (night):**
   the per-session listener code (`start-ui!`, `ui_serve`, `.slopp/ui-port`,
   `slopp.api.server`'s listener half, the hub heartbeat `slopp.hub` and the
-  `slopp.hub.port` capability). `SLOPP_DAEMON=0` still runs a self-contained
-  stdio server, but it serves nothing over HTTP; the read API, the call door
-  and the telemetry sink are the daemon's only.
+  `slopp.hub.port` capability). **Retired 2026-09-08 (Phase 3, ahead of
+  the eval rerun):** the stdio server itself (`slopp.mcp/-main`, `serve!`),
+  the one-shot `--call` JVM door, the harness identity, and `SLOPP_DAEMON=0`.
+  The daemon is the only server; the kernel boots it by default; `bin/slopp
+  <op>` starts one on demand. Still owed: the eval rerun against the daemon,
+  the jar head in the registry, shared oracle pools per branch.
 
 Not in P5: conflict awareness before land, merging slopp-ui's code, pinned
 always-open projects, the daemon as a scheduler.

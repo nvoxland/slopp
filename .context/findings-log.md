@@ -3015,3 +3015,28 @@ reading sessions through the pipe and reading the daemon's RSS.
   one. The docstring literal itself is, so `{match "<whole doc>" source
   "<new doc>"}` works and a 79-line docstring is not the retype the rule
   guards against — the form's code is untouched.
+
+## 2026-09-08 — the stdio server retired
+
+- **Reach is not what the graph says.** The wire-reachability self-check
+  rooted at the mains and `call-tool!` reported `record-tool-call!` and
+  `record-otel!` unreachable the moment the stdio loop went, because the
+  daemon's routes are assembled from metadata and no `-main` calls them.
+  Declared endpoints and read performers are roots now. A check whose roots
+  are "how the outside gets in" has to follow the outside when it moves.
+- **A daemon started from a shell has no plugin root.** `help {topic
+  change}` answered the cheat-sheet because `CLAUDE_PLUGIN_ROOT` is set only
+  for processes the plugin starts; the pipe-started daemon has it, one
+  started by hand does not. The op card never needed the files; it is
+  answered first now. The topic files still need the plugin root, so a
+  hand-started daemon answers `help {topic web}` with the cheat-sheet — the
+  fix for that is to let the pipe start the daemon.
+- **`--call` reached further than the store.** `bin/extract-projection.sh`
+  materialized through `java -jar … --call build`; with `--call` refused it
+  routes through the CLI, which starts a daemon from the jar it was handed
+  (`SLOPP_JAR`) on a bare CI box. The routed door takes the op's own
+  arguments (`{dir}`), not the family envelope (`{op dir}`) — found on the
+  first run.
+- **The uber build refuses a stale materialization**, and every land makes
+  the last one stale: the order is `build {dir target/jar-src}`, then
+  `clojure -T:build uber`, with nothing landed between.

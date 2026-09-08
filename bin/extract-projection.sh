@@ -75,7 +75,9 @@ trap 'rm -rf "$TMP"' EXIT
 # not be this one.
 # Boot chatter is noise on a good run and the only diagnosis on a bad one, so it
 # is held and shown only if the build fails.
-if ! java -jar "$JAR" --call build "{\"op\":\"build\",\"dir\":\"$TMP\"}" >"$TMP/.build.log" 2>&1; then
+# Routed through the daemon like every call (`--call` at the JVM is retired):
+# the CLI starts one from THIS jar if none answers, so a bare CI box works.
+if ! SLOPP_JAR="$JAR" "$ROOT/plugins/slopp/bin/slopp" build "{\"dir\":\"$TMP\"}" >"$TMP/.build.log" 2>&1; then
   echo "FAIL: build! could not materialize the store into $TMP" >&2
   cat "$TMP/.build.log" >&2
   exit 2

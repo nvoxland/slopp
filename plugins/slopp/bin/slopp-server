@@ -12,24 +12,12 @@ set -euo pipefail
 
 DIR="${1:-${CLAUDE_PROJECT_DIR:-$PWD}}"
 
-# Dev knob: SLOPP_LIVE=1 adds --live, hot-reloading the server's own
-# namespaces as the store changes — the self-host loop (set it in the repo's
-# .claude/settings.json env). Default stays snapshot: a fresh session always
-# boots the current store anyway.
-# THE DAEMON is the default: this entry is a PIPE onto the machine's one
+# THE DAEMON is the only server: this entry is a PIPE onto the machine's one
 # slopp (bin/slopp-pipe.py) — the same stdio contract from Claude Code's
 # side, MCP over HTTP from the daemon's, one process for every project on
-# the box, started on demand. SLOPP_DAEMON=0 keeps a JVM per session (the
-# self-contained fallback, and the baseline the evals were measured
-# against). Flipped 2026-09-07 after the memory census, the two-session
-# check and the whole external suite ran green against the daemon.
-if [ "${SLOPP_DAEMON:-1}" != "0" ]; then
-  cd "$DIR"
-  exec python3 "$(cd "$(dirname "$0")" && pwd)/slopp-pipe.py"
-fi
-
-ARGS=("$DIR")
-if [ "${SLOPP_LIVE:-}" = "1" ]; then
-  ARGS+=("--live")
-fi
-exec "$(cd "$(dirname "$0")" && pwd)/slopp" "${ARGS[@]}"
+# the box, started on demand. The per-session JVM this used to launch
+# (SLOPP_DAEMON=0) is retired: it served nothing over HTTP once the daemon
+# took every surface, and one slopp per machine is the shape that was
+# chosen (D-daemon, 2026-09-06; retired 2026-09-08).
+cd "$DIR"
+exec python3 "$(cd "$(dirname "$0")" && pwd)/slopp-pipe.py"

@@ -7013,3 +7013,29 @@ run against the daemon.
   spec dropped batching; the pipe never sent one), and a batch is the
   contract's 400. Ruling 9 above (keep `/api` in project contracts) stands
   and is what makes the mount rule mechanical.
+- **The stdio server and the one-shot door retired (Nathan, 2026-09-08:
+  "clean out all the residue, including stdio server").** Deleted:
+  `slopp.mcp/-main` and `serve!` (the newline-JSON loop), `tools-note!`,
+  `exit-landing-hook!`/`land-on-exit!`, `host-image-options`,
+  `call-main!`/`call!`/`parse-call-args`/`foreign-unlanded-note` (the
+  one-shot `--call` JVM), `slopp.project.harness` (the harness identity read
+  at the stdio entry), `slopp.api.otel/logs` with the `/v1/logs` row every
+  project context mounted beside the daemon's sink, the `[req]` arity of
+  `http-call!`, and 13 tests that pinned them. The kernel's bare entry is
+  `slopp.daemon/-main` with no args (`java -jar slopp.jar <dir>` is a
+  daemon; the dir is what boot loads, never the port) and `--call` is
+  refused by name. `bin/slopp <op>` routes to the daemon and STARTS one if
+  none answers — the same on-demand start the pipe does — so there is no
+  JVM fallback and no daemon-less path to a store: the CLI-stranding bug
+  closes by construction. `slopp-server` is the pipe, unconditionally.
+  Auto-import of a checkout carrying a slopp branch moved from the stdio
+  server's start to the daemon's first open of a project. What the
+  retirement surfaced: the wire-reachability self-check's roots were the
+  mains and `call-tool!`, which no longer reach a route assembled from
+  metadata — declared endpoints and read performers are roots now; and
+  `help {topic <op>}` answered the cheat-sheet in a process with no plugin
+  root (a daemon started from a shell), so an op's card is answered before
+  the plugin's files are asked for. Phase 3's condition — rerun the evals
+  against the daemon before retiring — was NOT met; the retirement is on
+  the whole external suite green against the daemon and two days of every
+  session on it, and the eval rerun stays owed.

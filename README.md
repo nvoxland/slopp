@@ -46,7 +46,7 @@ that built-in tools never pay. The `slopp-setup` skill has the details.
 # IMPORT the slopp branch into a store — the working dir stays your checkout
 git clone https://github.com/nvoxland/slopp3.git proj && cd proj
 java -jar slopp.jar --main slopp.sync/-main import .
-java -jar slopp.jar          # serve the store over MCP stdio
+java -jar slopp.jar ~/.slopp # the daemon: one slopp for the machine (the plugin starts it for you)
 
 # slopp then syncs against refs/heads/slopp of THIS repo (git-remote ".");
 # you push/pull origin — both branches — with regular git

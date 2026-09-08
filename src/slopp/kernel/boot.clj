@@ -2,9 +2,10 @@
   "Run a slopp store's program directly from the db — no exported source.
   Renders every namespace's source from `<dir>/.slopp/store.db` (the
   `elements` table) and loads it into the CURRENT JVM in dependency order, then
-  invokes the entry point (default `slopp.mcp/-main`). This is the in-process
-  analogue of `slopp.image/load-ns!`, and the general counterpart to `build!`
-  (which spits files): the store is RUN, not materialized.
+  invokes the entry point (default `slopp.daemon/-main`: one slopp for the
+  machine). This is the in-process analogue of `slopp.image/load-ns!`, and
+  the general counterpart to `build!` (which spits files): the store is RUN,
+  not materialized.
 
   It is self-contained on purpose (only next.jdbc + clojure core, no internal
   slopp requires) so it can bootstrap slopp itself. Two modes: `--snapshot`
@@ -26,12 +27,12 @@
 ^:reads (defn- open-conn
   "The store db under `dir`, or NIL when `dir` has no store yet.
 
-  A read must never CREATE: the kernel boots in whatever directory the MCP
-  client launched the server in, so an unadopted project has to stay
-  untouched (D-serving-is-not-adoption). This runs before
-  `slopp.mcp/-main`, which is why gating the server layer alone was not
-  enough — boot got there first and made the store the server then found.
-  Materialization belongs to the first write (`api.session/ensure-db!`)."
+  A read must never CREATE: the kernel boots in whatever directory it was
+  launched in, so an unadopted project has to stay untouched
+  (D-serving-is-not-adoption). This runs before the entry point, which is
+  why gating the server layer alone was not enough — boot got there first
+  and made the store the server then found. Materialization belongs to the
+  first write (`api.session/ensure-db!`)."
   [dir]
   (let [f (io/file dir ".slopp" "store.db")]
     (when (.exists f)
@@ -547,7 +548,7 @@
   Why a measurement and not the watcher's `:failed` map: those disagree, and
   friction 20a is the case where the map was wrong. A rename left the watcher
   retrying a namespace that no longer EXISTS — failing forever, reporting the
-  host stale, costing a milestone a fresh JVM — while the process held every
+  host stale, costing a commit-point a fresh JVM — while the process held every
   live namespace at current source. A comparison against the store's current
   sources answers that correctly and for free: a deleted namespace is simply
   not in `now`, so it cannot be stale."}
@@ -985,35 +986,44 @@
 
 ;; --- entry ---
 (defn parse-args
-  "Parse boot's CLI: <dir> [--snapshot|--live] [--main ns/fn arg...]
-                           [--call tool [args]].
+  "Parse boot's CLI: <dir> [--snapshot|--live] [--main ns/fn arg...].
   Everything after the --main symbol passes through to it verbatim (:args);
-  with no explicit args the main receives [dir] (the server convention).
-  --call is sugar for --main slopp.mcp/call-main! <dir> <tool> [args] — one
-  tool call, result on stdout (args = JSON, EDN, or @file)."
+  with no explicit args the main receives [dir] (the app convention). With
+  no --main at all the entry is the DAEMON, `slopp.daemon/-main`, with no
+  args: the dir is what boot loads slopp's code from and never the port, so
+  a bare `java -jar slopp.jar <dir>` is one slopp for the machine on the
+  default port. `--call` is retired — a tool call from a shell is
+  `slopp <op> '{…}'`, routed to the daemon, which starts one on demand —
+  and is refused here by name rather than silently starting a daemon."
   [args]
   (let [[pre post] (split-with #(not (#{"--main" "--call"} %)) args)
         dir  (or (first (remove #(str/starts-with? % "--") pre))
                  (System/getProperty "user.dir"))
         extra (vec (drop 2 post))]
-    (if (= "--call" (first post))
+    (when (= "--call" (first post))
+      (throw (ex-info (str "--call is retired: a one-shot JVM opened the store with no"
+                           " daemon and stranded its writes. Run `slopp <op> '{…}'` —"
+                           " it routes to the machine's daemon and starts one if none answers.")
+                      {:args (vec args)})))
+    (if (second post)
       {:dir   dir
        :live? (boolean (some #{"--live"} pre))
-       :main  'slopp.mcp/call-main!
-       :args  (into [dir] (rest post))}
+       :main  (symbol (second post))
+       :args  (if (seq extra) extra [dir])}
       {:dir   dir
        :live? (boolean (some #{"--live"} pre))
-       :main  (symbol (or (second post) "slopp.mcp/-main"))
-       :args  (if (seq extra) extra [dir])})))
+       :main  'slopp.daemon/-main
+       :args  []})))
 
 ^:unsafe (defn -main
   "clojure -M -m slopp.kernel.boot <dir> [--snapshot | --live] [--main ns/fn arg...]
 
   Load the store's program into THIS jvm and run its entry point (default
-  slopp.mcp/-main <dir>). --live tracks the store and hot-reloads changed
-  namespaces (the watcher is a DAEMON thread — it never keeps the JVM alive
-  after the program exits). --main trampolines any store CLI — in a fileless
-  tree this is THE entry point: e.g.
+  slopp.daemon/-main with no args: one slopp for the machine, on the default
+  port — the dir is what is loaded, never the port). --live tracks the store
+  and hot-reloads changed namespaces (the watcher is a DAEMON thread — it
+  never keeps the JVM alive after the program exits). --main trampolines any
+  store CLI — in a fileless tree this is THE entry point: e.g.
     clojure -M -m slopp.kernel.boot . --main slopp.sync/-main push . <url>"
   [& args]
   (let [{:keys [dir live? main args]} (parse-args args)]

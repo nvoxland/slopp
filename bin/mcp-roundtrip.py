@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Drive a slopp MCP server over RAW stdio and print each call's round-trip
-wall — the server's cost with no harness around it.
+"""Drive slopp over RAW stdio — the plugin's pipe onto the daemon, which is
+what Claude Code runs — and print each call's round-trip wall: slopp's cost
+with no harness around it.
 
-    bin/mcp-roundtrip.py <project-dir> [--jar target/slopp.jar] [--jfr out.jfr]
-                         [--rounds 3] [--calls calls.json]
+    bin/mcp-roundtrip.py <project-dir> [--rounds 3] [--calls calls.json]
 
 Why this exists: a transcript's tool_use→tool_result span is the HARNESS's
 view of a call, and it includes whatever the harness does around the call.
@@ -13,9 +13,11 @@ and store — the gap was Claude Code's auto-mode permission classifier, not
 slopp. Run this first whenever "slopp is slow" is the claim; it says which
 side of the pipe to look at.
 
-`--jfr` attaches Java Flight Recorder to the server (dumped on exit); read it
-with `jfr print --events jdk.ExecutionSample out.jfr`. `--calls` is a JSON
-list of {"tool": ..., "args": {...}}; the default plan is read-only ops.
+To profile the daemon, attach Flight Recorder to its pid from the outside
+(`jcmd $(python3 -c 'import json;print(json.load(open("$HOME/.slopp/daemon.json"))["pid"])') JFR.start …`)
+and read the dump with `jfr print --events jdk.ExecutionSample out.jfr`.
+`--calls` is a JSON list of {"tool": ..., "args": {...}}; the default plan
+is read-only ops.
 """
 import argparse
 import json
@@ -35,18 +37,16 @@ DEFAULT_PLAN = [
 
 ap = argparse.ArgumentParser()
 ap.add_argument("dir")
-ap.add_argument("--jar", default=os.environ.get("SLOPP_JAR", "target/slopp.jar"))
-ap.add_argument("--jfr")
 ap.add_argument("--rounds", type=int, default=3)
 ap.add_argument("--calls")
 a = ap.parse_args()
 
 plan = [(c["tool"], c.get("args", {})) for c in json.load(open(a.calls))] if a.calls else DEFAULT_PLAN
-cmd = ["java"]
-if a.jfr:
-    cmd.append(f"-XX:StartFlightRecording=filename={a.jfr},settings=profile,dumponexit=true")
-cmd += ["-jar", os.path.abspath(a.jar), a.dir]
-env = {k: v for k, v in os.environ.items() if k not in ("SLOPP_LIVE", "CLAUDE_PROJECT_DIR")}
+# the plugin's own entry: a pipe onto the machine's daemon, started on
+# demand, the project named by the cwd — exactly what the harness runs
+here = os.path.dirname(os.path.abspath(__file__))
+cmd = ["python3", os.path.join(here, "..", "plugins", "slopp", "bin", "slopp-pipe.py")]
+env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
 p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr,
                      env=env, text=True, bufsize=1, cwd=a.dir)
 n = [0]

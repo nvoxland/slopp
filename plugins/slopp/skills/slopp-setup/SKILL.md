@@ -60,13 +60,12 @@ rule names the plugin's server, so it covers every family and op. Nothing
 changes under the other modes: a prompting mode asks you per call anyway,
 and `bypassPermissions` never classifies.
 
-**One slopp for the machine (the default).** The plugin's server entry is a
-PIPE onto the daemon — one process for every project on the box, MCP over
-HTTP behind a stdio face — not a JVM per session. It starts a daemon if
-none answers, names the project by its cwd, and changes nothing about the
-tools. `"env": {"SLOPP_DAEMON": "0"}` in the same `.claude/settings.json`
-keeps a JVM per session instead. What the daemon buys and how it is
-reached: `help {topic "running"}`, under "One slopp for the machine".
+**One slopp for the machine.** The plugin's server entry is a PIPE onto
+the daemon — one process for every project on the box, MCP over HTTP
+behind a stdio face — never a JVM per session. It starts a daemon if none
+answers, names the project by its cwd, and changes nothing about the
+tools. What the daemon buys and how it is reached: `help {topic
+"running"}`, under "One slopp for the machine".
 
 ## Importing a repo that's published this way
 
@@ -177,22 +176,24 @@ ordinary git.
 - `deps_add {lib, version}` — the store's dependency manifest (hot-loads
   into the live image; no restart).
 
-## The one-shot CLI (scripts, CI, no MCP session)
+## The CLI (scripts, CI, no MCP session)
 
-`slopp --call <tool> [args]` runs ONE tool call against the store in the
-current directory and prints the result — args as JSON, EDN, or `@file`.
-A READ needs nothing more. A WRITE needs a `thread` — the line it goes to —
-and a one-shot write that names none is REFUSED, naming the door:
-`slopp --call thread_open '{}'` mints an id (`t-xxxxxxxx`), and a script
-passes that SAME id on every later call, so its writes share one line and
-its `done` lands them (turn state lives in the store too, so the thread
-covers later calls). `agent` is an optional label and defaults to the
-thread. Useful shapes:
+`slopp <op> [args]` runs ONE tool call against the store in the current
+directory and prints the result — args as JSON, EDN, or `@file`. It routes
+to the machine's daemon and starts one if none answers, so a bare CI box
+works; the call runs on a session the daemon keeps for that project. A
+READ needs nothing more. A WRITE needs a `thread` — the line it goes to —
+and a write that names none is REFUSED, naming the door: `slopp
+thread_open '{}'` mints an id (`t-xxxxxxxx`), and a script passes that
+SAME id on every later call, so its writes share one line and its `done`
+lands them (turn state lives in the store too, so the thread covers later
+calls). `agent` is an optional label and defaults to the thread. `--call`
+is the long-standing spelling of the same call. Useful shapes:
 
 ```sh
-slopp --call query_project
-slopp --call thread_open '{"thread":"ci"}'
-slopp --call commit_point '{"description":"release 1.2","thread":"ci"}'
+slopp query_project
+slopp thread_open '{"thread":"ci"}'
+slopp commit_point '{"description":"release 1.2","thread":"ci"}'
 slopp --main slopp.sync/-main test .    # isolated suite from a store build
 ```
 

@@ -10,8 +10,8 @@ on first use.
     [Command-line apps](cli-apps.md).
 
 ```sh
-slopp <dir>                             # serve MCP over stdio on a store
-slopp --call <tool> [json|edn|@file]    # one-shot tool call, no session
+slopp <op> [json|edn|@file]             # one tool call, routed to the machine's daemon
+slopp daemon [port] | stop | status     # the daemon: one slopp for the machine, started on demand
 slopp --main slopp.sync/-main import .  # build a store from the repo's slopp branch
 slopp --main slopp.sync/-main test .    # isolated suite from a store build
 slopp --doctor                          # self-check the wiring end to end
@@ -41,11 +41,13 @@ slopp --call report '{"contains":"invoice"}'
 slopp --call commit_point '{"description":"release 1.2","agent":"ci"}'
 ```
 
-`agent` names the identity a call works under, and every tool takes it. Turn
-state lives in the store, so a `turn_begin` under that agent covers later calls
-— pass the SAME `agent` to each one. Omit it and every invocation is its own
-session with its own generated id, which is right for a one-shot read and wrong
-for a script that means to finish what it started.
+Every call routes to the machine's daemon, which starts if none answers,
+and runs on a session the daemon keeps for the project in the current
+directory. A WRITE names its `thread` — the line it goes to — and a write
+that names none is refused, naming `thread_open`; a script passes the same
+id on every call so its writes share one line and its `done` lands them.
+`agent` is an optional label and defaults to the thread. `--call <op>` is
+the same call in its long-standing spelling.
 
 This is the surface for scripts, CI steps, and for answering "how do I check
 this myself" without an MCP client.

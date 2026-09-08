@@ -158,12 +158,13 @@ apart: a tool call's span there is the harness's view and includes whatever
 the harness does around the call. Measure the server alone first:
 
 ```sh
-bin/mcp-roundtrip.py /path/to/project --jar target/slopp.jar [--jfr out.jfr]
-jfr print --events jdk.ExecutionSample out.jfr      # hot stacks, if the server was the cost
+bin/mcp-roundtrip.py /path/to/project
+jcmd <daemon pid> JFR.start filename=out.jfr        # profile the daemon from outside, if it was the cost
+jfr print --events jdk.ExecutionSample out.jfr
 ```
 
-It speaks raw JSON-RPC over stdio to a fresh server and prints each call's
-round trip. On 2026-09-03 the transcripts showed a ~1.3 s floor under every
+It speaks raw JSON-RPC over stdio to the plugin's pipe onto the daemon —
+exactly what Claude Code runs — and prints each call's round trip. On 2026-09-03 the transcripts showed a ~1.3 s floor under every
 slopp call while this measured 0.00–0.38 s for the same ops: the gap was
 Claude Code's auto-mode permission classifier (a model call per unallowed
 MCP tool call), fixed by allowing the server in `.claude/settings.json`,
