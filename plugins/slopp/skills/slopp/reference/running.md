@@ -116,9 +116,9 @@ prefix:
 | `POST /api/otel/v1/logs` | the one telemetry sink: `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:7357/api/otel` |
 
 It records itself in `~/.slopp/daemon.json` (`url pid token`); `slopp
-<op>` and the prompt hook route there when that pid is alive, and fall
-back to a session's own listener otherwise. A second `slopp daemon` refuses
-and names the live one. The daemon boots slopp's OWN code from the dir it
+<op>` and the prompt hook route there, and `slopp <op>` starts a daemon
+when that file names nothing alive. A second `slopp daemon` on the same
+port refuses with the bind diagnosis. The daemon boots slopp's OWN code from the dir it
 is given, so the verb passes a neutral one (`~/.slopp`); from a checkout of
 slopp itself, `SLOPP_LIVE=1 SLOPP_DAEMON_DIR=$PWD slopp daemon` hot-reloads
 the daemon's tooling as the store changes. A write through the door with
