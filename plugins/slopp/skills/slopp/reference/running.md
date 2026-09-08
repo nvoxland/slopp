@@ -118,7 +118,8 @@ and the pages a human opens sit beside it:
 | `GET /p/<slug>/**` | that project's pages — timeline, change review, form permalinks, the namespace index — a browser app over the mounted API; `session_brief` reports it as `:pages`; 404 off the declared page table |
 | `GET /css/style.css`, `GET /assets/**` | the stylesheet and the compiled bundle, from the daemon's own store under `--live` or from the jar |
 
-It records itself in `~/.slopp/daemon.json` (`url pid token`); `slopp
+It records itself in `~/.slopp/daemon.json` (`url pid token`, readable by
+its owner only — the token is the write door's secret); `slopp
 <op>` and the prompt hook route there, and `slopp <op>` starts a daemon
 when that file names nothing alive. A second `slopp daemon` on the same
 port refuses with the bind diagnosis. The daemon boots slopp's OWN code from the dir it

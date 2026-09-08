@@ -3076,11 +3076,74 @@ reading sessions through the pipe and reading the daemon's RSS.
   the entry where the bytes are (`slopp.static-dir`). A refresh that changes
   the load order re-boots the child, so the fix reached 7358 at the `done`
   that landed it.
-- **An inner comment can be patched.** `patch {match "<the ;; lines>" text
-  "<new lines>"}` replaces a comment inside a form; `match`/`source` is for
-  code and whole docstrings. Written down because the first attempt assumed
-  comments were unreachable and planned a whole-form retype.
+- **A patch step's shape is `{action patch, ns, name, replace [{match source} …]}`.**
+  A step written with `match`/`source` at the TOP level of the entry is
+  dropped silently (the change reports only the steps it recognised), and the
+  `text` field is not a replacement — used on a comment it deleted the
+  matched lines and reported green. An inner comment cannot be matched on its
+  own; match the smallest complete form around it, or replace the form.
 - **Lint reports `unresolved-var` for `slopp.ui.views` vars from
   `slopp.ui.app` (`views/toggle-doc`, `views/at-project`, …) at done.** The
   vars exist and the suite is green; the namespace is large and `:cljc`.
   Carried as warnings, not errors; not root-caused.
+
+## 2026-09-08 — the codebase review: what an adversarial pass found
+
+Asked for a review of the whole store. Triage by `review_scan` (4185 forms;
+evidence 1241 observed / 227 static / 32 none / 6 off-platform) and
+`query_depends {modules true}`, then four read-only `slopp-reader` passes told
+to ASSUME bugs and prove each one in the image before reporting. All four ran
+in degraded mode — the agent's tool allowlist still named the pre-regrouping
+tool names — and proved their findings through `slopp --call` instead. The
+whole-store verdict was green throughout; none of this was a test failure.
+
+**Confirmed and fixed the same day** (each with a red-first test, landed on
+main, `full_check` green; the store's own numbers are in the tests):
+
+- *Threads.* A rebase-land orphaned main's commit points (`D-markers-travel`).
+  A red done landed one episode later, because attribution was episode-scoped
+  and the land is thread-scoped (`ops.external/thread-edited`,
+  `db/unlanded-deltas`). `full_check`'s shared queue handed a delivered
+  verdict back as `:joined` after a config write, and keyed on a
+  content-blind digest (`store/content-signature`; the entry goes on
+  delivery). A thread holding only a declaration was re-forked and lost it
+  (`db/unlanded-work-count` — a deny-list of the markers, the one list that
+  fails toward pinning).
+- *Daemon.* An asset request minted a phantom project through `api!`, whose
+  half-record then threw in detach/reap/reset and killed the reaper for the
+  life of the process (`own-reader!`, `fnil` on the session set). A detach
+  during the app boot leaked the child JVM (the boot stops what it started
+  when its project closed; `stop-app!` reads inside its lock). The write door
+  did the work before checking the token. `boot!` leaked a `slopp-static*`
+  temp dir per boot — 1,181 on the machine. The daemon file was
+  world-readable with the token in it. `-main` parsed its port bare and named
+  a dead pid as live.
+- *Gates.* `rest.prefix` was not a capability, so the partition gate's only
+  escape was refused; a trailing slash inverted the partition. Collision gates
+  compared strings while the router compares segments (`edit.http/route-shape`).
+  `http-path-pattern` admitted `?`, `#`, `:` and `""`. Two parsers of
+  `http.static.*` disagreed about a slash in the key. A -test namespace calling
+  `prefix-links` switched the dangling-link join off store-wide; `request-paths`
+  read fixtures (17 of 17 rows here) and ignored `:webapp/base` despite its
+  docstring. `rest-stale-client` could never clear (the signature hashed
+  content routes; the url path recorded no signature). The document selfcheck
+  matched substrings (`app.context/`, `my-ideas/`).
+- *UI.* The endpoint page's execute call was the one request not measured
+  through `at-project`, so it went to the origin's `/api/…`, which the daemon
+  does not serve; the through view's lens bar linked
+  `/store/form/x/through/y/source`; the fixture performer's comments narrated
+  the retired hub proxy; `slopp.ui.basepath` was three-quarters dead. (The
+  review also called the pages' `(:lens state)` read dead — it is a TEST
+  seam: `every-declared-lens-actually-renders-something-different` writes it
+  to prove each lens page equals the base page under that lens. Removing it
+  went red and it stays, with a docstring saying so.)
+- *Manifest/tooling.* The `slopp.hub` module's edges outlived its namespaces;
+  `daemon → cache` was overstated. The `slopp-reader` agent's tool list is
+  the grouped tools now.
+
+**Left open**, recorded in `ideas/logs/review-2026-09-08-frictions.md`:
+seventeen unused module edges, 43 alias drifts, `code-deltas-after` counting
+config as code, the unconfirmed suspicions (config registers not
+thread-private, `undo` past the thread base, `images-up` blind to app
+children), and the tool frictions the review itself hit.
+

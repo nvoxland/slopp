@@ -7100,3 +7100,30 @@ user's path) stands; the next standing dogfood is a project under
   open `ideas/` logs were copied into this repo's `ideas/logs/` as
   `slopp-ui-*` (local, gitignored) because their frictions are about USING
   slopp.
+
+## D-markers-travel (2026-09-08) — a rebase-land carries the branch's commit points and telemetry markers; verdict markers stay behind
+
+**Decision.** When a thread lands onto a branch that moved (the rebase case
+of `land-thread!`), the merge that brings the branch INTO the thread now
+re-mints the branch's `:commit`, `:turn-begin`/`:turn-end`, `:read-cost` and
+`:otel` markers onto the thread (`slopp.store.fields/travelling-markers`,
+`merge-logs {:carry-markers true}`), with `:merged-from` provenance and a
+`:commit`'s `:target` re-pointed at the nearest delta the thread holds.
+`:verify`, `:done`, `:observe` and `:merge` still do not travel. A plain
+`branch_merge` carries nothing, as before.
+
+**Why.** The rebase-land ends by re-pointing the branch at the thread's
+head, and the ancestry walk follows one parent — so everything the merge
+left behind left main's ancestry for good. On this store's own journal 652
+commit markers had been written and 644 were reachable from main; a
+commit already projected to git (`d7f844ac23b01` → `d7fa8976`) was off main.
+`session_brief`, `query_commits`, the recent window and the git projection
+all read commits from the branch's ancestry, and the standing whole-store
+verdict was retired after every rebase-land because its marker vanished.
+This closes the "commit-point markers deliberately do not travel; the
+travel question is an open decision" note that `fields/markers` carried.
+
+**Why the verdict markers stay.** Each is a claim about the content that
+PRECEDED it on its own line, and a rebase puts the thread's own content before
+the copy — a carried green would stand over code it never graded.
+
