@@ -312,7 +312,12 @@ Three workflows, all on the human-owned branch, all checking out `slopp/main`:
 - `native-proof.yml` — a sample app built through slopp, compiled to a GraalVM
   native binary, executed.
 - `release.yml` — manual dispatch with a version input: build the uberjar,
-  smoke it bare, tag it, attach it to a Release.
+  smoke it as the daemon it is (boot from a neutral dir, answer
+  `/api/status`), tag it, attach it to a Release. It builds from `slopp/main`,
+  so the projection carries the compiled bundle as bytes (artifacts project
+  at their manifest paths) — a release without it serves pages whose script
+  404s. After the release, bump `VERSION` and `SHA256` in
+  `plugins/slopp/bin/slopp` and the plugin manifest's version by hand.
 
 GitHub only runs push-triggered workflows from the pushed ref's tree, so these
 run on `workflow_dispatch` and a schedule rather than per push.

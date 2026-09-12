@@ -35,13 +35,30 @@ jobs:
         run: |
           clojure -Sdeps '{:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}} :paths ["."]}' \
             -M -e '((requiring-resolve (quote build/uber)) {:src "src"})'
-      - name: Smoke it (zero args — Main-Class from the store's config)
-        env:
-          SLOPP_CLOJURE: clojure
+      # The jar IS the daemon now (the stdio server is retired), so the smoke
+      # is the daemon's: boot from a neutral dir, bind a port, answer
+      # /api/status, and stop. A hang here is a release that never ships,
+      # which is the right failure for a jar that cannot come up.
+      - name: Smoke it — the daemon binds, answers /api/status, and stops
         run: |
-          mkdir -p /tmp/smoke && cd /tmp/smoke
-          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
-            | java -jar "$GITHUB_WORKSPACE/target/slopp.jar" | grep -q serverInfo
+          # -Duser.home, not $HOME: the JVM reads its home from the OS, so
+          # the daemon file lands where the JVM thinks home is
+          SMOKE=/tmp/smoke-home; mkdir -p "$SMOKE/.slopp"
+          java -Duser.home="$SMOKE" -jar "$GITHUB_WORKSPACE/target/slopp.jar" "$SMOKE/.slopp" --main slopp.daemon/-main 7399 > /tmp/smoke.log 2>&1 &
+          pid=$!
+          ok=""
+          for i in $(seq 1 120); do
+            if curl -sf http://127.0.0.1:7399/api/status > /tmp/status.json; then ok=1; break; fi
+            sleep 1
+          done
+          kill "$pid" 2>/dev/null || true
+          if [ -z "$ok" ]; then
+            cat /tmp/smoke.log
+            echo "::error::the daemon did not answer /api/status within 120s"
+            exit 1
+          fi
+          cat /tmp/status.json; echo
+          test -s "$SMOKE/.slopp/daemon-7399.json" || { echo "::error::the daemon recorded no daemon file"; ls -la "$SMOKE/.slopp"; exit 1; }
       - name: Tag + release
         env:
           GH_TOKEN: ${{ github.token }}

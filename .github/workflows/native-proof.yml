@@ -19,29 +19,41 @@ jobs:
         env:
           SLOPP_CLOJURE: clojure
         run: |
-          python3 - <<'PY'
-          import json, subprocess
-          reqs = [
-              {"name": "turn_begin", "arguments": {"agent": "ci", "intent": "native-image proof"}},
-              {"name": "ns_create", "arguments": {"agent": "ci", "ns": "app.core",
-                  "source": "(ns app.core)\n(defn greet [nm] (str \"hello, \" nm \"!\"))\n(defn -main [& args] (println (greet (or (first args) \"native\"))))"}},
-              {"name": "build", "arguments": {"dir": "/tmp/app", "main": "app.core/-main", "name": "app"}},
-              {"name": "turn_end", "arguments": {"agent": "ci"}},
-          ]
-          lines = [json.dumps({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}})]
-          for i, r in enumerate(reqs, 1):
-              lines.append(json.dumps({"jsonrpc":"2.0","id":i,"method":"tools/call","params":r}))
-          p = subprocess.run(["clojure","-M","-m","slopp.mcp","/tmp/appstore"],
-                             input="\n".join(lines)+"\n", capture_output=True, text=True, timeout=1200)
-          for line in p.stdout.splitlines():
-              line=line.strip()
-              if not line: continue
-              m=json.loads(line)
-              if m.get("id",0)>=1:
-                  r=m.get("result",{})
-                  txt=" ".join(c.get("text","") for c in r.get("content",[])) if r else json.dumps(m.get("error"))
-                  print(m["id"], txt[:120])
-                  assert ":error" not in txt[:12], txt
+          python3 - /tmp/appstore <<'PY'
+          import base64, json, os, subprocess, sys, time, urllib.request
+          # The daemon is the only server: start one from the checkout (src/ is
+          # on the classpath), then drive it the way `slopp <op>` does — one
+          # POST per call to the write door, the project named by X-Slopp-Dir,
+          # every write on a thread, the token from the daemon's own file.
+          STORE = sys.argv[1]; os.makedirs(STORE, exist_ok=True)
+          home = os.path.expanduser("~"); os.makedirs(home + "/.slopp", exist_ok=True)
+          log = open("/tmp/daemon.log", "w")
+          daemon = subprocess.Popen(["clojure", "-M", "-m", "slopp.daemon", "7357"], stdout=log, stderr=subprocess.STDOUT)
+          for _ in range(180):
+              try:
+                  urllib.request.urlopen("http://127.0.0.1:7357/api/status", timeout=2); break
+              except Exception:
+                  time.sleep(1)
+          else:
+              print(open("/tmp/daemon.log").read()); raise SystemExit("the daemon did not come up")
+          token = json.load(open(home + "/.slopp/daemon.json"))["token"]
+          def call(tool, **args):
+              args.setdefault("thread", "ci"); args.setdefault("agent", "ci")
+              body = json.dumps({"tool": tool, "arguments": args, "token": token}).encode()
+              req = urllib.request.Request("http://127.0.0.1:7357/api/projects/_/call", data=body,
+                                           headers={"Content-Type": "application/json", "X-Slopp-Dir": STORE})
+              with urllib.request.urlopen(req, timeout=1200) as r:
+                  out = json.load(r)
+              txt = out.get("text", "") if isinstance(out, dict) else json.dumps(out)
+              print(tool, txt[:160].replace("\n", " "))
+              assert not (isinstance(out, dict) and out.get("isError")), txt
+              return out
+          call("turn_begin", intent="native-image proof")
+          call("ns_create", ns="app.core", prompt="the proof app",
+               source="(ns app.core)\n(defn greet \"G.\" [nm] (str \"hello, \" nm \"!\"))\n(defn -main \"M.\" [& args] (println (greet (or (first args) \"native\"))))")
+          call("build", dir="/tmp/app", main="app.core/-main", name="app")
+          call("turn_end")
+          daemon.terminate()
           PY
           cd /tmp/app && bash build-native.sh
       - name: Run the binary
@@ -62,69 +74,84 @@ jobs:
       - uses: DeLaGuardo/setup-clojure@13.0
         with:
           cli: latest
-      # No slim-install step, and its absence is the proof. slopp-web is never
-      # published to a remote (D-framework-injection part 2), so this runner has
-      # no way to resolve it — slopp VENDORS the framework into the built tree.
+      # No slim-install step, and its absence is the proof. slopp's http layer is
+      # never published to a remote (D-framework-injection part 2), so this
+      # runner has no way to resolve it — slopp VENDORS the framework into the
+      # built tree.
       # A green run here means a slopp-built web app is self-contained on a
       # machine that has never seen the artifact.
       - name: Build a web app through slopp, with no framework artifact anywhere
         env:
           SLOPP_CLOJURE: clojure
         run: |
-          python3 - <<'PY'
-          import base64, json, subprocess
+          python3 - /tmp/webstore <<'PY'
+          import base64, json, os, subprocess, sys, time, urllib.request
+          # The daemon is the only server: start one from the checkout (src/ is
+          # on the classpath), then drive it the way `slopp <op>` does — one
+          # POST per call to the write door, the project named by X-Slopp-Dir,
+          # every write on a thread, the token from the daemon's own file.
+          STORE = sys.argv[1]; os.makedirs(STORE, exist_ok=True)
+          home = os.path.expanduser("~"); os.makedirs(home + "/.slopp", exist_ok=True)
+          log = open("/tmp/daemon.log", "w")
+          daemon = subprocess.Popen(["clojure", "-M", "-m", "slopp.daemon", "7357"], stdout=log, stderr=subprocess.STDOUT)
+          for _ in range(180):
+              try:
+                  urllib.request.urlopen("http://127.0.0.1:7357/api/status", timeout=2); break
+              except Exception:
+                  time.sleep(1)
+          else:
+              print(open("/tmp/daemon.log").read()); raise SystemExit("the daemon did not come up")
+          token = json.load(open(home + "/.slopp/daemon.json"))["token"]
+          def call(tool, **args):
+              args.setdefault("thread", "ci"); args.setdefault("agent", "ci")
+              body = json.dumps({"tool": tool, "arguments": args, "token": token}).encode()
+              req = urllib.request.Request("http://127.0.0.1:7357/api/projects/_/call", data=body,
+                                           headers={"Content-Type": "application/json", "X-Slopp-Dir": STORE})
+              with urllib.request.urlopen(req, timeout=1200) as r:
+                  out = json.load(r)
+              txt = out.get("text", "") if isinstance(out, dict) else json.dumps(out)
+              print(tool, txt[:160].replace("\n", " "))
+              assert not (isinstance(out, dict) and out.get("isError")), txt
+              return out
           png = b"\x89PNG\r\n\x1a\n<3slopp"
           src = '''(ns app.web
-            (:require [slopp.web :as web]
-                      [slopp.web.static :as static]))
+            (:require [slopp.http :as http]
+                      [slopp.http.static :as static]))
 
-          (defn ^{:web/method :get :web/path "/hello" :web/auth :public} hello
+          (defn ^{:http/method :get :rest/path "/api/hello" :http/auth :public
+                  :rest/response [:map [:msg :string]]} hello
             "The proof endpoint."
             [_req]
-            {:status 200 :body {:msg "hi from slopp-web"}})
+            {:status 200 :body {:msg "hi from slopp-http"}})
 
           (defn -main
             "Serve the declared endpoints + the /assets mount, and block."
             [& _]
-            (web/serve! {:web/namespaces '[app.web]
-                         :web/routes (static/mount-routes {"/assets" "public"}
-                                                          (static/file-or-resource-reader "."))
-                         :web/port 8087})
+            (http/serve! {:http/namespaces '[app.web]
+                          :http/routes (static/mount-routes {"/assets" "public"}
+                                                            (static/file-or-resource-reader "."))
+                          :http/port 8087})
             @(promise))
           '''
-          reqs = [
-              {"name": "turn_begin", "arguments": {"agent": "ci", "intent": "native web proof"}},
-              {"name": "config_file", "arguments": {"agent": "ci", "path": "capabilities", "key": "http.enabled", "value": "true", "prompt": "ci"}},
-              {"name": "config_file", "arguments": {"agent": "ci", "path": "capabilities", "key": "http.static./assets", "value": "public", "prompt": "ci"}},
-              {"name": "file_put", "arguments": {"agent": "ci", "path": "public/logo.png", "encoding": "base64", "content-type": "image/png",
-                                                 "content": base64.b64encode(png).decode(), "prompt": "ci asset"}},
-              {"name": "ns_create", "arguments": {"agent": "ci", "ns": "app.web", "source": src}},
-              {"name": "build", "arguments": {"agent": "ci", "dir": "/tmp/webapp", "main": "app.web/-main", "name": "webapp"}},
-              {"name": "turn_end", "arguments": {"agent": "ci"}},
-          ]
-          lines = [json.dumps({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}})]
-          for i, r in enumerate(reqs, 1):
-              lines.append(json.dumps({"jsonrpc":"2.0","id":i,"method":"tools/call","params":r}))
-          p = subprocess.run(["clojure","-M","-m","slopp.mcp","/tmp/webstore"],
-                             input="\n".join(lines)+"\n", capture_output=True, text=True, timeout=1800)
-          for line in p.stdout.splitlines():
-              line=line.strip()
-              if not line: continue
-              m=json.loads(line)
-              if m.get("id",0)>=1:
-                  r=m.get("result",{})
-                  txt=" ".join(c.get("text","") for c in r.get("content",[])) if r else json.dumps(m.get("error"))
-                  print(m["id"], txt[:140])
-                  assert ":error" not in txt[:12], txt
+          call("turn_begin", intent="native web proof")
+          call("config_file", path="capabilities", key="http.enabled", value="true", prompt="ci")
+          call("config_file", path="capabilities", key="rest.enabled", value="true", prompt="ci")
+          call("config_file", path="capabilities", key="http.static./assets", value="public", prompt="ci")
+          call("file_put", path="public/logo.png", encoding="base64", content_type="image/png",
+               content=base64.b64encode(png).decode(), prompt="ci asset")
+          call("ns_create", ns="app.web", source=src, prompt="the proof web app")
+          call("build", dir="/tmp/webapp", main="app.web/-main", name="webapp")
+          call("turn_end")
+          daemon.terminate()
           PY
           cd /tmp/webapp && bash build-native.sh
       - name: Run the binary and curl the endpoint and the asset
         run: |
           cd /tmp/webapp
           ./webapp &
-          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8087/hello && break || sleep 1; done
-          body=$(curl -s http://127.0.0.1:8087/hello)
-          echo "$body"; echo "$body" | grep -q "hi from slopp-web"
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8087/api/hello && break || sleep 1; done
+          body=$(curl -s http://127.0.0.1:8087/api/hello)
+          echo "$body"; echo "$body" | grep -q "hi from slopp-http"
           curl -s http://127.0.0.1:8087/assets/logo.png -o got.png
           printf '\x89PNG\r\n\x1a\n<3slopp' > want.png
           cmp got.png want.png && echo "asset bytes exact"
