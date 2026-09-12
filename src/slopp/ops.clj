@@ -183,7 +183,14 @@
       (safely! #(when-let [^java.sql.Connection c (:conn line)]
                   (.close c))))
     (safely! #(when-let [^java.util.Timer t (:reaper @session)] (.cancel t)))
-    (swap! session dissoc :image :spare :db :reaper :lines :ephemeral-dir?))
+    ;; the framework dir this session's images were vendored into: a temp
+    ;; dir per session, and nothing removed it — 221 on one machine
+    (safely! #(when-let [d (:framework-dir @session)]
+                (letfn [(rm! [^java.io.File f]
+                          (when (.isDirectory f) (run! rm! (.listFiles f)))
+                          (.delete f))]
+                  (rm! (java.io.File. ^String d)))))
+    (swap! session dissoc :image :spare :db :reaper :lines :ephemeral-dir? :framework-dir))
   nil)
 
 (defn sync-with-journal!
@@ -310,6 +317,18 @@
                           (recur (load!) (into acc new) (inc n))
                           [res (not-empty acc)]))))
                   [res nil])
+                ;; the FRAMEWORK heal. The image was launched for a store that used
+                ;; no family this namespace reaches for — every fresh web
+                ;; project's first namespace — and a family is vendored at
+                ;; launch, so no amount of stubbing makes `slopp.http` resolve.
+                ;; Re-prepare the image FOR the candidate and load once more.
+                res     (if (and load? (:err res)
+                                 (seq (boot/framework-files))
+                                 (seq (set/difference (engine/used-families candidate)
+                                                      (engine/used-families base))))
+                          (do (engine/fresh-image! session candidate)
+                              (load!))
+                          res)
                 res     (if (and stubbed (nil? (:err res))) {} res)]
             (cond
               (:err res)

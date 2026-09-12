@@ -16,7 +16,7 @@
             [slopp.ops :as ops]
             [slopp.store.db :as db]
             [slopp.git :as git]
-            [slopp.store :as store] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store.render :as store.render])
+            [slopp.store :as store] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store.render :as store.render] [slopp.store.artifacts :as artifacts] [slopp.ops.engine :as engine])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]
            [org.eclipse.jgit.lib ObjectId Repository]
@@ -585,4 +585,37 @@
               (is (= :walk (get-in r [:via "main"])) (pr-str (:via r)))
               (is (string? (get-in r [:refs "main"]))))
             (finally (git/close-ctx! ctx)))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external an-artifact-projects-as-real-bytes-at-its-manifest-path
+  ;; An artifact keeps its bytes OUT of the journal: the store holds the sha
+  ;; and the recipe, the on-disk cache holds the file. The projection wrote
+  ;; authored files and nothing else, so a checkout of the projected tree had
+  ;; no `public/cljs/main.js` — and CI jars exactly that checkout, so a release
+  ;; built there served pages whose script 404'd. The bytes ride the tree now,
+  ;; at the manifest path, from the cache of the machine that projects.
+  (let [dir  (temp-dir)
+        sess (external/open! {:slopp.ops/dir dir})]
+    (try
+      (is (pos? (:forms (ops/ingest! sess 'ap.core "(ns ap.core)\n(defn ^:unused-ok f [] 1)\n"))))
+      (let [bs    (.getBytes "console.log('bundle')" "UTF-8")
+            entry (artifacts/put! dir bs {:kind :build :tool "compile_client"}
+                                  :content-type "application/javascript")]
+        (engine/commit-appended! sess #(first (store/record-artifact % "public/cljs/main.js" entry)) []))
+      (let [r (external/commit-point! sess "v1" :agent "alice")]
+        (is (nil? (:error r)) (pr-str r)))
+      (let [ctx (git/open-ctx! dir)]
+        (try
+          (let [tip  (get-in (git/ensure-projected! ctx) [:refs "main"])
+                repo (:slopp.git/repo ctx)]
+            (is (= "console.log('bundle')" (blob-text repo tip "public/cljs/main.js"))
+                "the bundle rides the tree at its manifest path, as its bytes")
+            (is (some? (blob-text repo tip "src/ap/core.clj")) "the control: source still does"))
+          (finally (git/close-ctx! ctx))))
+      (testing "and the git-free merge base carries it too, so an import does not see it as a change"
+        (let [conn (:db @sess)
+              base (git/commit-point-tree (db/line-deltas conn (db/trunk-line-id! conn))
+                                          #(db/get-blob conn %)
+                                          :dir dir)]
+          (is (= "console.log('bundle')" (String. ^bytes (get base "public/cljs/main.js") "UTF-8")))))
       (finally (ops/close! sess)))))

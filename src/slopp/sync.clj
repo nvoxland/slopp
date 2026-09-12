@@ -964,7 +964,8 @@
                   ;; carries it, and an import is asked for rarely
                   (db/line-deltas (:db @session)
                                   (or (:line @session) (db/trunk-line-id! (:db @session))))
-                  #(db/get-blob (:db @session) %))]
+                  #(db/get-blob (:db @session) %)
+                  :dir (:dir @session))]
         (if (nil? base)
           {:error (str "nothing to import ONTO — this store has no commit-points,"
                        " so there is no base to merge against. commit_point"

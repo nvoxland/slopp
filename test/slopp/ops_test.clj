@@ -2730,3 +2730,34 @@
         (is (empty? (ops/otel-measurements (atom {:store (store/empty-store)})
                                            :since "nope"))))
       (finally (.close conn)))))
+
+(deftest ^:external the-first-namespace-to-reach-for-a-framework-family-loads-anyway
+  ;; A consumer's very first web namespace: the image was launched for a
+  ;; store that used no family, families are vendored at launch, and a JVM
+  ;; cannot gain a classpath dir afterwards — so `(:require [slopp.http])`
+  ;; died with FileNotFound as a \"compile error\", on every fresh web project,
+  ;; and the only way past it was a restart. Reproduced in-process from the
+  ;; release jar before this was written. The write re-prepares the image FOR
+  ;; the candidate and loads again; and the dir it vendors into goes with the
+  ;; session.
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-fw-heal-" (System/nanoTime))
+        _    (.mkdirs (java.io.File. dir))
+        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "fw"})]
+    (try
+      (if-not (seq (boot/framework-files))
+        (is true "this process carries no vendorable framework (no META-INF/slopp/framework-files.edn on its classpath), so the heal has nothing to vendor here; the release smoke drives it from the jar")
+        (do
+          (ops/config-file! sess "capabilities" :key "http.enabled" :value "true" :prompt "p" :agent "fw")
+          (let [r (ops/ingest! sess 'fw.main
+                               (str "(ns fw.main (:require [slopp.http :as http]))\n\n"
+                                    "(defn -main \"M.\" [& _] (http/serve! {:http/namespaces '[fw.main] :http/port 8099}) @(promise))\n")
+                               :agent "fw")]
+            (is (nil? (:error r)) (str "the first namespace reaching for slopp.http loads: " (pr-str (:error r))))
+            (is (pos? (:forms r 0))))
+          (let [fwd (:framework-dir @sess)]
+            (is (and fwd (.isDirectory (java.io.File. ^String fwd))) "the session vendored a framework dir")
+            (is (some #(= "http.clj" (.getName ^java.io.File %)) (file-seq (java.io.File. ^String fwd)))
+                "and the http family is in it")
+            (ops/close! sess)
+            (is (not (.exists (java.io.File. ^String fwd))) "and the dir goes with the session"))))
+      (finally (ops/close! sess) (clojure.java.shell/sh "rm" "-rf" dir)))))

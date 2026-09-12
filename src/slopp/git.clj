@@ -28,7 +28,7 @@
             [next.jdbc :as jdbc]
             [slopp.build :as build]
             [slopp.store.db :as db]
-            [slopp.store.render :as store.render] [slopp.store :as store] [slopp.index.refs :as refs] [slopp.store.fields :as fields])
+            [slopp.store.render :as store.render] [slopp.store :as store] [slopp.index.refs :as refs] [slopp.store.fields :as fields] [slopp.store.artifacts :as artifacts])
   (:import [java.nio.charset StandardCharsets]
            [java.time Instant ZoneOffset]
            [org.eclipse.jgit.dircache DirCache DirCacheEntry]
@@ -324,129 +324,6 @@
                       (store.render/render-ns store n)]))
         (keys (:namespaces store))))
 
-(defn ^:export commit-point-tree
-  "{path content} for the tree the LAST commit-point in `deltas` projects — folded
-  from the journal and rendered, **with no git repo anywhere**. nil when there
-  is no commit-point yet. `deltas` is the line's journal, oldest first
-  (`slopp.store.db/line-deltas`); the value does not carry it, and an import
-  is asked for rarely enough to read it then.
-
-  This is the merge BASE for an import that did not come through git. Export
-  is one-way; import is the narrow case where an external tool changed an
-  export and the change should come back as ordinary tracked form edits, and
-  nothing about that requires the other tool to have used git — it requires a
-  tree of files and a base to diff against. Git supplies a merge-base commit;
-  a directory supplies nothing, and this is the answer the store already had.
-
-  It shares `source-tree` and `commit-paths` with `project-journal!` rather
-  than recomputing them, and that is the whole correctness argument: a base
-  differing from the projection by so much as the generated `deps.edn` would
-  report phantom changes on paths nobody touched, on every import, forever.
-
-  A marker normally targets the delta immediately before it; a retroactive
-  `commit_point {:target …}` names an earlier one, and the fold stops there."
-  [deltas blob-of]
-  (let [marker (last (filter #(= :commit (:op %)) deltas))]
-    (when marker
-      (let [upto (or (:target marker) (:id marker))
-            st   (reduce (fn [st d]
-                           (let [st' (or (store/replay-delta st d) st)]
-                             (if (= (:id d) upto) (reduced st') st')))
-                         (store/empty-store) deltas)]
-        (commit-paths (source-tree (refs/arrange-all st)) (:deps marker) (:files marker)
-                      (:config marker) blob-of)))))
-
-;; ---------------------------------------------------------------------------
-;; projection
-(defn project-journal!
-  "Walk one journal's deltas in order, minting a git commit in the in-memory
-  repo for every :commit marker whose object isn't already present. Parent =
-  the previous marker's sha (journal order IS the chain); `:base` seeds the
-  chain — a cloned store grafts its first commit-point onto the remote commit it
-  was cloned at. A marker carrying `:git-sha` (a pull/import) is ADOPTED, not
-  minted: the remote commit itself becomes the chain node (its object arrives
-  by fetch; the remote durably holds its own history). A pinned sha is reused
-  only when its object is live in this repo; on a fresh repo the object is
-  re-inserted deterministically (same sha). Returns the tip sha (= base when
-  no markers) or nil.
-
-  **Each commit-point's tree is DERIVED, not stored.** The store is folded from
-  the journal as this walk proceeds, so reaching a marker means holding the
-  store as it stood there, and the tree is `render-ns` over it. Commit-points
-  used to carry a byte-exact snapshot of every namespace instead — 82 MB
-  across 272 of them here, 39% of the journal — because comments lived
-  positionally and could not be reconstructed. They are form-owned content
-  now, so the log is a complete account and the snapshot has no job.
-
-  ONE pass matters: folding from empty per marker is quadratic in the journal.
-
-  A marker normally targets the delta immediately before it, which is exactly
-  where the fold stands when the walk reaches it. `commit_point {:target ...}`
-  can mark an EARLIER spot, so those positions are rendered as the walk passes
-  them and held until their marker arrives — the only trees kept in memory.
-
-  A delta that will not replay (a retired `:trivia`) is SKIPPED rather than
-  fatal: it edited `:sep` elements the renderer no longer reads, so the state
-  it would rebuild is state nothing consults.
-
-  `ctx` is an OPAQUE handle from `open-ctx!` — see `close-ctx!`."
-  [ctx line-label deltas & {:keys [base refs]}]
-  (let [map-conn         (:slopp.git/map-conn ctx)
-        ^Repository repo (:slopp.git/repo ctx)
-        dv       (vec deltas)
-        retro    (into #{}
-                       (keep (fn [i]
-                               (let [d (nth dv i)]
-                                 (when (and (= :commit (:op d))
-                                            (:target d)
-                                            (not= (:target d)
-                                                  (:id (get dv (dec i)))))
-                                   (:target d)))))
-                       (range (count dv)))
-        ;; PATHS, not namespace names. The fold holds the store as it stood at
-        ;; this commit-point, which is the only point where a namespace's platform
-        ;; and role are both known — and the projection has to root them the
-        ;; way build! does, because CI jars a checkout of this tree.
-        ;; `source-tree`, aliased locally: the fold holds the store as it stood
-        ;; at this commit-point, which is the only point where a namespace's
-        ;; platform and role are both known.
-        ;; ARRANGED before it is rendered: the journal records creation order
-        ;; and content, never an arrangement, so the fold derives the order
-        ;; from the forms exactly as every write did. `refs` — the store's
-        ;; persisted reference index — makes that a lookup for every
-        ;; namespace the commit-point holds in its live state.
-        tree-of  (fn [st] (source-tree (refs/arrange-all st :refs refs)))]
-    (:parent
-     (reduce
-      (fn [{:keys [parent store held]} d]
-        (let [store' (or (store/replay-delta store d) store)
-              held'  (cond-> held
-                       (retro (:id d)) (assoc (:id d) (tree-of store')))]
-          (if-not (= :commit (:op d))
-            {:parent parent :store store' :held held'}
-            (let [sha (if-let [gsha (:git-sha d)]
-                        (do (record-sha! map-conn (:id d) (fingerprint d)
-                                         gsha line-label)
-                            gsha)
-                        (let [fp     (fingerprint d)
-                              pinned (lookup-sha map-conn (:id d) fp)]
-                          (if (and pinned
-                                   (.has (.getObjectDatabase repo)
-                                         (ObjectId/fromString pinned)))
-                            pinned
-                            (let [tree (or (get held' (:target d)) (tree-of store'))
-                                  s    (insert-commit! repo parent d tree
-                                                       #(db/get-blob map-conn %))]
-                              (record-sha! map-conn (:id d) fp s line-label)
-                              s))))]
-              ;; NOT dissoc'd: two markers can name the same target — a commit-point's
-              ;; own target is the delta before it, which is exactly what an
-              ;; earlier retroactive marker also points at. Releasing it at the
-              ;; first reader left the second rendering the CURRENT state.
-              {:parent sha :store store' :held held'}))))
-      {:parent base :store (store/empty-store) :held {}}
-      dv))))
-
 (defn- branch-journals
   "[[name line-id]] for every NAMED line other than main — the branches a
   projection advertises.
@@ -636,6 +513,180 @@
               (recur (:parent d) (conj acc (:op d)) (inc n))
               nil))))
 
+^:reads (defn ^:export recent-commits
+  "The newest `n` commits reachable from `sha` in `repo`, newest first, as
+  `[{:sha (12 chars) :at \"yyyy-MM-dd\" :subject} …]` — the shape a records
+  answer quotes. Empty when the repo lacks the object (an in-memory
+  projection routinely does). A clone keeps this as the `git-log` meta, so
+  \"what did git have before the import\" is answered from the store rather
+  than by a shell (eval27 opus: git log twice per cell for it)."
+  [^Repository repo sha n]
+  (if-not (and repo sha)
+    []
+    (let [id (ObjectId/fromString sha)]
+      (if-not (.has (.getObjectDatabase repo) id)
+        []
+        (with-open [rw (RevWalk. repo)]
+          (.markStart rw (.parseCommit rw id))
+          (vec (for [^org.eclipse.jgit.revwalk.RevCommit c (take n (iterator-seq (.iterator rw)))]
+                 {:sha (subs (.getName c) 0 12)
+                  :at (.format (java.text.SimpleDateFormat. "yyyy-MM-dd")
+                               (java.util.Date. (* 1000 (long (.getCommitTime c)))))
+                  :subject (.getShortMessage c)})))))))
+
+^:reads (defn artifact-paths
+  "`{path bytes}` for every artifact `store` registers whose bytes `dir`'s
+  cache holds — the compiled client bundle, a vendored js library — so a
+  projected tree carries what a checkout has to BUILD with. CI jars a checkout
+  of this tree, and the bundle can come from nowhere else: a release built
+  from a projection without it served pages whose script 404'd.
+
+  An artifact's bytes live outside the journal by design (the sha and the
+  recipe are in the store), so a projection minted where the cache is empty
+  carries no such file, and the same commit point re-minted where it is full
+  does. That is the one place a projected tree is not a pure function of the
+  journal. The pinned sha `git_map` records keeps a once-minted commit
+  stable, and the cache is full on the machine that produced the artifact,
+  which is the machine that projects."
+  [dir store]
+  (into (sorted-map)
+        (keep (fn [[path _]]
+                (when-let [^bytes bs (:bytes (artifacts/fetch dir store (str path)))]
+                  [(str path) bs])))
+        (:artifacts store)))
+
+(defn ^:export commit-point-tree
+  "{path content} for the tree the LAST commit-point in `deltas` projects — folded
+  from the journal and rendered, **with no git repo anywhere**. nil when there
+  is no commit-point yet. `deltas` is the line's journal, oldest first
+  (`slopp.store.db/line-deltas`); the value does not carry it, and an import
+  is asked for rarely enough to read it then.
+
+  This is the merge BASE for an import that did not come through git. Export
+  is one-way; import is the narrow case where an external tool changed an
+  export and the change should come back as ordinary tracked form edits, and
+  nothing about that requires the other tool to have used git — it requires a
+  tree of files and a base to diff against. Git supplies a merge-base commit;
+  a directory supplies nothing, and this is the answer the store already had.
+
+  It shares `source-tree` and `commit-paths` with `project-journal!` rather
+  than recomputing them, and that is the whole correctness argument: a base
+  differing from the projection by so much as the generated `deps.edn` would
+  report phantom changes on paths nobody touched, on every import, forever.
+
+  A marker normally targets the delta immediately before it; a retroactive
+  `commit_point {:target …}` names an earlier one, and the fold stops there."
+  [deltas blob-of & {:keys [dir]}]
+  (let [marker (last (filter #(= :commit (:op %)) deltas))]
+    (when marker
+      (let [upto (or (:target marker) (:id marker))
+            st   (reduce (fn [st d]
+                           (let [st' (or (store/replay-delta st d) st)]
+                             (if (= (:id d) upto) (reduced st') st')))
+                         (store/empty-store) deltas)]
+        (commit-paths (cond-> (source-tree (refs/arrange-all st))
+                        ;; the artifacts too, when the caller can name the
+                        ;; store dir whose cache holds them — the projection
+                        ;; carries them, so a base without them would report
+                        ;; the bundle as a change on every import
+                        dir (merge (artifact-paths dir st)))
+                      (:deps marker) (:files marker)
+                      (:config marker) blob-of)))))
+
+;; ---------------------------------------------------------------------------
+;; projection
+(defn project-journal!
+  "Walk one journal's deltas in order, minting a git commit in the in-memory
+  repo for every :commit marker whose object isn't already present. Parent =
+  the previous marker's sha (journal order IS the chain); `:base` seeds the
+  chain — a cloned store grafts its first commit-point onto the remote commit it
+  was cloned at. A marker carrying `:git-sha` (a pull/import) is ADOPTED, not
+  minted: the remote commit itself becomes the chain node (its object arrives
+  by fetch; the remote durably holds its own history). A pinned sha is reused
+  only when its object is live in this repo; on a fresh repo the object is
+  re-inserted deterministically (same sha). Returns the tip sha (= base when
+  no markers) or nil.
+
+  **Each commit-point's tree is DERIVED, not stored.** The store is folded from
+  the journal as this walk proceeds, so reaching a marker means holding the
+  store as it stood there, and the tree is `render-ns` over it. Commit-points
+  used to carry a byte-exact snapshot of every namespace instead — 82 MB
+  across 272 of them here, 39% of the journal — because comments lived
+  positionally and could not be reconstructed. They are form-owned content
+  now, so the log is a complete account and the snapshot has no job.
+
+  ONE pass matters: folding from empty per marker is quadratic in the journal.
+
+  A marker normally targets the delta immediately before it, which is exactly
+  where the fold stands when the walk reaches it. `commit_point {:target ...}`
+  can mark an EARLIER spot, so those positions are rendered as the walk passes
+  them and held until their marker arrives — the only trees kept in memory.
+
+  A delta that will not replay (a retired `:trivia`) is SKIPPED rather than
+  fatal: it edited `:sep` elements the renderer no longer reads, so the state
+  it would rebuild is state nothing consults.
+
+  `ctx` is an OPAQUE handle from `open-ctx!` — see `close-ctx!`."
+  [ctx line-label deltas & {:keys [base refs]}]
+  (let [map-conn         (:slopp.git/map-conn ctx)
+        ^Repository repo (:slopp.git/repo ctx)
+        dv       (vec deltas)
+        retro    (into #{}
+                       (keep (fn [i]
+                               (let [d (nth dv i)]
+                                 (when (and (= :commit (:op d))
+                                            (:target d)
+                                            (not= (:target d)
+                                                  (:id (get dv (dec i)))))
+                                   (:target d)))))
+                       (range (count dv)))
+        ;; PATHS, not namespace names. The fold holds the store as it stood at
+        ;; this commit-point, which is the only point where a namespace's platform
+        ;; and role are both known — and the projection has to root them the
+        ;; way build! does, because CI jars a checkout of this tree.
+        ;; `source-tree`, aliased locally: the fold holds the store as it stood
+        ;; at this commit-point, which is the only point where a namespace's
+        ;; platform and role are both known.
+        ;; ARRANGED before it is rendered: the journal records creation order
+        ;; and content, never an arrangement, so the fold derives the order
+        ;; from the forms exactly as every write did. `refs` — the store's
+        ;; persisted reference index — makes that a lookup for every
+        ;; namespace the commit-point holds in its live state.
+        tree-of  (fn [st] (merge (source-tree (refs/arrange-all st :refs refs))
+                                 ;; and the artifacts' bytes, from this store's
+                                 ;; cache — see [[artifact-paths]]
+                                 (artifact-paths (:slopp.git/dir ctx) st)))]
+    (:parent
+     (reduce
+      (fn [{:keys [parent store held]} d]
+        (let [store' (or (store/replay-delta store d) store)
+              held'  (cond-> held
+                       (retro (:id d)) (assoc (:id d) (tree-of store')))]
+          (if-not (= :commit (:op d))
+            {:parent parent :store store' :held held'}
+            (let [sha (if-let [gsha (:git-sha d)]
+                        (do (record-sha! map-conn (:id d) (fingerprint d)
+                                         gsha line-label)
+                            gsha)
+                        (let [fp     (fingerprint d)
+                              pinned (lookup-sha map-conn (:id d) fp)]
+                          (if (and pinned
+                                   (.has (.getObjectDatabase repo)
+                                         (ObjectId/fromString pinned)))
+                            pinned
+                            (let [tree (or (get held' (:target d)) (tree-of store'))
+                                  s    (insert-commit! repo parent d tree
+                                                       #(db/get-blob map-conn %))]
+                              (record-sha! map-conn (:id d) fp s line-label)
+                              s))))]
+              ;; NOT dissoc'd: two markers can name the same target — a commit-point's
+              ;; own target is the delta before it, which is exactly what an
+              ;; earlier retroactive marker also points at. Releasing it at the
+              ;; first reader left the second rendering the CURRENT state.
+              {:parent sha :store store' :held held'}))))
+      {:parent base :store (store/empty-store) :held {}}
+      dv))))
+
 (defn- project-line!
   "Bring one line's ref up to date and say HOW: `{:sha :via}` with `:via` one of
 
@@ -699,7 +750,10 @@
             store     (if (and hinted (= (:head hinted) line-head))
                         hinted
                         (db/load-store map-conn line-id))
-            tree      (source-tree (refs/arrange-all store :refs (db/load-refs map-conn line-id)))
+            tree      (merge (source-tree (refs/arrange-all store :refs (db/load-refs map-conn line-id)))
+                             ;; the artifacts' bytes too, exactly as the walk
+                             ;; merges them — see [[artifact-paths]]
+                             (artifact-paths (:slopp.git/dir ctx) store))
             sha       (insert-commit! repo parent m tree #(db/get-blob map-conn %))]
         (record-sha! map-conn (:id m) (fingerprint m) sha nm)
         {:sha sha :via :head})
@@ -737,24 +791,3 @@
           (set-branch-ref! repo nm sha))
         {:refs refs
          :via  (into {} (map (fn [[nm r]] [nm (:via r)])) results)}))))
-
-^:reads (defn ^:export recent-commits
-  "The newest `n` commits reachable from `sha` in `repo`, newest first, as
-  `[{:sha (12 chars) :at \"yyyy-MM-dd\" :subject} …]` — the shape a records
-  answer quotes. Empty when the repo lacks the object (an in-memory
-  projection routinely does). A clone keeps this as the `git-log` meta, so
-  \"what did git have before the import\" is answered from the store rather
-  than by a shell (eval27 opus: git log twice per cell for it)."
-  [^Repository repo sha n]
-  (if-not (and repo sha)
-    []
-    (let [id (ObjectId/fromString sha)]
-      (if-not (.has (.getObjectDatabase repo) id)
-        []
-        (with-open [rw (RevWalk. repo)]
-          (.markStart rw (.parseCommit rw id))
-          (vec (for [^org.eclipse.jgit.revwalk.RevCommit c (take n (iterator-seq (.iterator rw)))]
-                 {:sha (subs (.getName c) 0 12)
-                  :at (.format (java.text.SimpleDateFormat. "yyyy-MM-dd")
-                               (java.util.Date. (* 1000 (long (.getCommitTime c)))))
-                  :subject (.getShortMessage c)})))))))

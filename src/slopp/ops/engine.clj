@@ -532,34 +532,43 @@
   construction (the D5 backstop). With a warm spare, the swap avoids a JVM boot
   on the critical path; the next spare starts warming immediately.
 
+  `for` is the store the new image is PREPARED for — its framework families
+  vendored, their deps supplied — and it defaults to the committed store. A
+  write hands the CANDIDATE: the first namespace of a fresh web project
+  reaches for `slopp.http`, which the committed store never used, and an
+  image prepared for the committed store cannot resolve it however many
+  times it is relaunched. The namespaces LOADED are the committed store's
+  either way; the caller replays the candidate's.
+
   A namespace that fails to load is RECORDED (session `:image-load-failures`,
   via [[load-all-namespaces!]]) and the boot continues — never thrown. The
   throw was half of a real consumer's wedge: a store invalidated from outside
   could not restart, and the write that would fix it died at the same error."
-  [session]
-  (let [{:keys [image spare store]} @session
-        ;; THE fix: every image this session boots gets the framework, not just
-        ;; the first. fresh-image! is on the path of restart, deps_add/remove,
-        ;; branch switch, ns_rename and the D5 staleness heal — all of which
-        ;; used to hand back an image with no framework at all, masked for as
-        ;; long as the store still declared the coord.
-        fresh (image-with-deps! session store spare)]  ; adopt+reconcile or fresh
-    (repl/stop! image)
-    (swap! session assoc :image fresh :spare nil)
-    (start-spare! session)
-    ;; No reset call: the new image carries its OWN record, minted empty by
-    ;; `repl/start!`. This used to be `(currency/forget-all!)` against a
-    ;; process-global atom, with a comment explaining that carrying the dead
-    ;; image's stamps would claim the new one holds them. A record that cannot
-    ;; outlive its image cannot make that claim.
-    (let [{:keys [store image]} @session
-          fails (load-all-namespaces! image store)]
-      (swap! session assoc :image-load-failures (not-empty fails))
-      ;; the loop above stamped every namespace it loaded, so the record is now
-      ;; complete and a form without a stamp is real news. Arming only here —
-      ;; never on a stamp — is what stops a half-filled record reporting the
-      ;; whole store as never-loaded.
-      (image.currency/arm! image))))
+  ([session] (fresh-image! session (:store @session)))
+  ([session for]
+   (let [{:keys [image spare]} @session
+         ;; THE fix: every image this session boots gets the framework, not just
+         ;; the first. fresh-image! is on the path of restart, deps_add/remove,
+         ;; branch switch, ns_rename and the D5 staleness heal — all of which
+         ;; used to hand back an image with no framework at all, masked for as
+         ;; long as the store still declared the coord.
+         fresh (image-with-deps! session for spare)]  ; adopt+reconcile or fresh
+     (repl/stop! image)
+     (swap! session assoc :image fresh :spare nil)
+     (start-spare! session)
+     ;; No reset call: the new image carries its OWN record, minted empty by
+     ;; `repl/start!`. This used to be `(currency/forget-all!)` against a
+     ;; process-global atom, with a comment explaining that carrying the dead
+     ;; image's stamps would claim the new one holds them. A record that cannot
+     ;; outlive its image cannot make that claim.
+     (let [{:keys [store image]} @session
+           fails (load-all-namespaces! image store)]
+       (swap! session assoc :image-load-failures (not-empty fails))
+       ;; the loop above stamped every namespace it loaded, so the record is now
+       ;; complete and a form without a stamp is real news. Arming only here —
+       ;; never on a stamp — is what stops a half-filled record reporting the
+       ;; whole store as never-loaded.
+       (image.currency/arm! image)))))
 
 (defn load-error-message
   "The message to report for a `hot-load-all!` result — nil when it loaded.
@@ -1492,7 +1501,7 @@
                 (and (nil? err1) (nil? stubbed)) nil
                 (nil? err1) {:stubbed stubbed}
                 :else
-                (do (fresh-image! session)               ; maybe the image was stale
+                (do (fresh-image! session candidate)     ; maybe the image was stale — or prepared for a store that used one family fewer
                     (replay!)                            ; candidate truth over the committed boot
                     ;; a fresh image loses stubs — the round re-stubs from both sources
                     (let [[err2 stubbed2] (stub-round)]
