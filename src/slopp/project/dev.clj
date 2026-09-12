@@ -37,7 +37,9 @@
    {:key "run.*.url" :type [:string] :default nil
     :doc "Where a human should open this entry (http://127.0.0.1:8080). DECLARED, not observed: slopp generates the serve! call for a derived dev server and reads the bound port back from it, but a declared entry is an arbitrary fn and hands back no socket. Absent = slopp has no address to offer for it, which is the honest answer for a worker."}
    {:key "run.*.enabled" :type [:boolean] :default true
-    :doc "Whether to start this entry. Default true, because declaring a runnable IS asking for it; set false to silence one for an afternoon without deleting its entry point."}])
+    :doc "Whether to start this entry. Default true, because declaring a runnable IS asking for it; set false to silence one for an afternoon without deleting its entry point."}
+   {:key "run.*.port" :type [:int {:min 1 :max 65535}] :default nil
+    :doc "The port this entry should listen on IN DEVELOPMENT. The manager tells the child before the entry runs (the slopp.run.<name>.port system property, and slopp.app-port when this is the only ported entry), and reports http://<host>:<port>/ as the entry's url unless run.<name>.url says otherwise. A dev setting rather than http.port because that is the PRODUCTION address — for slopp's own store the machine daemon's — and the in-progress copy must not take it."}])
 
 (defn ^:export runnables
   "What `store` declares it wants RUN while somebody is working on it:
@@ -79,7 +81,10 @@
                           ;; has no address, and a key present-but-nil trains
                           ;; a reader to skip the one that matters
                           (read (str "run." nm ".url"))
-                          (assoc :url (read (str "run." nm ".url"))))])))
+                          (assoc :url (read (str "run." nm ".url")))
+                          ;; likewise its dev port — a worker has none
+                          (read (str "run." nm ".port"))
+                          (assoc :port (read (str "run." nm ".port"))))])))
           names)))
 
 (defn ^:export config-refusal

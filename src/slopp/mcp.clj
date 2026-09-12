@@ -1610,9 +1610,15 @@
   [[start-app!]] and [[refresh-app!]] apply, answered for a caller above
   the transport: the daemon starts a project's app server on first attach
   only when there is one to start, and opens the reader that would own it
-  only then."
+  only then.
+
+  Never when THIS process is the store's own declared entry
+  (`live/managed-child-of?`): slopp's in-progress daemon, booted from its
+  store by the machine daemon, would otherwise boot a child of itself onto
+  its own port the moment its own project attached to it."
   [session]
   (boolean (and (:dir @session)
+                (not (live/managed-child-of? (:dir @session)))
                 (live/managed? (:store @session) server/served-namespaces))))
 
 ^:unsafe (defn refresh-app!
@@ -1681,7 +1687,12 @@
                  :app-boot-failure (:app-boot-failure @owner))
           r))
     (let [dir (:dir @session)
-          r   (if (and dir (live/managed? (:store @session) server/served-namespaces))
+          r   (if (and dir
+                   ;; never for the store this process is the declared entry
+                   ;; OF — it would be booting a child of itself onto its own
+                   ;; port. Nothing to stop below either: it never started one.
+                   (not (live/managed-child-of? dir))
+                   (live/managed? (:store @session) server/served-namespaces))
                 (locking session
                   ;; IN PLACE first. A re-boot replaces the child JVM, so the app's
                   ;; `:http/perform-ctx` is rebuilt and any state it kept there — a

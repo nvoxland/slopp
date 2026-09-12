@@ -463,10 +463,16 @@
 (deftest a-daemon-on-another-port-records-itself-under-its-own-file
   ;; `~/.slopp/daemon.json` names THE daemon of the machine — what every
   ;; pipe and the CLI route to. A dev daemon (slopp's own dev instance,
-  ;; run from its store on 7358) must not take that over on boot.
-  (is (= "daemon.json" (.getName (daemon/daemon-file daemon/default-port))))
-  (is (= "daemon-7358.json" (.getName (daemon/daemon-file 7358))))
-  (is (= (daemon/daemon-file) (daemon/daemon-file daemon/default-port))))
+  ;; run from its store on another port) must not take that over on boot.
+  ;; And the machine's daemon is the one on the machine's CONFIGURED port,
+  ;; not on the literal default: a machine that moved its daemon to 7400
+  ;; still has one daemon.json, and a dev instance that happens to sit on
+  ;; 7357 there is the other one.
+  (is (= "daemon.json" (.getName (daemon/daemon-file daemon/default-port daemon/default-port))))
+  (is (= "daemon-7358.json" (.getName (daemon/daemon-file 7358 daemon/default-port))))
+  (is (= "daemon.json" (.getName (daemon/daemon-file 7400 7400))))
+  (is (= "daemon-7357.json" (.getName (daemon/daemon-file 7357 7400))))
+  (is (= (daemon/daemon-file) (daemon/daemon-file (daemon/machine-port)))))
 
 (deftest ^:external a-stale-session-id-is-re-attached-not-refused
   ;; A stdio client never re-initializes on its own: after the daemon
@@ -730,10 +736,17 @@
 
 (deftest the-port-argument-is-parsed-or-refused-with-a-sentence
   ;; `slopp daemon seven` was an uncaught NumberFormatException — a stack
-  ;; trace where the one fact that matters is which value was wrong.
-  (is (= {:port 7358} (daemon/daemon-port "7358" nil)))
-  (is (= {:port 7400} (daemon/daemon-port nil "7400")) "the environment, when no argument")
-  (is (= {:port 7358} (daemon/daemon-port "7358" "7400")) "the argument wins")
-  (is (pos? (:port (daemon/daemon-port nil nil))) "the default otherwise")
-  (is (re-find #"not a port" (:error (daemon/daemon-port "seven" nil))))
-  (is (re-find #"not a port" (:error (daemon/daemon-port "70000" nil)))))
+  ;; trace where the one fact that matters is which value was wrong. And the
+  ;; port has four sources now, in an order worth pinning: the argument, the
+  ;; environment, what the MANAGER told a declared entry, the machine's
+  ;; setting, the default.
+  (is (= {:port 7358} (daemon/daemon-port "7358" nil nil nil)))
+  (is (= {:port 7400} (daemon/daemon-port nil "7400" nil nil)) "the environment, when no argument")
+  (is (= {:port 7358} (daemon/daemon-port "7358" "7400" nil nil)) "the argument wins")
+  (is (= {:port 7358} (daemon/daemon-port nil nil "7358" nil))
+      "the manager's word: slopp's dev instance is told its port, not passed it")
+  (is (= {:port 7400} (daemon/daemon-port nil "7400" "7358" nil)) "the environment beats the manager")
+  (is (= {:port 7401} (daemon/daemon-port nil nil nil 7401)) "the machine's setting, when nothing else says")
+  (is (= {:port daemon/default-port} (daemon/daemon-port nil nil nil nil)) "the default otherwise")
+  (is (re-find #"not a port" (:error (daemon/daemon-port "seven" nil nil nil))))
+  (is (re-find #"not a port" (:error (daemon/daemon-port "70000" nil nil nil)))))

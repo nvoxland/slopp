@@ -73,6 +73,15 @@
         (is (not (contains? (get (dev/runnables addressed) "worker") :url))
             "the worker has no url and should not carry the key")))
 
+    (testing "a declared PORT rides along as a number, and an undeclared one is ABSENT"
+      ;; the dev port of a declared entry is the run config's business, not
+      ;; `http.port`'s: that key is the PRODUCTION address, and for slopp's own
+      ;; store it is the machine daemon's port — which is exactly the one the
+      ;; in-progress daemon must not take
+      (let [ported (assoc-in st [:config "dev" :values "run.app.port"] "7358")]
+        (is (= 7358 (get-in (dev/runnables ported) ["app" :port])))
+        (is (not (contains? (get (dev/runnables ported) "worker") :port)))))
+
     (testing "a key the registry does not govern is ignored, not guessed at"
       ;; `run.app.typo` matches no pattern, so `find-entry` answers nil and
       ;; the entry is unaffected — a typo must not silently become a field

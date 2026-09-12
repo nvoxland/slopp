@@ -4901,3 +4901,28 @@
         (is (nil? (:app-server @owner)) "the close refreshed the owner's server: stopped, as its store asks")
         (is (nil? (:app-server @sess)) "and the session mirrors the owner"))
       (finally (ops/close! sess)))))
+
+(deftest a-process-running-as-a-stores-declared-entry-does-not-manage-that-stores-app-server
+  ;; slopp's in-progress daemon is its own store's declared entry, booted by
+  ;; the machine daemon. When an agent attaches slopp's store to IT, it reads
+  ;; `run.daemon` like any project's and would boot a child of itself onto
+  ;; its own port — a bind failure recorded as the store's red at every done.
+  ;; The self-served rule cannot catch this: a released daemon and its
+  ;; in-progress copy serve the same namespaces by name. The ROLE can, and
+  ;; the manager states it before the entry runs.
+  (let [d    (str (System/getProperty "java.io.tmpdir") "/slopp-role-" (System/nanoTime))
+        st   (first (store/record-config-put (store/empty-store) "capabilities" :manifest
+                                             "http.enabled" "true"))
+        sess (atom {:dir d :store st})
+        was  (System/getProperty "slopp.managed-for")]
+    (try
+      (is (mcp/app-managed? sess) "the control: a web store nobody serves is managed")
+      (System/setProperty "slopp.managed-for" d)
+      (is (not (mcp/app-managed? sess)) "but not by the process that IS its declared entry")
+      (is (nil? (mcp/refresh-app! sess))
+          "and a refresh there does nothing — it never started a server to stop")
+      (System/setProperty "slopp.managed-for" (str d "-other"))
+      (is (mcp/app-managed? sess) "a child of ANOTHER store still manages this one")
+      (finally
+        (if was (System/setProperty "slopp.managed-for" was)
+            (System/clearProperty "slopp.managed-for"))))))

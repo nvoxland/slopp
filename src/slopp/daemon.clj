@@ -109,21 +109,6 @@
                          {:url (:url app)
                           :branch (some-> reader deref :branch str)})})))))
 
-(defn ^:export daemon-file
-  "Where a daemon records itself: `~/.slopp/daemon.json` — `{url port token
-  pid started}`, THE daemon of the machine, what every pipe and the CLI
-  route to — for the default port; `~/.slopp/daemon-<port>.json` for any
-  other. A daemon on another port is a DEV instance (slopp's own, run from
-  its store on 7358 by the same machinery every project's dev instance
-  gets), and it must not take the machine's file over on boot. One writer
-  per file by construction."
-  ([] (daemon-file default-port))
-  ([port]
-   (java.io.File. (System/getProperty "user.home")
-                  (if (= (long port) (long default-port))
-                    ".slopp/daemon.json"
-                    (str ".slopp/daemon-" port ".json")))))
-
 (defn- store-file?
   "Whether `dir` has a store yet — a project's first durable write creates
   it, so a reader opened before that holds no connection and has to be
@@ -779,24 +764,30 @@
       (.setWritable f true true)))
   (spit f content))
 
-(defn daemon-port
-  "The port `slopp daemon [port]` listens on — the argument, else
-  `SLOPP_DAEMON_PORT` (`env`), else [[default-port]] — as `{:port n}`, or
-  `{:error sentence}` for a value that is not one. A bad argument used to be
-  an uncaught NumberFormatException: a stack trace where the one fact that
-  matters is which value was wrong."
-  [arg env]
-  (let [raw (some-> (or arg env) str str/trim not-empty)]
+(defn ^{:breaking-ok "the 2-arity is REMOVED rather than defaulted: its only caller is -main, and the two sources it gained (the manager's word, the machine's setting) are the whole point of the change"}
+  daemon-port
+  "The port `slopp daemon [port]` listens on, as `{:port n}` or `{:error
+  sentence}` for a value that is not one. Four sources, in order: the
+  argument `arg`; the environment (`env`, `SLOPP_DAEMON_PORT`); what the
+  MANAGER told a declared entry (`told`, the `slopp.app-port` property —
+  slopp's own dev instance is told its port rather than passed it, so the
+  run config's `run.daemon.port` is the one place it is spelled); the
+  machine's setting (`machine`, [[machine-port]]'s answer); else
+  [[default-port]]. A bad value used to be an uncaught NumberFormatException:
+  a stack trace where the one fact that matters is which value was wrong."
+  [arg env told machine]
+  (let [raw (some->> [arg env told] (map #(some-> % str str/trim not-empty)) (some identity))]
     (cond
       (nil? raw)
-      {:port default-port}
+      {:port (or machine default-port)}
 
       :else
       (let [n (try (Long/parseLong raw) (catch NumberFormatException _ nil))]
         (if (and n (< 0 n 65536))
           {:port n}
           {:error (str (pr-str raw) " is not a port (1–65535) — slopp daemon [port],"
-                       " or SLOPP_DAEMON_PORT=<n>")})))))
+                       " SLOPP_DAEMON_PORT=<n>, run.<name>.port in a dev config,"
+                       " or daemon-port in ~/.slopp/config.json")})))))
 
 (defn- own-reader!
   "A read-only reader on the daemon's OWN store at `dir`, for the assets the
@@ -923,6 +914,42 @@
       (.start reaper)
       {:url (str "http://127.0.0.1:" (:port srv) "/api/") :port (:port srv) :token (token)})))
 
+^:reads (defn machine-config
+  "The machine's slopp settings — `~/.slopp/config.json` as a map with keyword
+  keys, `{}` when there is none or it does not parse. The daemon boots from
+  a neutral dir and has no store to read a setting from, so what it is told
+  beyond its arguments lives beside its daemon file. `daemon-port` is the one
+  key today; the pipe and the CLI read the same file to know which port to
+  start a daemon on."
+  []
+  (let [f (java.io.File. (System/getProperty "user.home") ".slopp/config.json")]
+    (or (when (.exists f)
+          (try (json/parse-string (slurp f) true) (catch Exception _ nil)))
+        {})))
+
+^:reads (defn ^:export machine-port
+  "The port THE daemon of this machine listens on: `daemon-port` in
+  [[machine-config]], else [[default-port]]. What [[daemon-file]] calls the
+  machine's file, and what the pipe and the CLI start a daemon on."
+  []
+  (or (some-> (:daemon-port (machine-config)) long) default-port))
+
+(defn ^:export daemon-file
+  "Where a daemon records itself: `~/.slopp/daemon.json` — `{url port token
+  pid started}`, THE daemon of the machine, what every pipe and the CLI
+  route to — for the machine's port ([[machine-port]]: its configured one,
+  else the default); `~/.slopp/daemon-<port>.json` for any other. A daemon
+  on another port is a DEV instance (slopp's own, run from its store by the
+  same machinery every project's dev instance gets), and it must not take
+  the machine's file over on boot. One writer per file by construction."
+  ([] (daemon-file (machine-port)))
+  ([port] (daemon-file port (machine-port)))
+  ([port machine]
+   (java.io.File. (System/getProperty "user.home")
+                  (if (= (long port) (long machine))
+                    ".slopp/daemon.json"
+                    (str ".slopp/daemon-" port ".json")))))
+
 ^:unsafe (defn -main
   "Run the daemon: `slopp daemon [port]` — which is `slopp <dir> [--live]
   --main slopp.daemon/-main [port]`. The dir is what the kernel loads
@@ -944,7 +971,8 @@
   that did not exit cleanly leaves its file behind, and naming a dead pid
   as the holder sends someone to kill the wrong thing."
   [& [port]]
-  (let [{p :port err :error} (daemon-port port (System/getenv "SLOPP_DAEMON_PORT"))]
+  (let [{p :port err :error} (daemon-port port (System/getenv "SLOPP_DAEMON_PORT")
+                                       (System/getProperty "slopp.app-port") (machine-port))]
     (if err
       (do (.println System/err (str "slopp daemon: " err))
           (System/exit 2))

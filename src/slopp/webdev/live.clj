@@ -126,7 +126,7 @@
 
 (defn serve-plan
   "What to launch for this store's app server, as data — `{:enabled? :mode
-  :namespaces :host :port :adapter}`, or `{:enabled? false :reason …}`.
+  :dir :namespaces :host :port :adapter}`, or `{:enabled? false :reason …}`.
 
   Pure, and separate from the launching on purpose: everything worth getting
   wrong here (is this a web project, what does it serve, on what address) is
@@ -146,7 +146,8 @@
   `:mode` is `:dev`. It rides the plan so nothing downstream reads a dev plan
   as the shipped one: the two serve the same routes from different stores at
   different grains, and an unlabelled plan is a stand-in for whichever the
-  reader assumed."
+  reader assumed. `:dir` rides it so the manager can tell a declared entry
+  which store it is the declared entry OF ([[startup-code]])."
   [store dir]
   (if-not (or (capabilities/effective store "http.enabled")
               (seq (enabled-runnables store)))
@@ -158,6 +159,7 @@
                   " value \"my.ns/-main\"}")}
     {:enabled?   true
      :mode       :dev
+     :dir        (str dir)
      ;; what this project SAID to run, which derivation cannot know. Empty for
      ;; a store that declares nothing — which is every store that worked before
      ;; this existed, so the derived server below is unchanged for them.
@@ -628,14 +630,17 @@
     `slopp.http/serve!` call. Unchanged for every store that predates the
     `dev` config, which is most of them.
   - **entries declared** → one [[run-code]] each, and NO generated call —
-    preceded, when the plan carries a `:static-dir`, by ONE expression
-    setting the `slopp.static-dir` system property to it. The generated
-    call carries that dir inside its own static mount; a declared entry
-    assembles its own server and had no way to learn where the bytes went,
-    so slopp's own daemon, run this way as its dev instance, 404'd its own
-    bundle. The property is the manager telling the entry, before it runs;
-    absent when there is no dir, because a property naming nothing is a lie
-    the entry would act on.
+    preceded by what the MANAGER decided and the entry could not know, as
+    system properties set before any entry runs: `slopp.managed-for`, the
+    store dir this child is the declared entry of (the role, which is what
+    stops slopp's own in-progress daemon from managing its own project's
+    app server — see [[managed-child-of?]]); `slopp.static-dir`, where the
+    mounts' bytes were materialized, when there is such a dir (a declared
+    entry assembles its own server and had no way to learn it, so slopp's
+    daemon run this way 404'd its own bundle); `slopp.run.<name>.port` for
+    each entry that declared one, and `slopp.app-port` when exactly one
+    did. A property naming nothing is a lie the entry would act on, so
+    each is set only when there is something to say.
 
   **Declared REPLACES derived, rather than joining it.** A generated `serve!`
   running beside a declared entry would bind a port the project never asked
@@ -649,103 +654,18 @@
   testable only by spawning one."
   [plan]
   (if-let [declared (seq (:runnables plan))]
-    (into (if-let [sd (:static-dir plan)]
-            [(pr-str (list 'System/setProperty "slopp.static-dir" sd))]
-            [])
-          (map (fn [[_ {:keys [main args]}]] (run-code main args)))
-          (sort-by key declared))
+    (let [ported (into {} (filter (comp :port val)) declared)
+          told   (fn [k v] (pr-str (list 'System/setProperty k (str v))))]
+      (-> []
+          (into (when-let [d (:dir plan)] [(told "slopp.managed-for" d)]))
+          (into (when-let [sd (:static-dir plan)] [(told "slopp.static-dir" sd)]))
+          (into (map (fn [[nm {:keys [port]}]] (told (str "slopp.run." nm ".port") port)))
+                (sort-by key ported))
+          (into (when (= 1 (count ported))
+                  [(told "slopp.app-port" (:port (val (first ported))))]))
+          (into (map (fn [[_ {:keys [main args]}]] (run-code main args)))
+                (sort-by key declared))))
     [(serve-code plan)]))
-
-(defn- serve-in!
-  "Bring the app up inside an already-loaded app image (`boot!`'s result) and
-  return the running map — `{:serving? true :image :plan …}`, or
-  `{:serving? false :reason …}` with the image stopped.
-
-  What it evaluates is [[startup-code]]'s decision, not this function's.
-
-  **Two shapes of success, because there are two shapes of start.** A
-  generated `serve!` answers the port it BOUND, and the reported `:url`
-  carries that rather than the one asked for — an integer is unambiguous
-  evidence a socket is open. A declared entry answers `:started`, which is
-  weaker on purpose: it proves the namespace loaded and a thread spawned, and
-  nothing about whether the app came up. So a declared plan reports the url
-  the project DECLARED, or none, and never invents one.
-
-  For the derived path a failure here is a BIND failure by construction —
-  `boot!` already proved the code loads — so the reason is narrow enough to
-  act on. For a declared entry it is whatever the entry threw on its way out
-  of `require` or its first line."
-  [{:keys [image plan boot-ms served-at loaded]}]
-  ;; `:boot-ms` rides through rather than being measured here: hot-loading a
-  ;; refresh would remove the BOOT and not the bind, so folding the two into
-  ;; one number would make a contended port read as a slow image.
-  (try
-    (let [declared? (seq (:runnables plan))
-          results   (mapv (fn [code] (first (repl/eval! image code)))
-                          (startup-code plan))
-          bad       (first (remove #(or (integer? %) (= :started %)) results))]
-      (cond
-        bad (do (repl/stop! image)
-                {:serving? false :plan plan
-                 :reason (bind-failure (:port plan) bad)})
-
-        declared? (let [url (some :url (vals (:runnables plan)))]
-                    (cond-> {:serving? true :image image :plan plan
-                             :boot-ms boot-ms :served-at served-at :loaded loaded
-                             ;; NAMES, so a reader can see which entries this
-                             ;; process is carrying — there may be several and
-                             ;; only one of them has an address
-                             :started (vec (sort (keys (:runnables plan))))}
-                      ;; only when the project DECLARED one. Absent beats a
-                      ;; url nobody can be sure answers.
-                      url (assoc :url url)))
-
-        :else (let [v (first results)]
-                {:serving? true :image image :plan plan :port v
-                 :boot-ms boot-ms :served-at served-at :loaded loaded
-                 :url (str "http://" (:host plan) ":" v "/")})))
-    (catch Throwable t
-      (repl/stop! image)
-      {:serving? false :plan plan
-       :reason (bind-failure (:port plan) (ex-message t))})))
-
-(defn start!
-  "Bring this store's app server up in a DEDICATED image and return
-  `{:serving? true :image :plan :port :url}` — or `{:serving? false :reason …}`.
-
-  `dir` is the store's directory, and it is only ever hashed (`derived-port`).
-
-  Boot-and-load (`boot!`) then bind (`serve-in!`), which is the same pair
-  `refresh!` uses in a different order. One implementation between them is
-  the point: a swap that booted differently from a start would be a second
-  lifecycle, and the two would drift exactly where it is hardest to notice.
-
-  **A failure is a SENTENCE, not a throw.** Nothing the caller can do about a
-  taken port is expressed by a stack trace, and this runs from the dev
-  lifecycle rather than from a user's call — a throw there takes down more
-  than the app server.
-
-  **A taken port is reported, not routed around** — see `derived-port` for
-  why this diverges from the UI listener, which falls back to an ephemeral
-  one. Reporting keeps the decision with the caller: this returns the fact,
-  and a wiring layer that wants a fallback ladder can build one on top
-  without this function having an opinion baked in."
-  [session store dir]
-  (let [plan (serve-plan store dir)]
-    (if-not (:enabled? plan)
-      {:serving? false :reason (:reason plan) :plan plan}
-      (let [booted (boot! session store plan)]
-        (if (:reason booted)
-          (assoc booted :serving? false :plan plan)
-          ;; STAMPED at the start, because it cannot be asked afterwards —
-          ;; see [[currency]]. nil when there is no connection or no line,
-          ;; which `report` keeps as its third state rather than reading as
-          ;; stale.
-          (let [r (serve-in! booted)]
-            (cond-> r
-              (:serving? r)
-              (assoc :currency (currency/of (:db @session)
-                                            (:line @session))))))))))
 
 (defn ^:export stop!
   "Stop a running app server — whatever `start!` returned — and remove the
@@ -772,57 +692,6 @@
         (doseq [f (reverse (file-seq root))]
           (io/delete-file f true)))))
   nil)
-
-(defn ^:export refresh!
-  "Re-serve `store` on this session's app server and return the running map.
-  The version that was up is stopped only once the new one has PROVED it
-  loads; the result is held on the session as `:app-server`.
-
-  Called at DONE grain, not per write. Mid-episode the store is intentionally
-  incomplete — a red test written before its implementation is the normal
-  state, not a fault — and reloading a browser into that shows the author a
-  broken app repeatedly and trains them to ignore it. `done` is the point
-  someone says \"I think this is finished\", which is exactly when they want
-  to look.
-
-  **The swap is verified on LOADING, not on binding**, and the asymmetry is
-  the design. A boot that fails at done grain almost always fails because the
-  code does not compile, and that is decided before a socket is involved —
-  so the check that protects the running app is cheap and happens first. A
-  bind failure means a foreign process holds the port, which no ordering can
-  prevent and which is reported instead.
-
-  So a red store leaves the previous version answering and the session's
-  `:app-server` untouched: \"always up\" and \"up to date\" only conflict when
-  a boot fails, and this is the answer to that conflict. A red `done` still
-  refreshes — `done` REPORTS rather than refuses and a red one STANDS, so
-  \"finished\" and \"green\" are different questions, and seeing the app is
-  part of how you find out you were not finished.
-
-  The old image is stopped BEFORE the new one binds, because they want the
-  same derived port. That is a real gap in service, and it is the price of a
-  stable url — the alternative, binding the new one somewhere else first,
-  keeps the app up under an address nobody was given."
-  [session store dir]
-  (let [plan (serve-plan store dir)]
-    (if-not (:enabled? plan)
-      {:serving? false :reason (:reason plan) :plan plan}
-      (let [booted (boot! session store plan)]
-        (if (:reason booted)
-          (assoc booted :serving? false :plan plan)
-          (do (stop! (:app-server @session))
-              ;; RE-stamped, not inherited. A refresh is a NEW version of the
-              ;; app, and carrying the previous stamp forward would report the
-              ;; new process as current to a store it never saw — the precise
-              ;; failure the stamp exists to end.
-              (let [served (serve-in! booted)
-                    now    (cond-> served
-                             (:serving? served)
-                             (assoc :currency
-                                    (currency/of (:db @session)
-                                                 (:line @session))))]
-                (swap! session assoc :app-server now)
-                now)))))))
 
 (defn ^:export currency
   "Whether the app this session is running was started from the store as it
@@ -939,3 +808,172 @@
                                     todo))]
             (when-not failed
               (keep! (stamp (assoc running :reloaded (vec todo) :loaded now))))))))))
+
+(defn ^:export declared-url
+  "Where a human should open a plan's declared entries: a `run.<name>.url`
+  when one is declared, else `http://<host>:<port>/` when exactly ONE entry
+  carries a `run.<name>.port` — the manager told the child that port, so the
+  address follows from the declaration rather than being typed twice. nil
+  for workers, and for two ported entries, where naming one would be a
+  guess."
+  [plan]
+  (let [rs (vals (:runnables plan))]
+    (or (some :url rs)
+        (let [ported (filter :port rs)]
+          (when (= 1 (count ported))
+            (str "http://" (:host plan) ":" (:port (first ported)) "/"))))))
+
+(defn- serve-in!
+  "Bring the app up inside an already-loaded app image (`boot!`'s result) and
+  return the running map — `{:serving? true :image :plan …}`, or
+  `{:serving? false :reason …}` with the image stopped.
+
+  What it evaluates is [[startup-code]]'s decision, not this function's.
+
+  **Two shapes of success, because there are two shapes of start.** A
+  generated `serve!` answers the port it BOUND, and the reported `:url`
+  carries that rather than the one asked for — an integer is unambiguous
+  evidence a socket is open. A declared entry answers `:started`, which is
+  weaker on purpose: it proves the namespace loaded and a thread spawned, and
+  nothing about whether the app came up. So a declared plan reports the url
+  the project DECLARED, or none, and never invents one.
+
+  For the derived path a failure here is a BIND failure by construction —
+  `boot!` already proved the code loads — so the reason is narrow enough to
+  act on. For a declared entry it is whatever the entry threw on its way out
+  of `require` or its first line."
+  [{:keys [image plan boot-ms served-at loaded]}]
+  ;; `:boot-ms` rides through rather than being measured here: hot-loading a
+  ;; refresh would remove the BOOT and not the bind, so folding the two into
+  ;; one number would make a contended port read as a slow image.
+  (try
+    (let [declared? (seq (:runnables plan))
+          results   (mapv (fn [code] (first (repl/eval! image code)))
+                          (startup-code plan))
+          bad       (first (remove #(or (integer? %) (= :started %)) results))]
+      (cond
+        bad (do (repl/stop! image)
+                {:serving? false :plan plan
+                 :reason (bind-failure (:port plan) bad)})
+
+        declared? (let [url (declared-url plan)]
+                    (cond-> {:serving? true :image image :plan plan
+                             :boot-ms boot-ms :served-at served-at :loaded loaded
+                             ;; NAMES, so a reader can see which entries this
+                             ;; process is carrying — there may be several and
+                             ;; only one of them has an address
+                             :started (vec (sort (keys (:runnables plan))))}
+                      ;; only when the project DECLARED one. Absent beats a
+                      ;; url nobody can be sure answers.
+                      url (assoc :url url)))
+
+        :else (let [v (first results)]
+                {:serving? true :image image :plan plan :port v
+                 :boot-ms boot-ms :served-at served-at :loaded loaded
+                 :url (str "http://" (:host plan) ":" v "/")})))
+    (catch Throwable t
+      (repl/stop! image)
+      {:serving? false :plan plan
+       :reason (bind-failure (:port plan) (ex-message t))})))
+
+(defn start!
+  "Bring this store's app server up in a DEDICATED image and return
+  `{:serving? true :image :plan :port :url}` — or `{:serving? false :reason …}`.
+
+  `dir` is the store's directory, and it is only ever hashed (`derived-port`).
+
+  Boot-and-load (`boot!`) then bind (`serve-in!`), which is the same pair
+  `refresh!` uses in a different order. One implementation between them is
+  the point: a swap that booted differently from a start would be a second
+  lifecycle, and the two would drift exactly where it is hardest to notice.
+
+  **A failure is a SENTENCE, not a throw.** Nothing the caller can do about a
+  taken port is expressed by a stack trace, and this runs from the dev
+  lifecycle rather than from a user's call — a throw there takes down more
+  than the app server.
+
+  **A taken port is reported, not routed around** — see `derived-port` for
+  why this diverges from the UI listener, which falls back to an ephemeral
+  one. Reporting keeps the decision with the caller: this returns the fact,
+  and a wiring layer that wants a fallback ladder can build one on top
+  without this function having an opinion baked in."
+  [session store dir]
+  (let [plan (serve-plan store dir)]
+    (if-not (:enabled? plan)
+      {:serving? false :reason (:reason plan) :plan plan}
+      (let [booted (boot! session store plan)]
+        (if (:reason booted)
+          (assoc booted :serving? false :plan plan)
+          ;; STAMPED at the start, because it cannot be asked afterwards —
+          ;; see [[currency]]. nil when there is no connection or no line,
+          ;; which `report` keeps as its third state rather than reading as
+          ;; stale.
+          (let [r (serve-in! booted)]
+            (cond-> r
+              (:serving? r)
+              (assoc :currency (currency/of (:db @session)
+                                            (:line @session))))))))))
+
+(defn ^:export refresh!
+  "Re-serve `store` on this session's app server and return the running map.
+  The version that was up is stopped only once the new one has PROVED it
+  loads; the result is held on the session as `:app-server`.
+
+  Called at DONE grain, not per write. Mid-episode the store is intentionally
+  incomplete — a red test written before its implementation is the normal
+  state, not a fault — and reloading a browser into that shows the author a
+  broken app repeatedly and trains them to ignore it. `done` is the point
+  someone says \"I think this is finished\", which is exactly when they want
+  to look.
+
+  **The swap is verified on LOADING, not on binding**, and the asymmetry is
+  the design. A boot that fails at done grain almost always fails because the
+  code does not compile, and that is decided before a socket is involved —
+  so the check that protects the running app is cheap and happens first. A
+  bind failure means a foreign process holds the port, which no ordering can
+  prevent and which is reported instead.
+
+  So a red store leaves the previous version answering and the session's
+  `:app-server` untouched: \"always up\" and \"up to date\" only conflict when
+  a boot fails, and this is the answer to that conflict. A red `done` still
+  refreshes — `done` REPORTS rather than refuses and a red one STANDS, so
+  \"finished\" and \"green\" are different questions, and seeing the app is
+  part of how you find out you were not finished.
+
+  The old image is stopped BEFORE the new one binds, because they want the
+  same derived port. That is a real gap in service, and it is the price of a
+  stable url — the alternative, binding the new one somewhere else first,
+  keeps the app up under an address nobody was given."
+  [session store dir]
+  (let [plan (serve-plan store dir)]
+    (if-not (:enabled? plan)
+      {:serving? false :reason (:reason plan) :plan plan}
+      (let [booted (boot! session store plan)]
+        (if (:reason booted)
+          (assoc booted :serving? false :plan plan)
+          (do (stop! (:app-server @session))
+              ;; RE-stamped, not inherited. A refresh is a NEW version of the
+              ;; app, and carrying the previous stamp forward would report the
+              ;; new process as current to a store it never saw — the precise
+              ;; failure the stamp exists to end.
+              (let [served (serve-in! booted)
+                    now    (cond-> served
+                             (:serving? served)
+                             (assoc :currency
+                                    (currency/of (:db @session)
+                                                 (:line @session))))]
+                (swap! session assoc :app-server now)
+                now)))))))
+
+(defn ^:export managed-child-of?
+  "Whether THIS process is running as `dir`'s declared entry — the manager set
+  `slopp.managed-for` to the store dir before the entry ran.
+
+  Such a process never manages that store's app server: it would be booting
+  a child of ITSELF onto its own port. Decided from the role rather than
+  from the served namespaces, because a released daemon and its in-progress
+  copy serve the same namespaces by NAME, and the self-served rule cannot
+  tell them apart — and once the base is a release its premise inverts: the
+  child is the newer copy, not the staler one."
+  [dir]
+  (= (str dir) (System/getProperty "slopp.managed-for")))

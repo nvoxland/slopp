@@ -1280,3 +1280,49 @@
     (spit f "x")
     (live/stop! {:serving? false :plan {:static-dir (str d)}})
     (is (not (.exists (java.io.File. (str d)))) "the materialized dir is gone with the server")))
+
+(deftest a-declared-entry-is-told-its-role-and-its-port
+  ;; The manager decided the port and it knows which store the child is the
+  ;; declared entry of; the entry could learn neither. So both are told as
+  ;; properties before any entry runs, the way the static dir already is —
+  ;; and the ROLE is what stops slopp's in-progress daemon from managing its
+  ;; own project's app server, which would be a child of itself on its own
+  ;; port.
+  (let [plan {:dir "/proj" :namespaces ['demo.app] :host "127.0.0.1" :port 1234
+              :adapter :http-kit
+              :runnables {"app"    {:main 'shop.core/-main :args [] :enabled? true :port 7358}
+                          "worker" {:main 'shop.jobs/-main :args [] :enabled? true}}}
+        code (live/startup-code plan)
+        told (fn [k] (some #(when (and (str/includes? % "System/setProperty")
+                                         (str/includes? % (str "\"" k "\"")))
+                                %)
+                            code))]
+    (testing "the role: which store this child is the declared entry of"
+      (is (str/includes? (str (told "slopp.managed-for")) "\"/proj\"") (pr-str code)))
+    (testing "each ported entry's port under its own name, and the one port as the app's"
+      (is (str/includes? (str (told "slopp.run.app.port")) "\"7358\"") (pr-str code))
+      (is (nil? (told "slopp.run.worker.port")) "a worker declares no port and is told none")
+      (is (str/includes? (str (told "slopp.app-port")) "\"7358\"") (pr-str code)))
+    (testing "every property precedes every entry"
+      (let [i (fn [pred] (first (keep-indexed (fn [i c] (when (pred c) i)) code)))]
+        (is (< (i #(str/includes? % "slopp.app-port"))
+               (i #(str/includes? % "shop.core/-main"))))))
+    (testing "two ported entries: each is told its own, and no one is 'the app'"
+      (let [two (assoc-in plan [:runnables "worker" :port] 9999)
+            code2 (live/startup-code two)]
+        (is (some #(str/includes? % "slopp.run.worker.port") code2))
+        (is (not-any? #(str/includes? % "\"slopp.app-port\"") code2) (pr-str code2))))
+    (testing "a ported entry's url is DERIVED; a declared url still wins"
+      (is (= "http://127.0.0.1:7358/" (live/declared-url plan)))
+      (is (= "http://x/" (live/declared-url (assoc-in plan [:runnables "app" :url] "http://x/"))))
+      (is (nil? (live/declared-url (update plan :runnables dissoc "app")))
+          "a worker alone has no address to offer"))
+    (testing "and a process can ask whether it IS a store's declared entry"
+      (let [was (System/getProperty "slopp.managed-for")]
+        (try
+          (System/setProperty "slopp.managed-for" "/proj")
+          (is (live/managed-child-of? "/proj"))
+          (is (not (live/managed-child-of? "/other")))
+          (finally
+            (if was (System/setProperty "slopp.managed-for" was)
+                (System/clearProperty "slopp.managed-for"))))))))
