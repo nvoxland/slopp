@@ -570,7 +570,7 @@ its store-backed static reader moved to `api.web/store-reader`.
   `clojure -M -m slopp.kernel.boot <dir> --main slopp.sync/-main
   clone <url> <dir> | push <dir> [url] | pull <dir>`. Auth:
   `SLOPP_GIT_TOKEN=$(gh auth token)` env on the command. Proven against
-  real GitHub (nvoxland/slopp3): push → API edit → pull → FF push.
+  real GitHub (nvoxland/slopp): push → API edit → pull → FF push.
 
 ## Running from the store (`slopp.kernel.boot`)
 

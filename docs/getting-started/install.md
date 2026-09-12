@@ -10,7 +10,7 @@ slopp needs **Java 21+** and nothing else. Everything below runs the same jar.
 ## Claude Code plugin (recommended)
 
 ```
-/plugin marketplace add nvoxland/slopp3
+/plugin marketplace add nvoxland/slopp
 /plugin install slopp@slopp
 ```
 
@@ -73,7 +73,7 @@ point is itself store-tracked config (`META-INF/MANIFEST.MF` on the files
 manifest names the launcher and the fn it delegates to).
 
 Grab the jar from the [releases
-page](https://github.com/nvoxland/slopp3/releases).
+page](https://github.com/nvoxland/slopp/releases).
 
 Without the Claude Code plugin you lose the prompt hooks, which record the
 user's verbatim ask as the turn. A write carrying `prompt` opens its own
@@ -117,7 +117,7 @@ slopp --call git_clone '{"url":"https://github.com/you/proj.git","dir":"proj"}'
 ## From a source checkout
 
 ```sh
-git clone https://github.com/nvoxland/slopp3.git && cd slopp3
+git clone https://github.com/nvoxland/slopp.git && cd slopp
 clojure -M -m slopp.kernel.boot . --live
 ```
 

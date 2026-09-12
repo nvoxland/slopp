@@ -11,7 +11,7 @@ set -euo pipefail
 
 VERSION="v0.2.0"
 SHA256="23b5274f68e9ead2fd075adbd88cc4abb69fa56d8e5f8fbc0ee166ff4c72ba7c"
-JAR_URL="https://github.com/nvoxland/slopp3/releases/download/${VERSION}/slopp.jar"
+JAR_URL="https://github.com/nvoxland/slopp/releases/download/${VERSION}/slopp.jar"
 
 CACHE="${CLAUDE_PLUGIN_DATA:-${XDG_CACHE_HOME:-$HOME/.cache}/slopp}"
 JAR="$CACHE/slopp-${VERSION}.jar"

@@ -1,9 +1,9 @@
 site_name: slopp
 site_description: An agent-native Clojure codebase system -- code lives in a verified, provenance-tracked store of top-level forms, not in files.
 site_author: Nathan Voxland
-site_url: https://nvoxland.github.io/slopp3/
-repo_name: nvoxland/slopp3
-repo_url: https://github.com/nvoxland/slopp3
+site_url: https://nvoxland.github.io/slopp/
+repo_name: nvoxland/slopp
+repo_url: https://github.com/nvoxland/slopp
 edit_uri: edit/main/docs/
 docs_dir: docs
 site_dir: site
@@ -136,7 +136,7 @@ extra:
   generator: false
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/nvoxland/slopp3
+      link: https://github.com/nvoxland/slopp
 
 extra_css:
   - stylesheets/extra.css

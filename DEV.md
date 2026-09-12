@@ -263,7 +263,7 @@ docker build -q -f Dockerfile.docs -t slopp-docs . && \
   docker run --rm -p 8000:8000 -v "$PWD:/docs" slopp-docs
 ```
 
-Then open **<http://127.0.0.1:8000/slopp3/>** — not the bare root. `mkdocs
+Then open **<http://127.0.0.1:8000/slopp/>** — not the bare root. `mkdocs
 serve` mounts the site under `site_url`'s path so local paths match
 production; the bare root just redirects.
 

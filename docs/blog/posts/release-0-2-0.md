@@ -271,4 +271,4 @@ never rewrite the saved default.
   The refusals name the exact call that discharges them.
 
 Please file anything that breaks or confuses at
-[github.com/nvoxland/slopp3](https://github.com/nvoxland/slopp3).
+[github.com/nvoxland/slopp](https://github.com/nvoxland/slopp).

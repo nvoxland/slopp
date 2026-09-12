@@ -17,7 +17,7 @@ commits) flow back into stores via `git_pull`'s form-granular 3-way merge.
 **As a Claude Code plugin** (easiest — needs Java 21+ only):
 
 ```
-/plugin marketplace add nvoxland/slopp3
+/plugin marketplace add nvoxland/slopp
 /plugin install slopp@slopp
 ```
 
@@ -44,7 +44,7 @@ that built-in tools never pay. The `slopp-setup` skill has the details.
 ```sh
 # the onboarding flow: clone normally (main = this branch, yours), then
 # IMPORT the slopp branch into a store — the working dir stays your checkout
-git clone https://github.com/nvoxland/slopp3.git proj && cd proj
+git clone https://github.com/nvoxland/slopp.git proj && cd proj
 java -jar slopp.jar --main slopp.sync/-main import .
 java -jar slopp.jar ~/.slopp # the daemon: one slopp for the machine (the plugin starts it for you)
 

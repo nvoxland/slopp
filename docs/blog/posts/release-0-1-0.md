@@ -8,7 +8,7 @@ categories:
 # slopp 0.1.0 -- the first jar
 
 First tagged release. There is a jar on the
-[releases page](https://github.com/nvoxland/slopp3/releases/tag/v0.1.0), it
+[releases page](https://github.com/nvoxland/slopp/releases/tag/v0.1.0), it
 runs, and the repo you can browse is a projection of slopp's own store.
 
 <!-- more -->
@@ -58,5 +58,5 @@ web editor flowing back into the store, which is the workflow I most wanted to
 prove out.
 
 If you try it and something breaks, or something is just confusing, file it at
-[github.com/nvoxland/slopp3](https://github.com/nvoxland/slopp3). The bar for
+[github.com/nvoxland/slopp](https://github.com/nvoxland/slopp). The bar for
 "this should be filed" is low.

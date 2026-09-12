@@ -7177,3 +7177,18 @@ bootstrapping constraint left. No pinning: a project exists on a daemon while
 something is attached, and the second agent's attach is what puts slopp2 on
 the dev instance's picker.
 
+## G6-revised (2026-09-12, user decision) — the repo is `nvoxland/slopp`; `slopp3` is deleted, not renamed
+
+G6 named `slopp3` "the permanent repo (for now)". The permanent repo is
+`https://github.com/nvoxland/slopp`. A clean cut rather than a GitHub rename,
+by Nathan's choice: nothing left pointing at the old name, no redirect to
+lean on, the old repo deleted once the new one carries what the plugin pin
+needs. What moved: `main` and the projection branch `slopp/main` with the
+four release tags; the four release jars re-uploaded byte-for-byte under the
+same tags, so the plugin's pinned `v0.2.0` and its `SHA256` stay valid at the
+new download url; every tracked reference (the CLI's `JAR_URL`, the plugin
+manifest, `mkdocs.yml`, the docs, the README). The historical text above keeps
+its old spelling on purpose — it records what was decided then. Installed
+marketplaces registered as `nvoxland/slopp3` must be re-added as
+`nvoxland/slopp`; a cached jar keeps running meanwhile.
+

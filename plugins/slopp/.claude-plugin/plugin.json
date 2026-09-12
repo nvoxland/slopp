@@ -5,8 +5,8 @@
   "author": {
     "name": "Nathan Voxland"
   },
-  "homepage": "https://github.com/nvoxland/slopp3",
-  "repository": "https://github.com/nvoxland/slopp3",
+  "homepage": "https://github.com/nvoxland/slopp",
+  "repository": "https://github.com/nvoxland/slopp",
   "license": "MIT",
   "keywords": ["clojure", "mcp", "tdd", "codebase", "repl"]
 }
