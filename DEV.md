@@ -141,15 +141,28 @@ jarred — which is exactly how `module_role :instrument` keeps `slopp.lab` out
 of the jar (`D-module-role`): the role moves the file, and this line is the
 build script that has never heard of a role.
 
-`.claude/settings.json` sets `SLOPP_LIVE=1`. Rebuild the jar only for
-kernel or dependency changes — everything else is store code and hot-reloads
-(main-line writes, your own included; a BRANCH line's writes reload the
-image only — session_brief's `:host` section states what the server is
-actually running). Rebuilding under a running server is safe: `uber` builds
-aside and atomically renames, so the live process keeps its old jar inode
-and the next launch gets the new one. Note `slopp.kernel.boot` is file AND store
-namespace (like `slopp.kernel.rt`) and the jar bundles the STORE copy — kernel
-edits go to both.
+**The machine daemon is a release; this checkout is a project.** Since
+2026-09-12 (`D-release-base`) the daemon every session attaches to runs a
+released jar from a neutral dir, and slopp2 is opened on it like any other
+project. The in-progress version is slopp2's dev instance — `run.daemon.main =
+slopp.daemon/-main`, `run.daemon.port = 7358` in the `dev` config — booted from
+the store by the machine daemon and refreshed at every `done`. To exercise it,
+start a second agent with `SLOPP_DAEMON_PORT=7358` in its environment; the pipe
+routes to `~/.slopp/daemon-7358.json` and never starts a daemon there. So: a
+fix to a TOOL you are using reaches the dev instance at the next done and the
+machine daemon at the next release. Until a release is cut, `target/slopp.jar`
+built from a commit point is the base (`SLOPP_JAR=$PWD/target/slopp.jar`, no
+`SLOPP_LIVE`): `slopp daemon stop`, and the next call starts it. The older
+loop — `SLOPP_LIVE=1`, the daemon booted from this dir, the tool you use being
+the code you edit — still works and is what `.claude/settings.json` set
+before.
+
+Rebuild the jar for kernel or dependency changes, and to cut a base: `uber`
+builds aside and atomically renames, so a live process keeps its old jar inode
+and the next launch gets the new one. Note `slopp.kernel.boot` is file AND
+store namespace (like `slopp.kernel.rt`) and the jar bundles the STORE copy —
+kernel edits go to both. session_brief's `:host` section states what the
+server is actually running.
 
 ### Profiling the server — which side of the pipe
 

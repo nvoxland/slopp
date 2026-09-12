@@ -25,6 +25,7 @@ lands.
 | `run.<name>.args` | arguments, comma-separated and **in order** (`--port,8080` → `["--port" "8080"]`) |
 | `run.<name>.url` | where a human should open it — see below, this is DECLARED |
 | `run.<name>.enabled` | `false` silences one without deleting its entry point |
+| `run.<name>.port` | the port this entry should listen on IN DEVELOPMENT. The manager tells the child before the entry runs (`slopp.run.<name>.port`, and `slopp.app-port` when it is the only ported entry) and derives the url from it, so an entry that reads the property needs no `args` and no `url`. A dev setting rather than `http.port`, which is the PRODUCTION address |
 
 **Named, because projects grow a second process.** A worker, an admin port, a
 scheduler — declare each under its own name and they all start. There is no
@@ -38,11 +39,20 @@ stays that developer's business; `capabilities`, `rules` and `gates` still
 travel with the product as they always did. This is why the port belongs here
 and not in `http.port`.
 
-**The URL is DECLARED, not observed.** For a project with no `dev` entries
-slopp GENERATES the `serve!` call and reads the bound port back, so it knows
-the address. A declared entry is an arbitrary function and hands nothing back,
-so if you want a human to be given a link, say what it is. Absent is honest
-for a worker.
+**The URL is DECLARED or DERIVED, never observed.** For a project with no
+`dev` entries slopp GENERATES the `serve!` call and reads the bound port back,
+so it knows the address. A declared entry is an arbitrary function and hands
+nothing back, so either say what its url is (`run.<name>.url`) or give it a
+`run.<name>.port` and slopp derives `http://<host>:<port>/` from that. Absent
+is honest for a worker.
+
+**What the manager tells a declared entry.** Before any entry runs, the child
+is handed what only the manager knows, as system properties: `slopp.managed-for`
+(the store dir it is the declared entry OF), `slopp.static-dir` (where the
+mounts' bytes were materialized), `slopp.run.<name>.port` per ported entry and
+`slopp.app-port` when exactly one is. A process that finds itself
+`slopp.managed-for` a store never manages that store's app server — it would
+be booting a child of itself onto its own port.
 
 **Declared REPLACES derived.** A store with `http.enabled` and no declared
 entry gets the server slopp derives, exactly as before. Declare one and slopp
@@ -100,8 +110,10 @@ that job running while somebody works on it.
 
 ### One slopp for the machine: `slopp daemon`
 
-`slopp daemon [port]` runs ONE slopp process for every project on the box
-(default port 7357, `SLOPP_DAEMON_PORT` overrides). It binds first and
+`slopp daemon [port]` runs ONE slopp process for every project on the box.
+Its port is the argument, else `SLOPP_DAEMON_PORT`, else `daemon-port` in
+`~/.slopp/config.json` (the machine's setting — the daemon boots from a
+neutral dir and has no store to read one from), else 7357. It binds first and
 loads nothing until something attaches; a project opens on its first
 attachment and closes on its last. Its typed surface is under one prefix,
 and the pages a human opens sit beside it:
@@ -123,9 +135,7 @@ its owner only — the token is the write door's secret); `slopp
 <op>` and the prompt hook route there, and `slopp <op>` starts a daemon
 when that file names nothing alive. A second `slopp daemon` on the same
 port refuses with the bind diagnosis. The daemon boots slopp's OWN code from the dir it
-is given, so the verb passes a neutral one (`~/.slopp`); from a checkout of
-slopp itself, `SLOPP_LIVE=1 SLOPP_DAEMON_DIR=$PWD slopp daemon` hot-reloads
-the daemon's tooling as the store changes. A write through the door with
+is given, so the verb passes a neutral one (`~/.slopp`). A write through the door with
 no `thread` is refused, like a one-shot; a project's dev app server is
 started once by the daemon, on the first branch attached, and every
 session's `done` refreshes that one server.
@@ -140,6 +150,22 @@ server. The per-session JVM is retired (2026-09-08): there is no
 starts a daemon. A shell call (`slopp <op> '{…}'`) routes to the daemon
 too, starting one if none answers — the one-shot JVM that used to open the
 store on its own is gone with the writes it stranded.
+
+**Working ON slopp is working through a released slopp.** The machine daemon
+is a release; slopp's own checkout is a project like any other, and its dev
+config declares the in-progress version as a dev instance: `run.daemon.main =
+slopp.daemon/-main`, `run.daemon.port = 7358`. The machine daemon boots that
+child from the store, refreshes it at every `done`, and the child — told its
+role — serves whatever attaches to IT and never manages its own project's app
+server. To drive the in-progress version, give a second agent
+`SLOPP_DAEMON_PORT=7358` (or `SLOPP_DAEMON_URL`): the pipe and the CLI then
+route to `~/.slopp/daemon-7358.json` and never START a daemon there — a dev
+instance is the machine daemon's to run. A new release replaces the base;
+until one is cut, a jar built from a commit point is the base. Two daemons of
+different versions will hold one store, so the store format must stay readable
+by the previous release, or the release ships first. (`SLOPP_LIVE=1
+SLOPP_DAEMON_DIR=$PWD slopp daemon` is the older loop — the tool you are using
+is the code you are editing — and is still honoured.)
 
 Under the daemon three things are shared that used to be per session. Your
 oracle image boots on the FIRST call that needs one (an eval, a write, a

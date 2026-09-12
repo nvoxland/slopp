@@ -275,6 +275,11 @@ slopp <op> [json]        # one tool call, routed to the daemon
 slopp --doctor           # self-check java, jar, hooks, skills, store probe (through the daemon)
 ```
 
-`SLOPP_LIVE=1` makes the daemon hot-reload its own namespaces as the store
-it booted from changes (the self-host loop); the default freezes the loaded
-version at startup.
+The daemon's port is the argument, else `SLOPP_DAEMON_PORT`, else
+`daemon-port` in `~/.slopp/config.json`, else 7357. `SLOPP_DAEMON_PORT` also
+tells `slopp <op>` and the plugin's pipe WHICH daemon to talk to: the machine's
+(recorded in `~/.slopp/daemon.json`) or a dev instance on another port
+(`daemon-<port>.json`), which they never start — a project's dev config runs
+it. `SLOPP_LIVE=1` makes a daemon hot-reload its own namespaces as the store
+it booted from changes (the older self-host loop); the default freezes the
+loaded version at startup.

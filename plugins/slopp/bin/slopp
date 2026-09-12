@@ -51,11 +51,15 @@ case "${1:-}" in
     if [ "${2:-}" = "stop" ] || [ "${2:-}" = "status" ]; then
       python3 - "$2" <<'PYEOF'
 import json, os, signal, sys, time, urllib.request
-f = os.path.expanduser("~/.slopp/daemon.json")
+def machine_port():
+    try: return int(json.load(open(os.path.expanduser("~/.slopp/config.json"))).get("daemon-port") or 7357)
+    except Exception: return 7357
+port = int(os.environ.get("SLOPP_DAEMON_PORT") or machine_port())
+f = os.path.expanduser("~/.slopp/" + ("daemon.json" if port == machine_port() else f"daemon-{port}.json"))
 try:
     info = json.load(open(f))
 except Exception:
-    print("slopp daemon: none recorded (no ~/.slopp/daemon.json)"); sys.exit(1)
+    print(f"slopp daemon: none recorded (no {f})"); sys.exit(1)
 pid, url = int(info["pid"]), info["url"].rstrip("/")
 try:
     os.kill(pid, 0); alive = True
@@ -84,9 +88,11 @@ PYEOF
     # The daemon boots slopp's OWN code from the dir it is given — the
     # kernel loads every namespace of that dir's store into the JVM — so it
     # is launched from a NEUTRAL dir (~/.slopp, no store), never a project:
-    # the projects it serves are whatever attaches. SLOPP_LIVE=1 from a
-    # checkout of slopp itself is the self-host loop (SLOPP_DAEMON_DIR=$PWD
-    # --live), the same knob slopp-server honours.
+    # the projects it serves are whatever attaches. Working ON slopp needs
+    # none of this: the machine daemon is a release and slopp's checkout is
+    # a project like any other, whose dev instance (its run.daemon entry)
+    # is the in-progress version. SLOPP_LIVE=1 with SLOPP_DAEMON_DIR=$PWD
+    # is the older self-host loop, still honoured.
     DIR="${SLOPP_DAEMON_DIR:-$HOME/.slopp}"
     mkdir -p "$DIR"
     shift
@@ -166,7 +172,11 @@ if [ -n "$TOOL" ] && [ -s "$ARGSFILE" ]; then
 import json, os, subprocess, sys, time, threading, urllib.request
 tool, argsfile, me = sys.argv[1], sys.argv[2], sys.argv[3]
 headers = {"Content-Type": "application/json", "X-Slopp-Dir": os.getcwd()}
-DAEMON_FILE = os.path.expanduser("~/.slopp/daemon.json")
+def machine_port():
+    try: return int(json.load(open(os.path.expanduser("~/.slopp/config.json"))).get("daemon-port") or 7357)
+    except Exception: return 7357
+PORT = int(os.environ.get("SLOPP_DAEMON_PORT") or machine_port())
+DAEMON_FILE = os.path.expanduser("~/.slopp/" + ("daemon.json" if PORT == machine_port() else f"daemon-{PORT}.json"))
 def live():
     pf = json.load(open(DAEMON_FILE))
     os.kill(int(pf["pid"]), 0)
@@ -181,10 +191,14 @@ def ensure():
         return live()
     except Exception:
         pass
-    port = os.environ.get("SLOPP_DAEMON_PORT", "7357")
+    port = PORT
+    if port != machine_port():
+        print(f"slopp: nothing answers on port {port}, which is a dev instance, not the machine's"
+              f" daemon — the machine daemon starts and refreshes it while its project is open there", file=sys.stderr)
+        sys.exit(1)
     print(f"slopp: no daemon answering — starting one on port {port}", file=sys.stderr)
     env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
-    subprocess.Popen([me, "daemon", port], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+    subprocess.Popen([me, "daemon", str(port)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                      stderr=subprocess.DEVNULL, env=env, start_new_session=True)
     deadline = time.time() + 90
     while time.time() < deadline:

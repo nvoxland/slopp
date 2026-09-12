@@ -14,8 +14,11 @@ project variable — and a per-project .mcp.json needs an approval prompt and
 duplicates the plugin's entry. A pipe also outlives Claude Code's ~7 s
 HTTP startup window: it starts a dead daemon and waits for it to bind.
 
-    SLOPP_DAEMON_URL   override the daemon's address (else ~/.slopp/daemon.json)
-    SLOPP_DAEMON_PORT  the port a daemon started here listens on (default 7357)
+    SLOPP_DAEMON_URL   override the daemon's address (else the daemon file)
+    SLOPP_DAEMON_PORT  which daemon: the machine's (default; its port is
+                       daemon-port in ~/.slopp/config.json, else 7357) or a
+                       DEV instance on another port — one a project's dev
+                       config runs, which this never starts, only finds
 """
 import json
 import os
@@ -26,7 +29,28 @@ import urllib.error
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DAEMON_FILE = os.path.expanduser("~/.slopp/daemon.json")
+CONFIG_FILE = os.path.expanduser("~/.slopp/config.json")
+
+
+def machine_port():
+    """The port THE daemon of this machine listens on: daemon-port in
+    ~/.slopp/config.json, else 7357. The daemon reads the same file."""
+    try:
+        return int(json.load(open(CONFIG_FILE)).get("daemon-port") or 7357)
+    except Exception:
+        return 7357
+
+
+def wanted_port():
+    return int(os.environ.get("SLOPP_DAEMON_PORT") or machine_port())
+
+
+def daemon_file():
+    """~/.slopp/daemon.json is the machine daemon's; any other port is a dev
+    instance and records itself under daemon-<port>.json."""
+    port = wanted_port()
+    name = "daemon.json" if port == machine_port() else f"daemon-{port}.json"
+    return os.path.expanduser("~/.slopp/" + name)
 PROJECT = os.path.realpath(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
 SLUG = os.path.basename(PROJECT.rstrip("/")) or "root"
 
@@ -40,7 +64,7 @@ def live_url():
     if os.environ.get("SLOPP_DAEMON_URL"):
         return os.environ["SLOPP_DAEMON_URL"].rstrip("/")
     try:
-        info = json.load(open(DAEMON_FILE))
+        info = json.load(open(daemon_file()))
         os.kill(int(info["pid"]), 0)
         return info["url"].rstrip("/")
     except Exception:
@@ -60,10 +84,18 @@ def ensure_daemon():
     url = live_url()
     if url and status_ok(url):
         return url
-    port = os.environ.get("SLOPP_DAEMON_PORT", "7357")
+    port = wanted_port()
+    if port != machine_port():
+        # a DEV instance: a project's dev config runs it, refreshed at every
+        # done by the machine daemon. Starting one here would put a released
+        # daemon on the in-progress version's port and call it that.
+        log(f"nothing answers on port {port}, which is a dev instance, not the"
+            f" machine's daemon — it is started and refreshed by the machine"
+            f" daemon when its project is open there (a done re-serves it)")
+        sys.exit(1)
     log(f"no daemon answering — starting one on port {port}")
     env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
-    subprocess.Popen([os.path.join(HERE, "slopp"), "daemon", port],
+    subprocess.Popen([os.path.join(HERE, "slopp"), "daemon", str(port)],
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                      stderr=subprocess.DEVNULL, env=env, start_new_session=True)
     deadline = time.time() + 90

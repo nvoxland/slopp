@@ -7127,3 +7127,53 @@ travel question is an open decision" note that `fields/markers` carried.
 PRECEDED it on its own line, and a rebase puts the thread's own content before
 the copy — a carried green would stand over code it never graded.
 
+## D-release-base (2026-09-12, user decision) — working on slopp goes through a RELEASED slopp; the in-progress version is slopp's own dev instance
+
+**Decision.** The daemon every session attaches to is a release, booted from
+a neutral dir, and slopp's checkout is opened on it as an ordinary project.
+The in-progress version runs as that project's declared dev entry
+(`run.daemon.main = slopp.daemon/-main`, `run.daemon.port = 7358`), booted from
+the store by the machine daemon, refreshed at every `done`, and driven by a
+second agent whose environment names its port. A new release replaces the
+base; until one is cut, a jar built from a commit point is the base.
+
+**Why.** The `--live` self-host made the tool being used the code being
+edited: a bad landing could brick the tool, edits reached the server only at
+done by a rule nobody else needed, the jar-stale nag, and slopp2 was the one
+project not opened the way a user opens one. `D-daemon` already said one slopp
+version per machine; that version is a release, and the in-progress copy is a
+project's app server like any other's. Nathan's framing, 2026-09-12.
+
+**Four mechanics, all built the same day:**
+
+- **The machine daemon's port is a machine setting** — `daemon-port` in
+  `~/.slopp/config.json` — because the daemon has no store to read one from.
+  Precedence in `daemon-port`: argument, `SLOPP_DAEMON_PORT`, what the manager
+  told a declared entry, the machine setting, 7357. `daemon.json` belongs to
+  the machine's configured port, not the literal default.
+- **A declared entry's dev port is the run config's** (`run.<name>.port`),
+  not `http.port`: that is the PRODUCTION address, and for slopp's store it is
+  the machine daemon's — exactly the port the in-progress copy must not take.
+  The manager tells the child its port and its ROLE as system properties
+  before any entry runs (`slopp.app-port`, `slopp.run.<name>.port`,
+  `slopp.managed-for`), the way it already told it `slopp.static-dir`; the
+  url is derived from the port. `run.daemon.args` and `run.daemon.url` went.
+- **A process that is a store's declared entry never manages that store's
+  app server** (`live/managed-child-of?`, asked by `app-managed?` and
+  `refresh-app!`). The self-served rule could not decide this: a released
+  daemon and its in-progress copy serve the same namespaces by name, and once
+  the base is a release the rule's premise inverts — the child is the newer
+  copy, not the staler one.
+- **The pipe and the CLI honour `SLOPP_DAEMON_PORT`** to pick the daemon file,
+  and never START a daemon on a port that is not the machine's: a dev instance
+  is the machine daemon's to run.
+
+**What it costs.** A fix to a tool in use reaches the dev instance at the next
+done and the machine daemon at the next release. Two daemons of different
+versions hold one store, so the store format must stay readable by the previous
+release (a delta op the released merge does not know refuses the whole merge),
+or the release ships first — the ordinary migration rule, and the one
+bootstrapping constraint left. No pinning: a project exists on a daemon while
+something is attached, and the second agent's attach is what puts slopp2 on
+the dev instance's picker.
+
