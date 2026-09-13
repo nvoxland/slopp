@@ -1497,36 +1497,6 @@
     []
     tools/dieted-tools))
 
-(defn- close-extras!
-  "What closing a unit can hand over BESIDE the done's own verdict, so the
-  agent has no reason to call again: the WHOLE-STORE verdict when it is
-  cheap (the last one cost under eight seconds, or the store is under sixty
-  namespaces — a standing verdict costs a millisecond either way), and a
-  COMMIT POINT when `a` asks for one (`:commit` true, or a label). Neither
-  runs on a red episode: nothing to project, and a whole-store answer would
-  only restate the red. `r` is the done result. eval25 opus: done →
-  full_check → commit_point after every step, ten turns a lifetime."
-  [session a r]
-  (let [red?   (or (= :red (:status r)) (= :red (get-in r [:findings :episode-status])))
-        conn   (:db @session)
-        cheap? (and conn (:line @session)
-                    (let [fc (db/last-full-check conn (:line @session))]
-                      (or (and fc (< (get-in fc [:result :ms] 1e9) 8000))
-                          (< (count (:namespaces (:store @session))) 60))))
-        ws     (when (and cheap? (not red?))
-                 (try (terse-full-check (external/full-check! session))
-                      (catch Exception _ nil)))
-        cp     (when (and (:commit a) (not red?))
-                 (let [lbl (if (string? (:commit a))
-                             (:commit a)
-                             (or (:label a) (:done a) (:prompt a) "commit point"))]
-                   (external/commit-point! session lbl :agent (:agent a))))]
-    (cond-> {;; how a teammate re-runs it — the line the model went to the
-             ;; README for (eval27 opus step 1)
-             :verify "slopp --call full_check '{}' from a shell in this directory runs everything, every tier; in a session, verify {op full_check}"}
-      ws (assoc :whole-store (select-keys ws [:status :test :external :standing]))
-      cp (assoc :commit (select-keys cp [:commit :status :error :note :jar-stale])))))
-
 (defn- view-session!
   "The session a READ answers from when it names a `branch`, or a `thread`
   that is not this session's own: a throwaway copy whose `:store` is that
@@ -1891,6 +1861,75 @@
                           (str "slopp app unavailable: " (:reason r)))))
     r))
 
+(def op-cards
+  "The tools' argument-teaching cards, as SESSION data: every session the
+  daemon opens carries them under `:op-cards`, and the ask bundle's `?diet=1`
+  reads them off the session there — the read API cannot require this
+  namespace (that edge runs the other way), so what it needs is handed down."
+  tools/op-cards)
+
+(defn- published-commit-point!
+  "A commit point, PUBLISHED: `external/commit-point!` under `label`, then —
+  when it landed green on a git-configured store — the mirror push into the
+  checkout's own `slopp/<branch>` (`sync/publish-local!`), with the outcome
+  under `:published` and its cost under `:ms :publish`. Publish trouble rides
+  along without failing the commit point.
+
+  THE one door. The publish sat inside the `commit_point` tool's handler, and
+  the closing path (`change {commit …}`, `done {commit …}`) called the
+  operation directly — so a commit point taken on the way out said green and
+  moved nothing in git. Found by re-dispatching CI against a projection that
+  did not carry the fix it was dispatched for. Q10: the mechanical series is
+  the system's job, whichever door asked."
+  [session label & {:keys [agent force target]}]
+  (let [r (external/commit-point! session label :agent agent :force force :target target)]
+    (if (and (:commit r) (not= :red (:status r)) (:dir @session))
+      (let [tp (System/currentTimeMillis)
+            p  (try (sync/publish-local! (:dir @session) (:branch @session)
+                                         ;; the store this session holds IS the
+                                         ;; head that just landed: the projection
+                                         ;; mints from it without the journal (D2b)
+                                         :head-store (:store @session))
+                    (catch Exception e {:error (ex-message e)}))]
+        (if p
+          (-> r
+              (assoc :published (select-keys p [:pushed :branch :error :status :divergence :via]))
+              ;; the publish, timed: it re-folds every journal before the
+              ;; push and was the commit point's unmeasured ninety seconds
+              (update :ms assoc :publish (- (System/currentTimeMillis) tp)))
+          r))
+      r)))
+
+(defn- close-extras!
+  "What closing a unit can hand over BESIDE the done's own verdict, so the
+  agent has no reason to call again: the WHOLE-STORE verdict when it is
+  cheap (the last one cost under eight seconds, or the store is under sixty
+  namespaces — a standing verdict costs a millisecond either way), and a
+  COMMIT POINT when `a` asks for one (`:commit` true, or a label). Neither
+  runs on a red episode: nothing to project, and a whole-store answer would
+  only restate the red. `r` is the done result. eval25 opus: done →
+  full_check → commit_point after every step, ten turns a lifetime."
+  [session a r]
+  (let [red?   (or (= :red (:status r)) (= :red (get-in r [:findings :episode-status])))
+        conn   (:db @session)
+        cheap? (and conn (:line @session)
+                    (let [fc (db/last-full-check conn (:line @session))]
+                      (or (and fc (< (get-in fc [:result :ms] 1e9) 8000))
+                          (< (count (:namespaces (:store @session))) 60))))
+        ws     (when (and cheap? (not red?))
+                 (try (terse-full-check (external/full-check! session))
+                      (catch Exception _ nil)))
+        cp     (when (and (:commit a) (not red?))
+                 (let [lbl (if (string? (:commit a))
+                             (:commit a)
+                             (or (:label a) (:done a) (:prompt a) "commit point"))]
+                   (published-commit-point! session lbl :agent (:agent a))))]
+    (cond-> {;; how a teammate re-runs it — the line the model went to the
+             ;; README for (eval27 opus step 1)
+             :verify "slopp --call full_check '{}' from a shell in this directory runs everything, every tier; in a session, verify {op full_check}"}
+      ws (assoc :whole-store (select-keys ws [:status :test :external :standing]))
+      cp (assoc :commit (select-keys cp [:commit :status :error :note :jar-stale :published])))))
+
 (defn- close-unit-after-write!
   "Threaded after a change's result `ri`: when the call carried `done` (a
   label) or `commit` and the write is GREEN (`red?` says), close the unit
@@ -2097,13 +2136,6 @@
 (def ^:private tail-handlers!
   "Every handler-map entry (Q4) — call-tool checks here first."
   (merge env-handlers! file-handlers! sync-handlers! change-handlers!))
-
-(def op-cards
-  "The tools' argument-teaching cards, as SESSION data: every session the
-  daemon opens carries them under `:op-cards`, and the ask bundle's `?diet=1`
-  reads them off the session there — the read API cannot require this
-  namespace (that edge runs the other way), so what it needs is handed down."
-  tools/op-cards)
 
 (defn- call-op!
   "THE dispatch seam every route crosses — family dispatch, the bare `--call`
@@ -2962,10 +2994,10 @@
                                              (assoc r :app-note note)
                                              r))
                                (close-extras! session a r)))))
-      "commit_point" (text! (let [r (external/commit-point! session (:label a)
-                                                       :agent (:agent a)
-                                                       :force (:force a)
-                                                       :target (:target a))
+      "commit_point" (text! (let [r (published-commit-point! session (:label a)
+                                                          :agent (:agent a)
+                                                          :force (:force a)
+                                                          :target (:target a))
                                   ;; A COMMIT-POINT IS A DONE POINT. `commit-point!`
                                   ;; runs the whole done pipeline, so the app
                                   ;; server catches up here exactly as it does on
@@ -2985,37 +3017,13 @@
                                   ;; docstring already records about gating one
                                   ;; verb and not the other: a feature that
                                   ;; arrives, or fails to, by which call site you
-                                  ;; happened to use.
-                                  app (deref (future (refresh-app! session)) 20000 ::refresh-timed-out)
-                                  r   (if-let [note (app-note-for app)]
-                                        (assoc r :app-note note)
-                                        r)]
-                                    ;; Q10: the mechanical series is the system's job —
-                                    ;; a green commit-point on a git-configured store
-                                    ;; publishes itself; publish trouble rides along
-                                    ;; without failing the commit-point
-                                    (if (and (:commit r) (not= :red (:status r))
-                                             (:dir @session))
-                                      (let [tp (System/currentTimeMillis)
-                                            p  (try (sync/publish-local!
-                                                     (:dir @session)
-                                                     (:branch @session)
-                                                     ;; the store this session holds IS the
-                                                     ;; head that just landed: the projection
-                                                     ;; mints from it without the journal (D2b)
-                                                     :head-store (:store @session))
-                                                    (catch Exception e
-                                                      {:error (ex-message e)}))]
-                                        (if p
-                                          (-> r
-                                              (assoc :published
-                                                     (select-keys p [:pushed :branch :error :status :divergence :via]))
-                                              ;; the publish, timed: it re-folds every journal
-                                              ;; before the push and was the commit-point's
-                                              ;; unmeasured ninety seconds (s20)
-                                              (update :ms assoc :publish (- (System/currentTimeMillis) tp)))
-                                          r))
-                                      r)))
+                                  ;; happened to use. The PUBLISH had the same
+                                  ;; defect one door over — see
+                                  ;; `published-commit-point!`.
+                                  app (deref (future (refresh-app! session)) 20000 ::refresh-timed-out)]
+                              (if-let [note (app-note-for app)]
+                                (assoc r :app-note note)
+                                r)))
       "test_run" (text!
                        (cond
                          (:external a)

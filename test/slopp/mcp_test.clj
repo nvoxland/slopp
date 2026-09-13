@@ -4926,3 +4926,28 @@
       (finally
         (if was (System/setProperty "slopp.managed-for" was)
             (System/clearProperty "slopp.managed-for"))))))
+
+(deftest ^:external a-commit-point-taken-while-closing-publishes-itself-too
+  ;; The commit_point TOOL published to local git; a commit point taken on
+  ;; the way out of `change {commit …}` or `done {commit …}` did not, because
+  ;; the publish was inside one handler and the closing path called the
+  ;; operation directly. Found when CI was re-dispatched against a projection
+  ;; that did not carry the fix it was dispatched for: the commit point had
+  ;; said green and the mirror branch had not moved.
+  (let [dir  (str (java.nio.file.Files/createTempDirectory
+                   "slopp-pub2" (make-array java.nio.file.attribute.FileAttribute 0)))
+        _    (sh/sh "git" "init" dir)
+        _    (sh/sh "git" "-C" dir "-c" "user.name=t" "-c" "user.email=t@t"
+                    "commit" "--allow-empty" "-m" "root")
+        sess (external/open! {:slopp.ops/dir dir})]
+    (try
+      (call! sess "ns_create" {:ns "pub.core" :source "(ns pub.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n" :prompt "p"})
+      (let [r (call! sess "done" {:label "land it" :commit "the closing commit publishes"})]
+        (is (re-find #":commit \{" r) r)
+        (is (re-find #":published" r) (str "a closing commit must publish like the direct one: " r))
+        (is (re-find #":status \"OK\"" r) r)
+        (let [head (:out (sh/sh "git" "-C" dir "rev-parse" "refs/heads/slopp/main"))]
+          (is (= 40 (count (str/trim head))) "the mirror branch exists in the checkout")
+          (is (re-find (re-pattern (str/trim head)) r)
+              "and the answer names the sha the mirror is at")))
+      (finally (ops/close! sess)))))
