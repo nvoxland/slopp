@@ -5,20 +5,58 @@
 name: test
 on:
   workflow_dispatch:
+    inputs:
+      external:
+        description: 'also run the ^:external tier (slow: 25+ min on a runner)'
+        required: false
+        default: 'false'
   schedule:
     - cron: '17 5 * * *'
 jobs:
-  # There is no "suite from files" lane any more, and its absence is a
-  # finding. `clojure -M:test` from the checkout ran cognitect over the
-  # projected tree, and that was never the suite: two namespaces assume
-  # slopp's own runner (rt-test's tracing sink, cli-test's fixture namespace)
-  # and failed on every run — and rt-test armed a parent-death watchdog in
-  # the runner's JVM, which read the runner's /dev/null stdin as a dead
-  # parent and exited 0 mid-run, before cognitect's summary. The lane stayed
-  # green for months while never finishing. The suite is what `slopp.sync
-  # test` runs — the sharded external tier over a store built from this
-  # checkout — and that is test-via-slopp below, which is also the only run
-  # that puts every namespace through every write gate on the way in.
+  # THE IN-IMAGE SUITE — every test that is not ^:external, through slopp's
+  # own runner (slopp.image.testmain, which installs the tracing sink two
+  # namespaces assert on), from the projected tree: 1,091 tests in ~21s.
+  # Bare cognitect never was this suite (rt-test's sink, cli-test's fixture),
+  # and until the watchdog stopped reading a /dev/null stdin as a dead
+  # parent it never even finished here, exiting 0 mid-run — green for months
+  # while never completing.
+  #
+  # The ^:external tier is EXCLUDED here for now, deliberately (2026-09-13):
+  # sharded four ways it still runs past 25 minutes on a two-core runner, and
+  # what it costs is measured and recorded (`ideas/product/external-tier-cost.md`
+  # in a checkout that has it — the commit points and git round trips, not
+  # the boots). It is the tier `full_check` runs before every commit point,
+  # so a release is still gated on it, by hand, until it is cheap enough to
+  # gate here. Re-enable with the via-slopp job below when it is.
+  in-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: slopp/main
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: DeLaGuardo/setup-clojure@13.0
+        with:
+          cli: latest
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2
+            ~/.gitlibs
+            ~/.deps.clj
+            ~/.clojure
+          key: deps-${{ runner.os }}-${{ hashFiles('deps.edn') }}
+          restore-keys: |
+            deps-${{ runner.os }}-
+      - name: Run the in-image suite through slopp's own runner
+        env:
+          SLOPP_CLOJURE: clojure
+        run: |
+          clojure -Sdeps '{:aliases {:tm {:extra-paths ["test"] :extra-deps {io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}} :main-opts ["-m" "slopp.image.testmain" "-d" "test" "-e" ":external"]}}}' -M:tm
+
   # The SHIPPED prose — plugins/slopp/skills/** and docs/** — is the product,
   # and until now nothing checked it. The guard that exists for this class,
   # mcp-test's slopp-prose-never-names-a-tool-that-does-not-exist, scans STORE
@@ -183,7 +221,11 @@ jobs:
           stale() { echo "::error::main's kernel copy is stale -- from a main checkout run bin/extract-projection.sh and commit the result"; exit 1; }
           clojure -M -m slopp.sync kernel /tmp/rt-main.clj   src/slopp/kernel/rt.clj   || stale
           clojure -M -m slopp.sync kernel /tmp/boot-main.clj src/slopp/kernel/boot.clj || stale
+  # The full tier — every write gate on the way in, every ^:external test —
+  # is OFF by default: dispatch with `external: true` to run it. See the
+  # in-image job above for why.
   test-via-slopp:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.external == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

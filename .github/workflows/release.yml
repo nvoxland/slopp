@@ -31,6 +31,15 @@ jobs:
           key: deps-${{ runner.os }}-${{ hashFiles('deps.edn') }}
           restore-keys: |
             deps-${{ runner.os }}-
+      # GATED on the in-image suite, the same 21s the test workflow runs,
+      # before anything is jarred: a release lane that only smokes the daemon
+      # would ship a red store with a working listener. The ^:external tier
+      # is full_check's, run by hand before the commit point — see test.yml.
+      - name: The in-image suite is green
+        env:
+          SLOPP_CLOJURE: clojure
+        run: |
+          clojure -Sdeps '{:aliases {:tm {:extra-paths ["test"] :extra-deps {io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}} :main-opts ["-m" "slopp.image.testmain" "-d" "test" "-e" ":external"]}}}' -M:tm
       - name: Build the uberjar from the slopp branch
         run: |
           clojure -Sdeps '{:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}} :paths ["."]}' \

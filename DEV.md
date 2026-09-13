@@ -306,15 +306,18 @@ Background: `.context/dogfooding.md`.
 
 Three workflows, all on the human-owned branch, all checking out `slopp/main`:
 
-- `test.yml` — **via-slopp**: the pushed code imports *itself* into a fresh
-  store, putting every namespace through every gate, then runs the sharded
-  external tier over it (`slopp.sync test`). There is deliberately no
-  "suite from files" lane any more: `clojure -M:test` over the projected tree
-  was never the suite (two namespaces assume slopp's own runner), and
-  rt-test's watchdog read the runner's `/dev/null` stdin as a dead parent and
-  exited 0 mid-run, so the lane stayed green while never finishing. Both
-  cloning jobs check out full history: the clone grafts onto the branch's
-  commits and a one-commit checkout dies inside JGit.
+- `test.yml` — **in-image**: every non-`^:external` test through slopp's own
+  runner (`slopp.image.testmain`) from the projected tree, ~21s. The
+  `^:external` tier is EXCLUDED in CI for now (2026-09-13): sharded four ways
+  it still runs past 25 minutes on a two-core runner; its cost is measured in
+  `ideas/product/external-tier-cost.md`. It stays `full_check`'s tier, run by
+  hand before a commit point. **via-slopp** — the pushed code importing itself
+  through every gate, then the full sharded tier — runs only on dispatch with
+  `external: true`, and checks out full history because the clone grafts onto
+  the branch's commits. Bare `clojure -M:test` is not the suite: two
+  namespaces assume slopp's runner, and the watchdog used to read the runner's
+  `/dev/null` stdin as a dead parent and exit 0 mid-run.
+- `release.yml` is gated on the same in-image suite before the jar is built.
 - `native-proof.yml` — a sample app built through slopp, compiled to a GraalVM
   native binary, executed.
 - `release.yml` — manual dispatch with a version input: build the uberjar,
