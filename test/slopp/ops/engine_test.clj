@@ -819,4 +819,15 @@
     (is (not-any? #(str/starts-with? % "slopp/api") (mapcat keys (vals files)))
         "and nothing outside the shipping families is handed over")
     (testing "and the one reader every consumer asks answers the same way"
-      (is (seq (engine/framework-files*))))))
+      (is (seq (engine/framework-files*)))))
+  (testing "the DEPS half too — the files landed from source and failed inside themselves on cheshire"
+    ;; the vendored source has requires, and the jar's deps manifest is what
+    ;; carried them. A checkout has the kernel deps.edn instead, which pins
+    ;; every lib a shipped namespace requires precisely so the jar's derivation
+    ;; can resolve them — so it is handed whole to every family there.
+    (let [deps (engine/framework-deps-from-source)]
+      (is (map? deps))
+      (is (contains? deps "http") (pr-str (keys deps)))
+      (is (contains? (get deps "http") 'cheshire/cheshire) (pr-str (keys (get deps "http"))))
+      (is (contains? (get deps "http") 'http-kit/http-kit))
+      (is (seq (engine/framework-deps*))))))

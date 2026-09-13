@@ -1504,7 +1504,7 @@
         c       (into (sorted-map) (keep read!) common)]
     (cond-> fams (seq c) (assoc "_" c))))
 
-(defn ^:export framework-files*
+^:reads (defn ^:export framework-files*
   "The framework this process can vendor: the jar's generated manifest
   (`boot/framework-files`), else the classpath source
   ([[framework-files-from-source]]); nil when neither has anything. THE reader
@@ -1554,30 +1554,6 @@
           (io/make-parents f)
           (spit f v)))
       written)))
-
-(defn image-deps
-  "The dep map an image for `store` should carry: the store's own manifest plus
-  what the vendored framework requires.
-
-  Vendoring hands over SOURCE, and source has requires. `slopp.http.css` needs
-  garden, `slopp.http.html` needs hiccup, the servers need cheshire and http-kit
-  — all of which used to arrive transitively through the coord's pom, and all of
-  which vanished with it. The files landed and then failed inside themselves.
-
-  Merged UNDER the store's manifest, not over it: an app pinning its own hiccup
-  keeps it. slopp supplies what the framework needs, never what the app chose.
-
-  **Only the families this store USES**, from the same `used-families`
-  derivation the vendoring reads. `framework-deps` is keyed by capability for
-  this reason: merging all of it would hand a web app cli's malli and a cli app
-  garden, so every store would pay for every capability — the opt-in not
-  holding in the one place a consumer notices it, their dependency list."
-  [store]
-  (let [used (used-families store)
-        fw   (boot/framework-deps)]
-    (if (and (seq used) (seq (framework-files*)))
-      (apply merge (concat (map #(get fw %) used) [(get fw "_") (:deps store)]))
-      (:deps store))))
 
 (defn framework-dir!
   "The dir to launch an image for `store` in — one per session, created and
@@ -1632,6 +1608,76 @@
       (swap! session assoc :spare
              (future (repl/start! (cond-> {}
                                     dir (assoc :slopp.image.repl/dir dir))))))))
+
+(defn ^:export framework-deps-from-source
+  "What a vendored family needs from OUTSIDE, for a process with no jar
+  manifest: the checkout's own `deps.edn` `:deps`, handed WHOLE to every family
+  [[framework-files-from-source]] found — `{\"http\" {lib coord …} …}`. Empty
+  when no `deps.edn` can be found.
+
+  The jar's manifest derives each family's deps exactly, by resolving every
+  vendored file's requires against the basis that built the jar. A checkout
+  has no basis to ask, but it has the thing that basis was BUILT from: the
+  kernel `deps.edn`, whose own comment says every entry is there because a
+  shipping namespace requires it. So under a checkout every family is handed
+  all of them. More than a jar hands over, and only under a checkout — a
+  built app from a checkout declares a few libs it does not load, which is
+  the cost of not going stale.
+
+  `deps.edn` is never a classpath RESOURCE (`:paths [\"src\"]`), so it is
+  found as a file: the parent of whichever directory put `slopp/http.clj` on
+  the classpath — a checkout's `src/`, a materialized tree's `src/` — else
+  the working directory.
+
+  Found by CI's native-web-app lane: the files vendored from source, the
+  image came up, and `slopp.http.auth` died on `cheshire` — the failure the
+  deps manifest was built after, one layer over."
+  []
+  (let [src-root (some-> (io/resource "slopp/http.clj") io/file .getParentFile .getParentFile)
+        f        (some #(when (and % (.exists ^java.io.File %)) %)
+                       [(some-> src-root .getParentFile (io/file "deps.edn"))
+                        (io/file "deps.edn")])
+        deps     (some-> f slurp edn/read-string :deps)
+        deps     (into {} (remove (fn [[lib _]] (= "org.clojure" (namespace lib)))) deps)]
+    (if (seq deps)
+      (into (sorted-map)
+            (map (fn [cap] [cap deps]))
+            (keys (framework-files-from-source)))
+      {})))
+
+^:reads (defn ^:export framework-deps*
+  "What the vendored framework needs from outside, keyed by capability: the
+  jar's generated manifest (`boot/framework-deps`), else the checkout's own
+  deps ([[framework-deps-from-source]]); nil when neither has anything. The
+  sibling of [[framework-files*]], and every consumer asks both through these
+  two doors so the files and their deps come from the same place."
+  []
+  (or (boot/framework-deps)
+      (not-empty (framework-deps-from-source))))
+
+(defn image-deps
+  "The dep map an image for `store` should carry: the store's own manifest plus
+  what the vendored framework requires.
+
+  Vendoring hands over SOURCE, and source has requires. `slopp.http.css` needs
+  garden, `slopp.http.html` needs hiccup, the servers need cheshire and http-kit
+  — all of which used to arrive transitively through the coord's pom, and all of
+  which vanished with it. The files landed and then failed inside themselves.
+
+  Merged UNDER the store's manifest, not over it: an app pinning its own hiccup
+  keeps it. slopp supplies what the framework needs, never what the app chose.
+
+  **Only the families this store USES**, from the same `used-families`
+  derivation the vendoring reads. `framework-deps` is keyed by capability for
+  this reason: merging all of it would hand a web app cli's malli and a cli app
+  garden, so every store would pay for every capability — the opt-in not
+  holding in the one place a consumer notices it, their dependency list."
+  [store]
+  (let [used (used-families store)
+        fw   (framework-deps*)]
+    (if (and (seq used) (seq (framework-files*)))
+      (apply merge (concat (map #(get fw %) used) [(get fw "_") (:deps store)]))
+      (:deps store))))
 
 (defn ^:export start-image!
   "THE door: every owned image is launched here, for `store`.
