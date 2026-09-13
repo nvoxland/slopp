@@ -11,15 +11,17 @@
             [slopp.mcp.http :as mcp.http]
             [slopp.ops :as ops]
             [slopp.ops.external :as external] [cheshire.core :as json] [slopp.api.otel :as api.otel] [slopp.otel :as slopp.otel] [slopp.store.db :as db] [slopp.api.server :as server] [slopp.mcp :as mcp] [slopp.rest :as slopp.rest] [slopp.sync :as sync] [slopp.store :as store] [slopp.store.artifacts :as artifacts] [slopp.http.static :as static] [slopp.cljnx :as cljnx]
-            ;; the pages this daemon serves, REQUIRED and not only named in
-            ;; `serving-opts`: a page declares no route the http layer scans
-            ;; (`:webapp/path` is the browser's table), so nothing in the
-            ;; served surface pulls its namespace in. A managed child running
-            ;; this daemon (slopp's own dev instance) loads the daemon's require
-            ;; closure and nothing more — without this line its route table was
-            ;; empty and every address answered 200, beside a kernel-booted
-            ;; daemon that had every namespace and was right
-            [slopp.ui.pages]))
+            ;; EVERYTHING this daemon serves, REQUIRED and not only named in
+            ;; `serving-opts`: a route builder reads loaded vars, and a process
+            ;; that loads only this namespace's closure — a managed child, a
+            ;; jar booted from a neutral dir — serves nothing from a namespace
+            ;; the closure does not reach. The kernel's load-everything boot
+            ;; hides the gap, which is how it shipped twice: the pages first
+            ;; (the dev instance answered 200 everywhere), then the shell and
+            ;; the stylesheet (the v0.3.0 jar answered 404 everywhere).
+            [slopp.ui.pages]
+            [slopp.ui.shell]
+            [slopp.ui.styles]))
 
 (defonce ^:private state
   ;; `:projects` {dir {:slug :dir :opened-at :sessions #{sid}

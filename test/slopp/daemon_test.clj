@@ -5,7 +5,7 @@
   (:require [cheshire.core :as json]
             [clojure.test :refer [deftest is testing]]
             [slopp.daemon :as daemon]
-            [slopp.http :as slopp.http] [slopp.ops.external :as external] [slopp.ops :as ops] [slopp.cache :as cache] [slopp.mcp :as mcp] [slopp.http.routes :as routes] [clojure.string :as str] [slopp.sync :as sync] [slopp.store :as store]))
+            [slopp.http :as slopp.http] [slopp.ops.external :as external] [slopp.ops :as ops] [slopp.cache :as cache] [slopp.mcp :as mcp] [slopp.http.routes :as routes] [clojure.string :as str] [slopp.sync :as sync] [slopp.store :as store] [clojure.java.shell :as sh]))
 
 (defn- tmp-dir!
   "A fresh empty directory: a project nobody has written to yet. Canonical,
@@ -624,9 +624,16 @@
   ;; - the BUNDLE's bytes. The child has no store and no boot record, so the
   ;;   reader fell back to a classpath with no `public/` on it: 404.
   (let [st (external/built-store)]
-    (testing "the daemon's require closure reaches the pages, so a child loads them"
-      (is (contains? (store/ns-closure st 'slopp.daemon) 'slopp.ui.pages)
-          "slopp.daemon does not require slopp.ui.pages — a managed child running it serves no page")))
+    (testing "the daemon's require closure reaches EVERYTHING it lists as served, so a child — or a jar boot — loads it"
+      ;; the shell and the stylesheet are the same class one step over: named
+      ;; in serving-opts, required by nothing, and a route builder reads
+      ;; loaded vars. The v0.3.0 jar booted from a neutral dir and answered
+      ;; 404 to every page and to /css/style.css; the fix that reached
+      ;; slopp.ui.pages had stopped one namespace short, twice over
+      (let [closure (store/ns-closure st 'slopp.daemon)]
+        (doseq [n '[slopp.ui.pages slopp.ui.shell slopp.ui.styles]]
+          (is (contains? closure n)
+              (str "slopp.daemon does not require " n " — a process that loads only its closure serves nothing from it"))))))
   (testing "assets come from the dir a manager materialized, when it says where"
     (let [dir (tmp-dir!)
           f   (java.io.File. ^String dir "public/cljs/main.js")]
@@ -750,3 +757,19 @@
   (is (= {:port daemon/default-port} (daemon/daemon-port nil nil nil nil)) "the default otherwise")
   (is (re-find #"not a port" (:error (daemon/daemon-port "seven" nil nil nil))))
   (is (re-find #"not a port" (:error (daemon/daemon-port "70000" nil nil nil)))))
+
+(deftest ^:external a-daemon-that-loads-only-its-closure-still-serves-its-pages
+  ;; The jar's shape, driven for real: a fresh JVM that requires slopp.daemon
+  ;; and nothing else, assembles the context, and asks for the picker, a
+  ;; project page and the stylesheet. The unit test above says the closure is
+  ;; right; this says the served surface is, which is what a release smoke
+  ;; that only asked /api/status could not see.
+  (let [code (str "(require 'slopp.daemon 'slopp.http)"
+                  " (let [ctx (slopp.daemon/context)"
+                  "       at (fn [p] (:status (slopp.http/handle! ctx {:request-method :get :uri p :headers {}})))]"
+                  "   (println :picker (at \"/\") :page (at \"/p/x\") :css (at \"/css/style.css\") :nope (at \"/nope\")))")
+        r    (sh/sh "sh" "-c" (str "( sleep 60 ) | clojure -M -e " (pr-str code)))]
+    (is (re-find #":picker 200" (str (:out r))) (pr-str r))
+    (is (re-find #":page 200" (str (:out r))) (pr-str r))
+    (is (re-find #":css 200" (str (:out r))) (pr-str r))
+    (is (re-find #":nope 404" (str (:out r))) "and an address no page claims is still refused")))
