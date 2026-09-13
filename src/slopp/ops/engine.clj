@@ -146,188 +146,6 @@
       (when (seq used)
         (not-empty (reduce merge (get files "_") (map #(get files %) used)))))))
 
-(defn ^:export vendor-framework!
-  "Write the framework `store` needs into `dir`/src. Returns the paths written,
-  or nil when the store needs none.
-
-  An image runs with its own dir as cwd and `src` as the FIRST (relative)
-  classpath entry. So vendoring is a file write: no `-Sdeps` entry, no
-  `:local/root`, no repository. `external/build!` writes into the materialized
-  tree the same way, which is why this takes a dir rather than an image.
-
-  **It must happen BEFORE the process starts.** A JVM caches a relative
-  classpath directory that did not exist at launch, so writing into a RUNNING
-  image's dir does nothing — measured while testing this. Every caller creates
-  and fills the dir first, then launches.
-
-  The VERSION STAMP travels with the files, which handles provenance.
-
-  **The files are only half of what a coord carried.** The other half is the
-  DEPS — vendored source still has requires, and the pom was what pulled garden,
-  hiccup, cheshire and http-kit in. That is [[image-deps]]'s job, and it has to
-  be done by every consumer of this fn or the framework lands intact and fails
-  inside itself. An earlier docstring here claimed provenance was the only
-  property needing replacement; it was wrong, and a store went unloadable
-  proving it.
-
-  Deliberately NOT the uberjar on the image classpath, which would be simpler
-  and would destroy the property this rests on: a store's image receives the
-  FRAMEWORK and nothing else, so reaching for `slopp.api` from an app fails to
-  compile there."
-  [store dir]
-  (when-let [files (framework-injection store (boot/framework-files))]
-    (let [written (vec (sort (for [[path src] files]
-                               (let [f (io/file dir "src" path)]
-                                 (io/make-parents f)
-                                 (spit f src)
-                                 path))))]
-      (when-let [v (boot/framework-version)]
-        (let [f (io/file dir "src" boot/framework-version-path)]
-          (io/make-parents f)
-          (spit f v)))
-      written)))
-
-(defn image-deps
-  "The dep map an image for `store` should carry: the store's own manifest plus
-  what the vendored framework requires.
-
-  Vendoring hands over SOURCE, and source has requires. `slopp.http.css` needs
-  garden, `slopp.http.html` needs hiccup, the servers need cheshire and http-kit
-  — all of which used to arrive transitively through the coord's pom, and all of
-  which vanished with it. The files landed and then failed inside themselves.
-
-  Merged UNDER the store's manifest, not over it: an app pinning its own hiccup
-  keeps it. slopp supplies what the framework needs, never what the app chose.
-
-  **Only the families this store USES**, from the same `used-families`
-  derivation the vendoring reads. `framework-deps` is keyed by capability for
-  this reason: merging all of it would hand a web app cli's malli and a cli app
-  garden, so every store would pay for every capability — the opt-in not
-  holding in the one place a consumer notices it, their dependency list."
-  [store]
-  (let [used (used-families store)
-        fw   (boot/framework-deps)]
-    (if (and (seq used) (seq (boot/framework-files)))
-      (apply merge (concat (map #(get fw %) used) [(get fw "_") (:deps store)]))
-      (:deps store))))
-
-(defn framework-dir!
-  "The dir to launch an image for `store` in — one per session, created and
-  filled on demand — or nil when that store needs no framework.
-
-  The DECISION is per-store (branch lines each have their own); the DIR is per
-  session, because the framework is slopp's own and every image it launches
-  needs the same bytes. Cached under `:framework-dir`.
-
-  **Two axes, and conflating them is the documented failure.** WHICH families a
-  store gets is re-derived HERE, on every image launch, from the current store —
-  so a store that gains web code (or enables a capability, or renames the marker
-  `used-families` keys on) has it on its NEXT image rather than never. WHAT IS
-  IN a family comes from `boot/framework-files`, which reads this process's own
-  jar resources, and is frozen until the process restarts. A slopp fix needs a
-  rebuild and a restart; a capability just turned on does not.
-
-  A consumer's own notes said the tree is materialized from the jar at process
-  start, which is half right and produced a wrong prediction: they enabled
-  `webapp` mid-session, found `slopp/webapp.cljc` in a tree that supposedly
-  could not contain it, and had no model that explained it.
-
-  **The vendor call only WRITES, never removes**, so within a session the tree is
-  the UNION of every family the store has used at any point in it — and a fresh
-  session re-derives from scratch. A family that stops being used therefore keeps
-  resolving until the session ends. That asymmetry is deliberate rather than an
-  oversight: removal would break the store this whole mechanism protects, the one
-  mid-migration whose requires outlive its config and which must still boot to be
-  repairable."
-  [session store]
-  (when (framework-injection store (boot/framework-files))
-    (let [dir (or (:framework-dir @session)
-                  (let [d (str (java.nio.file.Files/createTempDirectory
-                                "slopp-framework"
-                                (make-array java.nio.file.attribute.FileAttribute 0)))]
-                    (swap! session assoc :framework-dir d)
-                    d))]
-      (vendor-framework! store dir)
-      dir)))
-
-(defn start-spare!
-  "Kick off a background-warming spare image (D5 warm spare) if enabled.
-
-  Launched with no DEPS — the manifest can change between warming and adoption,
-  so `image-with-deps!` reconciles it there — but IN the session's framework
-  dir, because that half cannot be reconciled later: a JVM cannot pick up a
-  relative classpath directory after launch. The dir is resolved here, on the
-  calling thread, rather than inside the future: it writes to the session."
-  [session]
-  (when (:warm-spare? @session)
-    (let [dir (framework-dir! session (:store @session))]
-      (swap! session assoc :spare
-             (future (repl/start! (cond-> {}
-                                    dir (assoc :slopp.image.repl/dir dir))))))))
-
-(defn ^:export start-image!
-  "THE door: every owned image is launched here, for `store`.
-
-  It exists because there was no such door, and that cost three rounds. Four
-  paths launch images — session open (`external/boot-image!`), `fresh-image!`
-  (restart, deps changes, ns_rename, the D5 staleness heal), `branch/boot-line-image!`
-  for a line, and the warm spare — and each was a sibling of `repl/start!`
-  rather than a caller of one preparation. So \"every image gets X\" was a
-  convention, re-implemented per path. Framework vendoring was added to one of
-  the four; the branch-line path had it missing for a week and nobody noticed,
-  because nothing exercises branches and web code together.
-
-  This namespace's own docstring already names that class for WRITES —
-  four gates hand-pasted at four write sites because the chokepoint was not
-  used, and every later fix applied four times. `rebased-write!` is that
-  chokepoint. This is its counterpart for images, and the lesson was available
-  the whole time.
-
-  Anything that must be true of EVERY image belongs in this function. If a new
-  requirement shows up and you find yourself adding it to a caller, that is the
-  bug repeating."
-  [session store]
-  (let [dir (framework-dir! session store)]
-    (repl/start! (cond-> {:slopp.image.repl/deps (image-deps store)}
-                   dir (assoc :slopp.image.repl/dir dir)))))
-
-(defn image-with-deps!
-  "A ready owned image for `store`: adopt the bare `spare` and hot-`add-libs`
-  what the store needs into it, or launch fresh through [[start-image!]]. The
-  caller owns spare bookkeeping (nil-ing + rewarming).
-
-  Adoption is safe because [[start-spare!]] launches the spare in the session's
-  framework dir. It briefly was not: a spare launched in its own dir has nothing
-  vendored, and a JVM cannot pick up a relative classpath directory after
-  launch, so adopting one handed back an image missing the framework. The first
-  fix REFUSED adoption whenever a framework was needed — correct, and it cost
-  the warm spare on every restart. Giving the spare the dir up front is the same
-  guarantee without the loss, and it follows from having one door: whatever
-  `start-image!` prepares, the spare is prepared with too.
-
-  **The spare's dir must MATCH what this store now needs**, which is not the
-  same as it having one. A spare is launched from the store as it was THEN; a
-  store that gained web code since is a store whose spare was warmed without a
-  framework, and adopting it would hand back the exact broken image this whole
-  round has been about. `add-libs!` cannot repair that — it reconciles the
-  MANIFEST, which can change between warming and adoption, and the framework is
-  files, which cannot. Found by writing the adoption test rather than by hitting
-  it, which is the order worth preferring."
-  [session store spare]
-  (let [deps (image-deps store)
-        dir  (framework-dir! session store)]
-    ;; `nil? dir` FIRST: a spare always has a dir of its own, so a bare
-    ;; equality check refuses adoption for every store needing no framework —
-    ;; which is most of them, and is a warm-spare regression rather than a
-    ;; safety property. The dir only has to MATCH when one is required.
-    (if (and spare (or (nil? dir) (= dir (:dir @spare))))
-      (let [img @spare]
-        (if (and (seq deps) (:err (repl/add-libs! img deps)))
-          (do (repl/stop! img) (start-image! session store))
-          img))
-      (do (when spare (repl/stop! @spare))
-          (start-image! session store)))))
-
 ^:reads
 (defn session-identity
   "The identity a fresh session starts with when the caller names none: a
@@ -526,49 +344,6 @@
                                 (nil? (image/load-ns! image store ns-sym)))
                    {:ns ns-sym :why err})))
              (store/ns-dependency-order store))))
-
-(defn fresh-image!
-  "Replace the image with a fresh process reloaded from the store — faithful by
-  construction (the D5 backstop). With a warm spare, the swap avoids a JVM boot
-  on the critical path; the next spare starts warming immediately.
-
-  `for` is the store the new image is PREPARED for — its framework families
-  vendored, their deps supplied — and it defaults to the committed store. A
-  write hands the CANDIDATE: the first namespace of a fresh web project
-  reaches for `slopp.http`, which the committed store never used, and an
-  image prepared for the committed store cannot resolve it however many
-  times it is relaunched. The namespaces LOADED are the committed store's
-  either way; the caller replays the candidate's.
-
-  A namespace that fails to load is RECORDED (session `:image-load-failures`,
-  via [[load-all-namespaces!]]) and the boot continues — never thrown. The
-  throw was half of a real consumer's wedge: a store invalidated from outside
-  could not restart, and the write that would fix it died at the same error."
-  ([session] (fresh-image! session (:store @session)))
-  ([session for]
-   (let [{:keys [image spare]} @session
-         ;; THE fix: every image this session boots gets the framework, not just
-         ;; the first. fresh-image! is on the path of restart, deps_add/remove,
-         ;; branch switch, ns_rename and the D5 staleness heal — all of which
-         ;; used to hand back an image with no framework at all, masked for as
-         ;; long as the store still declared the coord.
-         fresh (image-with-deps! session for spare)]  ; adopt+reconcile or fresh
-     (repl/stop! image)
-     (swap! session assoc :image fresh :spare nil)
-     (start-spare! session)
-     ;; No reset call: the new image carries its OWN record, minted empty by
-     ;; `repl/start!`. This used to be `(currency/forget-all!)` against a
-     ;; process-global atom, with a comment explaining that carrying the dead
-     ;; image's stamps would claim the new one holds them. A record that cannot
-     ;; outlive its image cannot make that claim.
-     (let [{:keys [store image]} @session
-           fails (load-all-namespaces! image store)]
-       (swap! session assoc :image-load-failures (not-empty fails))
-       ;; the loop above stamped every namespace it loaded, so the record is now
-       ;; complete and a form without a stamp is real news. Arming only here —
-       ;; never on a stamp — is what stops a half-filled record reporting the
-       ;; whole store as never-loaded.
-       (image.currency/arm! image)))))
 
 (defn load-error-message
   "The message to report for a `hot-load-all!` result — nil when it loaded.
@@ -942,30 +717,6 @@
                    (assoc :note (str "first 5 shown — the done-point / merge gate"
                                      " runs them all in the external tier")))))))))
 
-(defn diagnosed-run!
-  "Run tests. Reds cross-check on a fresh image ONLY when staleness is
-  plausible (D5.1: reload signatures, unexplained flips, missing provenance);
-  a red clearly caused by the just-edited forms returns immediately as
-  {:diagnosis :genuine} — no restart, no second run. `:fresh true` restarts
-  FIRST and runs once against a guaranteed-faithful image."
-  [session test-ns only & {:keys [edited fresh include-integration?]}]
-  (when fresh (fresh-image! session))
-  (let [skip? (not include-integration?)               ; M5: fast path skips
-        r1    (traced-run! session test-ns only skip?)]
-    (cond
-      (green? r1) r1
-
-      fresh (assoc r1 :fresh-confirmed true)
-
-      (suspicious-red? session edited r1)
-      (do (fresh-image! session)
-          (let [r2 (traced-run! session test-ns only skip?)]
-            (if (green? r2)
-              (assoc r2 :staleness-detected true)
-              (assoc r2 :fresh-confirmed true))))
-
-      :else (assoc r1 :diagnosis :genuine))))
-
 (def cljs-deferred-summary
   "Verification summary for a write to a :cljs (non-jvm-loadable) namespace.
   Such code references js/* / the DOM and never loads into the JVM oracle, so
@@ -994,72 +745,6 @@
   same discipline one level down — the engine asks a question the store can
   answer about any namespace, not a question only one app type has."
   (fn [session ns-sym] (store/platform-for (:store @session) ns-sym)))
-
-(defn run-verification!
-  "Diagnosed run of `affected` tests (grouped by their namespace), or of all of
-  `default-ns`'s tests when there's no trace information — and of `default-ns`
-  ANYWAY when a non-empty `affected` resolves to no tests at all, because a
-  scope that names tests which no longer exist is a stale scope, not an answer.
-  `affected` = `[]` is exempt: that is a deliberate verify-nothing, not a gap. `:edited` (the
-  just-changed form qsyms) powers the D5.1 genuine-vs-suspicious call and the
-  red-result :implicated correlation (Rock 2). Results pass through the
-  episode-red shaper (direction over repetition); `:boundary? true` (the
-  done-point) bypasses compression and resets the ledger.
-
-  The summary carries `:ms`, the wall time this verification took. It rides
-  the `:verify` delta's `:result` through all twelve `record-verification`
-  call sites, so the journal answers what verification COSTS as well as what
-  it found. Without it the only after-the-fact attribution is the gap between
-  consecutive deltas, which mixes tool execution with agent thinking and gets
-  the answer wrong — the expensive whole-store operations are precisely the
-  ones that leave no delta at all."
-  [session default-ns affected & {:keys [edited fresh include-integration? boundary?]}]
-  (let [t0 (System/currentTimeMillis)
-        r  (cond-> (shape-episode-reds!
-                    session
-                    (implicate
-                     (if (nil? affected)
-                       (diagnosed-run! session default-ns nil :edited edited :fresh fresh
-                                       :include-integration? include-integration?)
-                       (let [by-affected
-                             (reduce (fn [acc [tns tsyms]]
-                                       (merge-with (fn [a b]
-                                                     (cond (number? a) (+ a b)
-                                                           (and (sequential? a) (sequential? b)) (into (vec a) b)
-                                                           :else (or b a)))
-                                                   acc
-                                                   (diagnosed-run! session tns (mapv (comp symbol name) tsyms)
-                                                                   :edited edited :fresh fresh
-                                                                   :include-integration? include-integration?)))
-                                     {}
-                                     (group-by (comp symbol namespace) affected))]
-                         ;; The affected set can name tests that no longer RESOLVE —
-                         ;; a renamed deftest, a deleted one, a stale trace entry.
-                         ;; Then this runs zero and reports :scope-ran-nothing, which
-                         ;; `slopp.mcp/summarize` already classifies as a slopp bug:
-                         ;; honest, and useless, because the write IS verifiable —
-                         ;; just not by this scope. Fall back to the namespace, the
-                         ;; same rule `done` uses per form when trace evidence is
-                         ;; missing.
-                         ;;
-                         ;; Only when something WAS named. `affected` = [] is a
-                         ;; DELIBERATE verify-nothing (an alias-only require change
-                         ;; is semantically inert), so a blanket retry would overturn
-                         ;; a considered decision instead of recovering from a stale
-                         ;; one. nil means no evidence, [] means evidence of nothing
-                         ;; to do, and only the first two warrant a second look.
-                         (if (and (seq affected) (zero? (:test by-affected 0)))
-                           (diagnosed-run! session default-ns nil :edited edited :fresh fresh
-                                           :include-integration? include-integration?)
-                           by-affected)))
-                     (:test-map @session)
-                     edited)
-                    affected default-ns boundary?)
-             ;; the done-point runs the external tier for REAL right after this, and
-             ;; reports its own cap in :findings — an in-image deferral note there is
-             ;; noise about an implementation detail
-             boundary? (dissoc :external-pending))]
-    (assoc r :ms (- (System/currentTimeMillis) t0))))
 
 (defn absorb-trace!
   "Merge an EXTERNAL-tier trace (#121) into the session's test-map and persist
@@ -1409,112 +1094,6 @@
                       (format "(intern '%s '%s (fn [& _] (throw (ex-info \"red-first stub: %s is speced but not implemented\" {:red-first '%s}))))"
                               nsx sym q q))
           [q])))))
-
-(defn hot-load-all!
-  "Checked-load `form-ids` from a CANDIDATE store value into the image (S1).
-  nil on success; {:healed true} when a STALE IMAGE had to be refreshed to
-  make the load succeed (D5.1); {:stubbed [qsyms]} when red-first stubs made
-  a -test namespace compile (the generic red-first seam — the spec runs and
-  fails honestly); {:err msg} when the forms genuinely don't compile (image
-  restored either way; :first-err carries the pre-heal error when it
-  differs). Keys compose.
-  The heal boots from the COMMITTED store, so the candidate's touched nses
-  are replayed from the CANDIDATE (dependency order, full load-ns! so new
-  namespaces exist and are *loaded-libs*-stamped) before the retry —
-  without that, a candidate that CREATES a namespace (extract_ns) dies
-  with FileNotFound when a survivor requires it.
-  A touched namespace sitting in the session's `:image-load-failures` (it
-  failed the last boot) is RECONCILED on success: the candidate namespace is
-  loaded WHOLE, and when it loads it leaves the failure set — so the write
-  that fixes a boot-broken namespace verifies against the POST-edit state,
-  which is the promise the boot note makes and the sequencing used to break
-  (a real consumer's wedge, 2026-08-06)."
-  [session candidate form-ids]
-  (let [nses    (vec (distinct (keep #(store/ns-of-form-id candidate %) form-ids)))
-        stub!   #(stub-missing-test-vars! (:image @session) candidate nses)
-        replay! #(let [committed (set (keys (:namespaces (:store @session))))
-                       ;; every namespace the CANDIDATE has that the COMMITTED
-                       ;; store lacks, not just this call's. fresh-image! boots
-                       ;; from the committed store, so those cannot survive it —
-                       ;; and a MERGE creates them in EARLIER hot-load-all!
-                       ;; calls whose form-ids are not ours. Replaying only
-                       ;; `nses` left them missing and the dependent's :require
-                       ;; died with FileNotFound: an error the heal itself
-                       ;; MANUFACTURED, naming a classpath problem that never
-                       ;; existed while burying the real first failure.
-                       want      (into (set nses)
-                                       (remove committed)
-                                       (keys (:namespaces candidate)))]
-                   (doseq [ns-sym (filter want (store/ns-dependency-order candidate))]
-                     (image/load-ns! (:image @session) candidate ns-sym)))
-        reconcile! #(when-let [failed (not-empty
-                                       (set/intersection
-                                        (set (map :ns (:image-load-failures @session)))
-                                        (set nses)))]
-                      (doseq [ns-sym failed]
-                        (when (nil? (image/load-ns! (:image @session) candidate ns-sym))
-                          (swap! session update :image-load-failures
-                                 (fn [fs] (not-empty
-                                           (vec (remove (comp #{ns-sym} :ns) fs))))))))]
-    (letfn [(load-all []
-              (loop [ids (seq form-ids)]
-                (when ids
-                  (or (when (store/jvm-loadable? candidate
-                                             (store/ns-of-form-id candidate (first ids)))
-                        ;; a :cljs form (js/*/DOM) is never JVM-loaded — skip it
-                        ;; here exactly as image/load-ns! skips a :cljs ns, so the
-                        ;; refactor ops (rename/move/extract/change-sig/…) work on
-                        ;; client forms (D-web-cljs). Per-form-id, so a multi-ns op
-                        ;; that mixes platforms loads the :jvm/:cljc ids and skips
-                        ;; the :cljs ones in the same pass. A skipped id is nil,
-                        ;; the same shape as an unresolved id, so the loop recurs.
-                        (hotload/hot-load-form! (:image @session) candidate (first ids)))
-                      (recur (next ids))))))
-            (stub-round []
-              ;; both red-first sources, stub-and-retry until the load is
-              ;; clean or nothing new was stubbed (ingest!'s loop, group
-              ;; face): the graph names qualified/referred missing vars at
-              ;; once; an UNQUALIFIED same-ns symbol a deftest names before
-              ;; it exists has no graph row, and only the load error names
-              ;; it — one at a time. Returns [err stubbed].
-              (if-let [err1 (load-all)]
-                (loop [err err1, acc [], n 0]
-                  (if (or (nil? err) (<= 12 n))
-                    [err (not-empty acc)]
-                    (let [;; BOTH sources, every round — never `or`. The graph source
-                          ;; answers from the STORE and names the same vars every
-                          ;; round; behind an `or` the load error's one unqualified
-                          ;; symbol was never consulted, and a four-namespace change
-                          ;; was refused as a compile error (eval22 step 2)
-                          s   (into (vec (stub!))
-                                    (some #(stub-unresolved-test-symbol!
-                                            (:image @session) candidate % err)
-                                          nses))
-                          new (seq (remove (set acc) s))]
-                      (if new
-                        (recur (load-all) (into acc new) (inc n))
-                        [err (not-empty acc)]))))
-                [nil nil]))]
-      (let [result
-            (let [[err1 stubbed] (stub-round)]
-              (cond
-                (and (nil? err1) (nil? stubbed)) nil
-                (nil? err1) {:stubbed stubbed}
-                :else
-                (do (fresh-image! session candidate)     ; maybe the image was stale — or prepared for a store that used one family fewer
-                    (replay!)                            ; candidate truth over the committed boot
-                    ;; a fresh image loses stubs — the round re-stubs from both sources
-                    (let [[err2 stubbed2] (stub-round)]
-                      (if err2
-                        (do (fresh-image! session)
-                            (cond-> (merge {:err err2}
-                                           (edit/anchor-error candidate err2))
-                              (not= err1 err2) (assoc :first-err err1)))
-                        (cond-> {:healed true}
-                          (seq stubbed2) (assoc :stubbed stubbed2)))))))]
-        (when-not (:err result)
-          (reconcile!))
-        result))))
 
 (defn ^:export thread-key
   "The key this session's THREAD is adopted under: an explicit `:thread` when
@@ -1879,6 +1458,482 @@
                 s))
             st
             touched)))
+
+(defn ^:export framework-files-from-source
+  "The framework families read off the CLASSPATH SOURCE rather than the jar's
+  generated manifest — `{\"http\" {\"slopp/http.clj\" src …} … \"_\" {…}}` — for
+  a process that has no manifest: a checkout, a `clojure -M -m` run, which is
+  what CI's proof lanes are. Empty when nothing is found.
+
+  Two sources of one fact, and this is the one the OTHER is generated from:
+  `build.clj` walks this tree to write `framework-files.edn` into the jar.
+  So they agree by construction on the tree the jar was built from, and
+  differ only where the jar is stale — which under a checkout is the state
+  you asked for.
+
+  The families and their prefixes come from the capability catalog, as
+  [[used-families]] reads them, so a capability vendors by existing. The
+  common family (`\"_\"`, the dialect's helpers) is the fixed list the jar's
+  manifest carries for it. Files are found by asking the classpath for the
+  namespace's own path and a listing of its subtree, which a directory root
+  answers and a jar does not — and a jar has the manifest.
+
+  Here rather than in the kernel beside `slopp.kernel.boot/framework-files`:
+  the kernel may not reach up to the catalog (it would close a module cycle),
+  and this layer already does."
+  []
+  (let [common  ["slopp/lang.cljc" "slopp/cache.clj" "slopp/cljnx.clj"
+                 "slopp/cljnx/hiccup.clj" "slopp/cljnx/render.clj"]
+        src-ext? (fn [^String n] (or (.endsWith n ".clj") (.endsWith n ".cljc") (.endsWith n ".cljs")))
+        read!   (fn [p] (when-let [r (io/resource p)] [p (slurp r)]))
+        family  (fn [prefix]
+                  (let [path (str/replace (str prefix) "." "/")
+                        tops (keep #(read! (str path %)) [".clj" ".cljc" ".cljs"])
+                        below (when-let [dir (some-> (io/resource path) io/file)]
+                                (when (.isDirectory dir)
+                                  (for [f (file-seq dir)
+                                        :when (and (.isFile f) (src-ext? (.getName f)))
+                                        :let [rel (str path "/" (subs (.getPath f) (inc (count (.getPath dir)))))]]
+                                    [rel (slurp f)])))]
+                    (into (sorted-map) (concat tops below))))
+        fams    (into (sorted-map)
+                      (for [[cap prefix] (capabilities/shipping-families)
+                            :let [fs (family prefix)]
+                            :when (seq fs)]
+                        [cap fs]))
+        c       (into (sorted-map) (keep read!) common)]
+    (cond-> fams (seq c) (assoc "_" c))))
+
+(defn ^:export framework-files*
+  "The framework this process can vendor: the jar's generated manifest
+  (`boot/framework-files`), else the classpath source
+  ([[framework-files-from-source]]); nil when neither has anything. THE reader
+  every consumer in this layer asks, so a checkout and a jar vendor the same
+  families through one door."
+  []
+  (or (boot/framework-files)
+      (not-empty (framework-files-from-source))))
+
+(defn ^:export vendor-framework!
+  "Write the framework `store` needs into `dir`/src. Returns the paths written,
+  or nil when the store needs none.
+
+  An image runs with its own dir as cwd and `src` as the FIRST (relative)
+  classpath entry. So vendoring is a file write: no `-Sdeps` entry, no
+  `:local/root`, no repository. `external/build!` writes into the materialized
+  tree the same way, which is why this takes a dir rather than an image.
+
+  **It must happen BEFORE the process starts.** A JVM caches a relative
+  classpath directory that did not exist at launch, so writing into a RUNNING
+  image's dir does nothing — measured while testing this. Every caller creates
+  and fills the dir first, then launches.
+
+  The VERSION STAMP travels with the files, which handles provenance.
+
+  **The files are only half of what a coord carried.** The other half is the
+  DEPS — vendored source still has requires, and the pom was what pulled garden,
+  hiccup, cheshire and http-kit in. That is [[image-deps]]'s job, and it has to
+  be done by every consumer of this fn or the framework lands intact and fails
+  inside itself. An earlier docstring here claimed provenance was the only
+  property needing replacement; it was wrong, and a store went unloadable
+  proving it.
+
+  Deliberately NOT the uberjar on the image classpath, which would be simpler
+  and would destroy the property this rests on: a store's image receives the
+  FRAMEWORK and nothing else, so reaching for `slopp.api` from an app fails to
+  compile there."
+  [store dir]
+  (when-let [files (framework-injection store (framework-files*))]
+    (let [written (vec (sort (for [[path src] files]
+                               (let [f (io/file dir "src" path)]
+                                 (io/make-parents f)
+                                 (spit f src)
+                                 path))))]
+      (when-let [v (boot/framework-version)]
+        (let [f (io/file dir "src" boot/framework-version-path)]
+          (io/make-parents f)
+          (spit f v)))
+      written)))
+
+(defn image-deps
+  "The dep map an image for `store` should carry: the store's own manifest plus
+  what the vendored framework requires.
+
+  Vendoring hands over SOURCE, and source has requires. `slopp.http.css` needs
+  garden, `slopp.http.html` needs hiccup, the servers need cheshire and http-kit
+  — all of which used to arrive transitively through the coord's pom, and all of
+  which vanished with it. The files landed and then failed inside themselves.
+
+  Merged UNDER the store's manifest, not over it: an app pinning its own hiccup
+  keeps it. slopp supplies what the framework needs, never what the app chose.
+
+  **Only the families this store USES**, from the same `used-families`
+  derivation the vendoring reads. `framework-deps` is keyed by capability for
+  this reason: merging all of it would hand a web app cli's malli and a cli app
+  garden, so every store would pay for every capability — the opt-in not
+  holding in the one place a consumer notices it, their dependency list."
+  [store]
+  (let [used (used-families store)
+        fw   (boot/framework-deps)]
+    (if (and (seq used) (seq (framework-files*)))
+      (apply merge (concat (map #(get fw %) used) [(get fw "_") (:deps store)]))
+      (:deps store))))
+
+(defn framework-dir!
+  "The dir to launch an image for `store` in — one per session, created and
+  filled on demand — or nil when that store needs no framework.
+
+  The DECISION is per-store (branch lines each have their own); the DIR is per
+  session, because the framework is slopp's own and every image it launches
+  needs the same bytes. Cached under `:framework-dir`.
+
+  **Two axes, and conflating them is the documented failure.** WHICH families a
+  store gets is re-derived HERE, on every image launch, from the current store —
+  so a store that gains web code (or enables a capability, or renames the marker
+  `used-families` keys on) has it on its NEXT image rather than never. WHAT IS
+  IN a family comes from `boot/framework-files`, which reads this process's own
+  jar resources, and is frozen until the process restarts. A slopp fix needs a
+  rebuild and a restart; a capability just turned on does not.
+
+  A consumer's own notes said the tree is materialized from the jar at process
+  start, which is half right and produced a wrong prediction: they enabled
+  `webapp` mid-session, found `slopp/webapp.cljc` in a tree that supposedly
+  could not contain it, and had no model that explained it.
+
+  **The vendor call only WRITES, never removes**, so within a session the tree is
+  the UNION of every family the store has used at any point in it — and a fresh
+  session re-derives from scratch. A family that stops being used therefore keeps
+  resolving until the session ends. That asymmetry is deliberate rather than an
+  oversight: removal would break the store this whole mechanism protects, the one
+  mid-migration whose requires outlive its config and which must still boot to be
+  repairable."
+  [session store]
+  (when (framework-injection store (framework-files*))
+    (let [dir (or (:framework-dir @session)
+                  (let [d (str (java.nio.file.Files/createTempDirectory
+                                "slopp-framework"
+                                (make-array java.nio.file.attribute.FileAttribute 0)))]
+                    (swap! session assoc :framework-dir d)
+                    d))]
+      (vendor-framework! store dir)
+      dir)))
+
+(defn start-spare!
+  "Kick off a background-warming spare image (D5 warm spare) if enabled.
+
+  Launched with no DEPS — the manifest can change between warming and adoption,
+  so `image-with-deps!` reconciles it there — but IN the session's framework
+  dir, because that half cannot be reconciled later: a JVM cannot pick up a
+  relative classpath directory after launch. The dir is resolved here, on the
+  calling thread, rather than inside the future: it writes to the session."
+  [session]
+  (when (:warm-spare? @session)
+    (let [dir (framework-dir! session (:store @session))]
+      (swap! session assoc :spare
+             (future (repl/start! (cond-> {}
+                                    dir (assoc :slopp.image.repl/dir dir))))))))
+
+(defn ^:export start-image!
+  "THE door: every owned image is launched here, for `store`.
+
+  It exists because there was no such door, and that cost three rounds. Four
+  paths launch images — session open (`external/boot-image!`), `fresh-image!`
+  (restart, deps changes, ns_rename, the D5 staleness heal), `branch/boot-line-image!`
+  for a line, and the warm spare — and each was a sibling of `repl/start!`
+  rather than a caller of one preparation. So \"every image gets X\" was a
+  convention, re-implemented per path. Framework vendoring was added to one of
+  the four; the branch-line path had it missing for a week and nobody noticed,
+  because nothing exercises branches and web code together.
+
+  This namespace's own docstring already names that class for WRITES —
+  four gates hand-pasted at four write sites because the chokepoint was not
+  used, and every later fix applied four times. `rebased-write!` is that
+  chokepoint. This is its counterpart for images, and the lesson was available
+  the whole time.
+
+  Anything that must be true of EVERY image belongs in this function. If a new
+  requirement shows up and you find yourself adding it to a caller, that is the
+  bug repeating."
+  [session store]
+  (let [dir (framework-dir! session store)]
+    (repl/start! (cond-> {:slopp.image.repl/deps (image-deps store)}
+                   dir (assoc :slopp.image.repl/dir dir)))))
+
+(defn image-with-deps!
+  "A ready owned image for `store`: adopt the bare `spare` and hot-`add-libs`
+  what the store needs into it, or launch fresh through [[start-image!]]. The
+  caller owns spare bookkeeping (nil-ing + rewarming).
+
+  Adoption is safe because [[start-spare!]] launches the spare in the session's
+  framework dir. It briefly was not: a spare launched in its own dir has nothing
+  vendored, and a JVM cannot pick up a relative classpath directory after
+  launch, so adopting one handed back an image missing the framework. The first
+  fix REFUSED adoption whenever a framework was needed — correct, and it cost
+  the warm spare on every restart. Giving the spare the dir up front is the same
+  guarantee without the loss, and it follows from having one door: whatever
+  `start-image!` prepares, the spare is prepared with too.
+
+  **The spare's dir must MATCH what this store now needs**, which is not the
+  same as it having one. A spare is launched from the store as it was THEN; a
+  store that gained web code since is a store whose spare was warmed without a
+  framework, and adopting it would hand back the exact broken image this whole
+  round has been about. `add-libs!` cannot repair that — it reconciles the
+  MANIFEST, which can change between warming and adoption, and the framework is
+  files, which cannot. Found by writing the adoption test rather than by hitting
+  it, which is the order worth preferring."
+  [session store spare]
+  (let [deps (image-deps store)
+        dir  (framework-dir! session store)]
+    ;; `nil? dir` FIRST: a spare always has a dir of its own, so a bare
+    ;; equality check refuses adoption for every store needing no framework —
+    ;; which is most of them, and is a warm-spare regression rather than a
+    ;; safety property. The dir only has to MATCH when one is required.
+    (if (and spare (or (nil? dir) (= dir (:dir @spare))))
+      (let [img @spare]
+        (if (and (seq deps) (:err (repl/add-libs! img deps)))
+          (do (repl/stop! img) (start-image! session store))
+          img))
+      (do (when spare (repl/stop! @spare))
+          (start-image! session store)))))
+
+(defn fresh-image!
+  "Replace the image with a fresh process reloaded from the store — faithful by
+  construction (the D5 backstop). With a warm spare, the swap avoids a JVM boot
+  on the critical path; the next spare starts warming immediately.
+
+  `for` is the store the new image is PREPARED for — its framework families
+  vendored, their deps supplied — and it defaults to the committed store. A
+  write hands the CANDIDATE: the first namespace of a fresh web project
+  reaches for `slopp.http`, which the committed store never used, and an
+  image prepared for the committed store cannot resolve it however many
+  times it is relaunched. The namespaces LOADED are the committed store's
+  either way; the caller replays the candidate's.
+
+  A namespace that fails to load is RECORDED (session `:image-load-failures`,
+  via [[load-all-namespaces!]]) and the boot continues — never thrown. The
+  throw was half of a real consumer's wedge: a store invalidated from outside
+  could not restart, and the write that would fix it died at the same error."
+  ([session] (fresh-image! session (:store @session)))
+  ([session for]
+   (let [{:keys [image spare]} @session
+         ;; THE fix: every image this session boots gets the framework, not just
+         ;; the first. fresh-image! is on the path of restart, deps_add/remove,
+         ;; branch switch, ns_rename and the D5 staleness heal — all of which
+         ;; used to hand back an image with no framework at all, masked for as
+         ;; long as the store still declared the coord.
+         fresh (image-with-deps! session for spare)]  ; adopt+reconcile or fresh
+     (repl/stop! image)
+     (swap! session assoc :image fresh :spare nil)
+     (start-spare! session)
+     ;; No reset call: the new image carries its OWN record, minted empty by
+     ;; `repl/start!`. This used to be `(currency/forget-all!)` against a
+     ;; process-global atom, with a comment explaining that carrying the dead
+     ;; image's stamps would claim the new one holds them. A record that cannot
+     ;; outlive its image cannot make that claim.
+     (let [{:keys [store image]} @session
+           fails (load-all-namespaces! image store)]
+       (swap! session assoc :image-load-failures (not-empty fails))
+       ;; the loop above stamped every namespace it loaded, so the record is now
+       ;; complete and a form without a stamp is real news. Arming only here —
+       ;; never on a stamp — is what stops a half-filled record reporting the
+       ;; whole store as never-loaded.
+       (image.currency/arm! image)))))
+
+(defn hot-load-all!
+  "Checked-load `form-ids` from a CANDIDATE store value into the image (S1).
+  nil on success; {:healed true} when a STALE IMAGE had to be refreshed to
+  make the load succeed (D5.1); {:stubbed [qsyms]} when red-first stubs made
+  a -test namespace compile (the generic red-first seam — the spec runs and
+  fails honestly); {:err msg} when the forms genuinely don't compile (image
+  restored either way; :first-err carries the pre-heal error when it
+  differs). Keys compose.
+  The heal boots from the COMMITTED store, so the candidate's touched nses
+  are replayed from the CANDIDATE (dependency order, full load-ns! so new
+  namespaces exist and are *loaded-libs*-stamped) before the retry —
+  without that, a candidate that CREATES a namespace (extract_ns) dies
+  with FileNotFound when a survivor requires it.
+  A touched namespace sitting in the session's `:image-load-failures` (it
+  failed the last boot) is RECONCILED on success: the candidate namespace is
+  loaded WHOLE, and when it loads it leaves the failure set — so the write
+  that fixes a boot-broken namespace verifies against the POST-edit state,
+  which is the promise the boot note makes and the sequencing used to break
+  (a real consumer's wedge, 2026-08-06)."
+  [session candidate form-ids]
+  (let [nses    (vec (distinct (keep #(store/ns-of-form-id candidate %) form-ids)))
+        stub!   #(stub-missing-test-vars! (:image @session) candidate nses)
+        replay! #(let [committed (set (keys (:namespaces (:store @session))))
+                       ;; every namespace the CANDIDATE has that the COMMITTED
+                       ;; store lacks, not just this call's. fresh-image! boots
+                       ;; from the committed store, so those cannot survive it —
+                       ;; and a MERGE creates them in EARLIER hot-load-all!
+                       ;; calls whose form-ids are not ours. Replaying only
+                       ;; `nses` left them missing and the dependent's :require
+                       ;; died with FileNotFound: an error the heal itself
+                       ;; MANUFACTURED, naming a classpath problem that never
+                       ;; existed while burying the real first failure.
+                       want      (into (set nses)
+                                       (remove committed)
+                                       (keys (:namespaces candidate)))]
+                   (doseq [ns-sym (filter want (store/ns-dependency-order candidate))]
+                     (image/load-ns! (:image @session) candidate ns-sym)))
+        reconcile! #(when-let [failed (not-empty
+                                       (set/intersection
+                                        (set (map :ns (:image-load-failures @session)))
+                                        (set nses)))]
+                      (doseq [ns-sym failed]
+                        (when (nil? (image/load-ns! (:image @session) candidate ns-sym))
+                          (swap! session update :image-load-failures
+                                 (fn [fs] (not-empty
+                                           (vec (remove (comp #{ns-sym} :ns) fs))))))))]
+    (letfn [(load-all []
+              (loop [ids (seq form-ids)]
+                (when ids
+                  (or (when (store/jvm-loadable? candidate
+                                             (store/ns-of-form-id candidate (first ids)))
+                        ;; a :cljs form (js/*/DOM) is never JVM-loaded — skip it
+                        ;; here exactly as image/load-ns! skips a :cljs ns, so the
+                        ;; refactor ops (rename/move/extract/change-sig/…) work on
+                        ;; client forms (D-web-cljs). Per-form-id, so a multi-ns op
+                        ;; that mixes platforms loads the :jvm/:cljc ids and skips
+                        ;; the :cljs ones in the same pass. A skipped id is nil,
+                        ;; the same shape as an unresolved id, so the loop recurs.
+                        (hotload/hot-load-form! (:image @session) candidate (first ids)))
+                      (recur (next ids))))))
+            (stub-round []
+              ;; both red-first sources, stub-and-retry until the load is
+              ;; clean or nothing new was stubbed (ingest!'s loop, group
+              ;; face): the graph names qualified/referred missing vars at
+              ;; once; an UNQUALIFIED same-ns symbol a deftest names before
+              ;; it exists has no graph row, and only the load error names
+              ;; it — one at a time. Returns [err stubbed].
+              (if-let [err1 (load-all)]
+                (loop [err err1, acc [], n 0]
+                  (if (or (nil? err) (<= 12 n))
+                    [err (not-empty acc)]
+                    (let [;; BOTH sources, every round — never `or`. The graph source
+                          ;; answers from the STORE and names the same vars every
+                          ;; round; behind an `or` the load error's one unqualified
+                          ;; symbol was never consulted, and a four-namespace change
+                          ;; was refused as a compile error (eval22 step 2)
+                          s   (into (vec (stub!))
+                                    (some #(stub-unresolved-test-symbol!
+                                            (:image @session) candidate % err)
+                                          nses))
+                          new (seq (remove (set acc) s))]
+                      (if new
+                        (recur (load-all) (into acc new) (inc n))
+                        [err (not-empty acc)]))))
+                [nil nil]))]
+      (let [result
+            (let [[err1 stubbed] (stub-round)]
+              (cond
+                (and (nil? err1) (nil? stubbed)) nil
+                (nil? err1) {:stubbed stubbed}
+                :else
+                (do (fresh-image! session candidate)     ; maybe the image was stale — or prepared for a store that used one family fewer
+                    (replay!)                            ; candidate truth over the committed boot
+                    ;; a fresh image loses stubs — the round re-stubs from both sources
+                    (let [[err2 stubbed2] (stub-round)]
+                      (if err2
+                        (do (fresh-image! session)
+                            (cond-> (merge {:err err2}
+                                           (edit/anchor-error candidate err2))
+                              (not= err1 err2) (assoc :first-err err1)))
+                        (cond-> {:healed true}
+                          (seq stubbed2) (assoc :stubbed stubbed2)))))))]
+        (when-not (:err result)
+          (reconcile!))
+        result))))
+
+(defn diagnosed-run!
+  "Run tests. Reds cross-check on a fresh image ONLY when staleness is
+  plausible (D5.1: reload signatures, unexplained flips, missing provenance);
+  a red clearly caused by the just-edited forms returns immediately as
+  {:diagnosis :genuine} — no restart, no second run. `:fresh true` restarts
+  FIRST and runs once against a guaranteed-faithful image."
+  [session test-ns only & {:keys [edited fresh include-integration?]}]
+  (when fresh (fresh-image! session))
+  (let [skip? (not include-integration?)               ; M5: fast path skips
+        r1    (traced-run! session test-ns only skip?)]
+    (cond
+      (green? r1) r1
+
+      fresh (assoc r1 :fresh-confirmed true)
+
+      (suspicious-red? session edited r1)
+      (do (fresh-image! session)
+          (let [r2 (traced-run! session test-ns only skip?)]
+            (if (green? r2)
+              (assoc r2 :staleness-detected true)
+              (assoc r2 :fresh-confirmed true))))
+
+      :else (assoc r1 :diagnosis :genuine))))
+
+(defn run-verification!
+  "Diagnosed run of `affected` tests (grouped by their namespace), or of all of
+  `default-ns`'s tests when there's no trace information — and of `default-ns`
+  ANYWAY when a non-empty `affected` resolves to no tests at all, because a
+  scope that names tests which no longer exist is a stale scope, not an answer.
+  `affected` = `[]` is exempt: that is a deliberate verify-nothing, not a gap. `:edited` (the
+  just-changed form qsyms) powers the D5.1 genuine-vs-suspicious call and the
+  red-result :implicated correlation (Rock 2). Results pass through the
+  episode-red shaper (direction over repetition); `:boundary? true` (the
+  done-point) bypasses compression and resets the ledger.
+
+  The summary carries `:ms`, the wall time this verification took. It rides
+  the `:verify` delta's `:result` through all twelve `record-verification`
+  call sites, so the journal answers what verification COSTS as well as what
+  it found. Without it the only after-the-fact attribution is the gap between
+  consecutive deltas, which mixes tool execution with agent thinking and gets
+  the answer wrong — the expensive whole-store operations are precisely the
+  ones that leave no delta at all."
+  [session default-ns affected & {:keys [edited fresh include-integration? boundary?]}]
+  (let [t0 (System/currentTimeMillis)
+        r  (cond-> (shape-episode-reds!
+                    session
+                    (implicate
+                     (if (nil? affected)
+                       (diagnosed-run! session default-ns nil :edited edited :fresh fresh
+                                       :include-integration? include-integration?)
+                       (let [by-affected
+                             (reduce (fn [acc [tns tsyms]]
+                                       (merge-with (fn [a b]
+                                                     (cond (number? a) (+ a b)
+                                                           (and (sequential? a) (sequential? b)) (into (vec a) b)
+                                                           :else (or b a)))
+                                                   acc
+                                                   (diagnosed-run! session tns (mapv (comp symbol name) tsyms)
+                                                                   :edited edited :fresh fresh
+                                                                   :include-integration? include-integration?)))
+                                     {}
+                                     (group-by (comp symbol namespace) affected))]
+                         ;; The affected set can name tests that no longer RESOLVE —
+                         ;; a renamed deftest, a deleted one, a stale trace entry.
+                         ;; Then this runs zero and reports :scope-ran-nothing, which
+                         ;; `slopp.mcp/summarize` already classifies as a slopp bug:
+                         ;; honest, and useless, because the write IS verifiable —
+                         ;; just not by this scope. Fall back to the namespace, the
+                         ;; same rule `done` uses per form when trace evidence is
+                         ;; missing.
+                         ;;
+                         ;; Only when something WAS named. `affected` = [] is a
+                         ;; DELIBERATE verify-nothing (an alias-only require change
+                         ;; is semantically inert), so a blanket retry would overturn
+                         ;; a considered decision instead of recovering from a stale
+                         ;; one. nil means no evidence, [] means evidence of nothing
+                         ;; to do, and only the first two warrant a second look.
+                         (if (and (seq affected) (zero? (:test by-affected 0)))
+                           (diagnosed-run! session default-ns nil :edited edited :fresh fresh
+                                           :include-integration? include-integration?)
+                           by-affected)))
+                     (:test-map @session)
+                     edited)
+                    affected default-ns boundary?)
+             ;; the done-point runs the external tier for REAL right after this, and
+             ;; reports its own cap in :findings — an in-image deferral note there is
+             ;; noise about an implementation detail
+             boundary? (dissoc :external-pending))]
+    (assoc r :ms (- (System/currentTimeMillis) t0))))
 
 (defn ^{:export "slopp.mcp"} refresh-cache!
   "Advance the cached store from the journal (the record of truth in a

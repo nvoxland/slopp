@@ -323,7 +323,7 @@
                 ;; launch, so no amount of stubbing makes `slopp.http` resolve.
                 ;; Re-prepare the image FOR the candidate and load once more.
                 res     (if (and load? (:err res)
-                                 (seq (boot/framework-files))
+                                 (seq (engine/framework-files*))
                                  (seq (set/difference (engine/used-families candidate)
                                                       (engine/used-families base))))
                           (do (engine/fresh-image! session candidate)

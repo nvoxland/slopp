@@ -1013,3 +1013,29 @@
         (rm-rf! dir-a)
         (rm-rf! (.getParentFile (io/file dir-b)))
         (rm-rf! (.getParentFile (io/file bare)))))))
+
+(deftest ^:external a-clone-knows-a-namespaces-platform-before-it-loads-it
+  ;; The platform declarations the paths carry were replayed AFTER every
+  ;; namespace was ingested — so a `.cljs` namespace was handed to the JVM
+  ;; oracle as ordinary Clojure and the clone died inside it. Found by CI's
+  ;; via-slopp lane importing slopp's own tree: `slopp.webapp.dom` requires
+  ;; `goog.object`, which no JVM has.
+  (let [dir-a (temp-dir)
+        dir-b (str (temp-dir) "/clone")
+        bare  (bare-repo! (str (temp-dir) "/remote.git"))
+        sess  (external/open! {:slopp.ops/dir dir-a})]
+    (try
+      (ops/ingest! sess 'pf.core "(ns pf.core)\n\n(defn ^:unused-ok base \"B.\" [x] x)\n")
+      (is (nil? (:error (ops/module-platform! sess "pf.dom" :cljs :prompt "browser only"))))
+      ;; a namespace only a browser can load
+      (is (nil? (:error (ops/ingest! sess 'pf.dom "(ns pf.dom (:require [goog.object :as gobj]))\n\n(defn ^:unused-ok get-it \"G.\" [o] (gobj/get o \"x\"))\n"))))
+      (external/commit-point! sess "v1" :agent "alice")
+      (is (nil? (:error (sync/push! dir-a :url bare))))
+      (let [c (sync/clone! bare dir-b :agent "bob")]
+        (is (nil? (:error c)) (str "the .cljs namespace must not be loaded into the JVM on the way in: " (pr-str c)))
+        (is (= 2 (:namespaces c))))
+      (finally
+        (ops/close! sess)
+        (rm-rf! dir-a)
+        (rm-rf! (.getParentFile (io/file dir-b)))
+        (rm-rf! (.getParentFile (io/file bare)))))))

@@ -847,29 +847,18 @@
                                              :prompt (str "clone: dep from " url))]
                         (when (:error r)
                           (throw (ex-info (str "dep " lib ": " (:error r)) {})))))
-                    (swap! sess assoc :adopting? true)
-                    (doseq [ns-sym (boot/dependency-order sources)]
-                      (let [r (ops/ingest! sess ns-sym (get sources ns-sym)
-                                           :agent agent
-                                           ;; the ask that created it — the one
-                                           ;; write here that had none, so an
-                                           ;; imported form's first version answered
-                                           ;; "why does this exist" with silence
-                                           :prompt (str "imported from git "
-                                                        (subs tip 0 (min 12 (count tip)))
-                                                        " (" url ")"))]
-                        (when (:error r)
-                          (throw (ex-info (str ns-sym ": " (:error r)) {})))))
-                    (swap! sess dissoc :adopting?)
-                    (ops/adopt-modules! sess :agent agent)
-                    ;; The two declarations the tree's PATHS carry. Replayed
-                    ;; through the ordinary verbs, so they land as the same
-                    ;; deltas an agent's own declaration would — `path-ns`
-                    ;; captures the namespace name and drops the root and the
-                    ;; extension, which is exactly where role and platform
-                    ;; live, so without this a cloned `.cljc` renders as
-                    ;; `.clj` and an instrument materializes into `src/` and
-                    ;; ships.
+                    ;; The two declarations the tree's PATHS carry, replayed
+                    ;; through the ordinary verbs so they land as the deltas an
+                    ;; agent's own declaration would — and replayed BEFORE the
+                    ;; ingests, because each ingest asks `jvm-loadable?` of its
+                    ;; namespace: a `.cljs` one declared afterwards was handed
+                    ;; to the JVM oracle as Clojure, and the clone died inside
+                    ;; it on `goog.object` (CI's via-slopp lane, importing
+                    ;; slopp's own tree). `path-ns` captures the name and drops
+                    ;; the root and the extension, which is exactly where role
+                    ;; and platform live, so without this a cloned `.cljc`
+                    ;; renders as `.clj` and an instrument materializes into
+                    ;; `src/` and ships.
                     (let [{:keys [platforms roles]} (path-declarations (keys tree))]
                       (doseq [[n pf] (sort platforms)]
                         (ops/module-platform! sess n pf :agent agent
@@ -879,9 +868,24 @@
                         (ops/module-role! sess m :instrument :agent agent
                                           :prompt (str "clone: " m
                                                        " materializes under instruments/"))))
+                    (swap! sess assoc :adopting? true)
+                    (doseq [ns-sym (boot/dependency-order sources)]
+                      (let [r (ops/ingest! sess ns-sym (get sources ns-sym)
+                                           :agent agent
+                                           ;; the ask that created it — the one
+                                           ;; write here that had none, so an
+                                           ;; imported form's first version answered
+                                           ;; \"why does this exist\" with silence
+                                           :prompt (str "imported from git "
+                                                        (subs tip 0 (min 12 (count tip)))
+                                                        " (" url ")"))]
+                        (when (:error r)
+                          (throw (ex-info (str ns-sym ": " (:error r)) {})))))
+                    (swap! sess dissoc :adopting?)
+                    (ops/adopt-modules! sess :agent agent)
                     (let [conn (:db @sess)]
                       (db/set-meta! conn "git-remote" (str url))
-                                            (doseq [[path text] tree
+                      (doseq [[path text] tree
                               :when (and (nil? (path-ns path))
                                          (not= "deps.edn" path))]
                         (ops/file-put! sess path text :agent agent

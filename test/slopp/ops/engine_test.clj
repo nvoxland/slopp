@@ -17,7 +17,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.ops :as ops]
             [slopp.edit :as edit]
-            [slopp.store :as store] [slopp.ops.engine :as engine] [slopp.ops.external :as external] [rewrite-clj.parser :as p] [slopp.store.render :as store.render] [slopp.store.db :as db] [rewrite-clj.node :as n] [next.jdbc :as jdbc]))
+            [slopp.store :as store] [slopp.ops.engine :as engine] [slopp.ops.external :as external] [rewrite-clj.parser :as p] [slopp.store.render :as store.render] [slopp.store.db :as db] [rewrite-clj.node :as n] [next.jdbc :as jdbc] [clojure.string :as str]))
 
 (deftest ^:external heal-replays-a-new-namespace-this-call-did-not-touch
   ;; The MERGE shape, and the gap the sibling test below does not cover.
@@ -796,3 +796,27 @@
               (finally (ops/close! c))))
           (finally (ops/close! b))))
       (finally (ops/close! a)))))
+
+(deftest ^:external a-checkout-reads-its-framework-from-source-when-no-jar-manifest-is-on-the-classpath
+  ;; A checkout run — CI's native-proof lanes, `clojure -M -m slopp.daemon` —
+  ;; had no framework to vendor: the kernel's reader answered nil without the
+  ;; jar's generated manifest, and a web app's first namespace could not
+  ;; resolve slopp.http. The source tree that build.clj reads to GENERATE that
+  ;; manifest is on the classpath in exactly that case, so it is read there.
+  ;; Lives here rather than in the kernel: the families come from the
+  ;; capability catalog, and the kernel may not reach up to it.
+  ;;
+  ;; ^:external because the in-image oracle is the THIRD state: it loads store
+  ;; code over the wire with no src/ on its classpath, so it sees neither the
+  ;; manifest nor the source and the reader honestly answers nil there. The
+  ;; external tier runs from a materialized tree, which is the checkout shape.
+  (let [files (engine/framework-files-from-source)]
+    (is (map? files))
+    (is (contains? files "http") (pr-str (keys files)))
+    (is (contains? (get files "http") "slopp/http.clj") (pr-str (keys (get files "http"))))
+    (is (str/includes? (get-in files ["http" "slopp/http.clj"]) "(ns slopp.http"))
+    (is (contains? (get files "_") "slopp/lang.cljc") "the common family rides along")
+    (is (not-any? #(str/starts-with? % "slopp/api") (mapcat keys (vals files)))
+        "and nothing outside the shipping families is handed over")
+    (testing "and the one reader every consumer asks answers the same way"
+      (is (seq (engine/framework-files*))))))
