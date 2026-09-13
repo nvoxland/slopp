@@ -74,7 +74,6 @@ query_capabilities {}
 | Key | Default | Meaning |
 |---|---|---|
 | `app.name` | the store directory name | Application name, at build time. For a `cli` project it is also the program's name in its own usage text — one string deliberately, since help that teaches a command the shell does not have is worse than no help. |
-| `app.version` | `0.0.0` | Carried into build artifacts. |
 | `app.main` | unset | The entry fn (`myapp.core/-main`). `build` falls back to it when given no `main` argument. |
 | `cli.enabled` | `false` | Whether this project is a command-line program. With it, slopp GENERATES the entry from your `:cli/command` forms and supplies argument parsing, injected streams and exit codes; without it an app's main runs with none of that. Refused alongside `app.main` — both declare an entry. |
 | `http.enabled` | `false` | Whether this project serves HTTP. The master opt-in: every http rule and `query_surface`'s `:http` section exists only when true. |
