@@ -3147,3 +3147,40 @@ config as code, the unconfirmed suspicions (config registers not
 thread-private, `undo` past the thread base, `images-up` blind to app
 children), and the tool frictions the review itself hit.
 
+## 2026-09-13 — v0.3.0: the first release cut on `nvoxland/slopp`, and what cutting it found
+
+The release lane ran three times before it shipped. Each failure was a real
+defect the smoke was designed to catch, and none was visible locally:
+
+- **The kernel needs Clojure 1.12 and nothing pinned it.** `slopp.kernel.boot`
+  binds `clojure.core/*repl*` (1.12). The store's manifest had never declared
+  Clojure — the checkout's own `deps.edn` supplied it on every local build —
+  so every generated `deps.edn`, the projection's included, left the version
+  to the CLI's default. On the runner that was older; the jar built, and the
+  daemon died at boot compiling its own kernel. Fixed by declaring
+  `org.clojure/clojure 1.12.5` in the manifest like every other dependency;
+  `selfcheck-test/the-manifest-pins-the-clojure-the-kernel-needs` reads the
+  materialized `deps.edn` (not `built-store`, which is a code-only seam and
+  carries no manifest — the first cut of the test could never go green).
+- **A jar boot served no pages.** `slopp.daemon` listed `slopp.ui.shell` and
+  `slopp.ui.styles` in `serving-opts` but required neither; a route builder
+  reads loaded vars, and a process that loads only the daemon's closure — a
+  jar from a neutral dir — served 404 for `/`, every page and the stylesheet
+  while `/api/status` answered. The kernel's load-everything boot and the
+  managed child's load-order both hid it; the earlier dev-instance fix had
+  stopped at `slopp.ui.pages`. Every served namespace is required now, the
+  closure test asserts each, and `a-daemon-that-loads-only-its-closure-still-
+  serves-its-pages` drives a bare JVM. The release smoke probes the pages,
+  not only the status endpoint — it had passed on the dead jar.
+- The first v0.3.0 tag and asset were deleted and re-cut under the same
+  version: nothing had installed it and the plugin pin still said v0.2.0.
+
+Also this session, on the way to the release: CI's from-files lane had never
+been the suite (rt-test's sink, cli-test's fixture) and never finished — the
+parent-death watchdog read the runner's `/dev/null` stdin as a dead parent and
+exited 0 mid-run, green for months. The watchdog probes stdin at install and
+arms only on a live pipe. The `^:external` tier is excluded from CI for now
+(25+ min sharded on two cores; cost recorded in
+`ideas/product/external-tier-cost.md`); the in-image suite through
+`slopp.image.testmain` gates both workflows in ~21s.
+
