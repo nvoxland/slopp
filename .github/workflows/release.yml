@@ -60,14 +60,27 @@ jobs:
             if curl -sf http://127.0.0.1:7399/api/status > /tmp/status.json; then ok=1; break; fi
             sleep 1
           done
-          kill "$pid" 2>/dev/null || true
           if [ -z "$ok" ]; then
+            kill "$pid" 2>/dev/null || true
             cat /tmp/smoke.log
             echo "::error::the daemon did not answer /api/status within 120s"
             exit 1
           fi
           cat /tmp/status.json; echo
           test -s "$SMOKE/.slopp/daemon-7399.json" || { echo "::error::the daemon recorded no daemon file"; ls -la "$SMOKE/.slopp"; exit 1; }
+          # and the PAGES, not only the status endpoint: v0.3.0's first cut
+          # passed this smoke and answered 404 to every page and the
+          # stylesheet, because the jar loads the daemon's require closure and
+          # two served namespaces were listed but not required. A daemon
+          # nobody can open a page on is not a release.
+          for p in / /p/x /css/style.css /assets/cljs/main.js; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:7399$p")
+            echo "$p $code"
+            [ "$code" = "200" ] || { echo "::error::$p answered $code from the released jar"; exit 1; }
+          done
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7399/nope)
+          [ "$code" = "404" ] || { echo "::error::/nope answered $code — the shell's status is not derived"; exit 1; }
+          kill "$pid" 2>/dev/null || true
       - name: Tag + release
         env:
           GH_TOKEN: ${{ github.token }}
