@@ -9,7 +9,7 @@
   plausible while meaning something else. `slopp.image` and `slopp.ops.engine`
   read the result and cannot tell."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.kernel.rt :as rt]))
+            [slopp.kernel.rt :as rt] [clojure.java.shell :as sh]))
 
 ^:unsafe (deftest instrument-seam-records-and-restores
   ;; THE instrumentation seam (#121). traced-run had this loop inline; the
@@ -150,12 +150,62 @@
           (is (not-any? #{'rt-probe.attr/f7} @touched)))
         (finally (rt/restore! originals))))))
 
-(deftest the-runner-watchdog-installs-once
+(deftest ^:external the-runner-watchdog-installs-once
   ;; Test-runner JVMs carried NO parent-death watchdog (it lived only in the
   ;; image-boot path), so a hung or orphaned runner survived its parent — the
   ;; same leak class d9279 closed for images. The install is guarded by
   ;; thread name: however many surfaces run it, exactly one thread results.
-  (rt/install-parent-watchdog!)
-  (rt/install-parent-watchdog!)
-  (is (= 1 (count (filter #(= "slopp-parent-watchdog" (.getName ^Thread %))
-                          (keys (Thread/getAllStackTraces)))))))
+  ;;
+  ;; In a CHILD JVM with an open pipe, never in the one running this suite:
+  ;; armed here, the watchdog read the runner's /dev/null stdin as a dead
+  ;; parent and exited the whole suite mid-run with status 0 — which is how
+  ;; the from-files CI lane stayed green while never finishing. ^:external
+  ;; because the child requires slopp.kernel.rt off the classpath.
+  (let [code (str "(require 'slopp.kernel.rt)"
+                  " (slopp.kernel.rt/install-parent-watchdog!)"
+                  " (slopp.kernel.rt/install-parent-watchdog!)"
+                  " (println :threads (count (filter #(= \"slopp-parent-watchdog\" (.getName %))"
+                  " (keys (Thread/getAllStackTraces)))))")
+        r    (sh/sh "sh" "-c" (str "( sleep 3 ) | clojure -M -e " (pr-str code)))]
+    (is (re-find #":threads 1" (str (:out r))) (pr-str r))))
+
+(deftest ^:external the-watchdog-does-not-read-a-closed-stdin-as-a-dead-parent
+  ;; The watchdog treated stdin-EOF as \"the parent closed its pipe\" — true for
+  ;; an image, whose stdin IS that pipe, and false for any JVM started with
+  ;; stdin at /dev/null, which reads EOF at once and has no parent to mourn.
+  ;; A CI runner is exactly that. `the-runner-watchdog-installs-once` used to
+  ;; arm a real watchdog in the JVM running the suite, so on the runner the
+  ;; suite died with exit 0 and no summary after this namespace, and the
+  ;; from-files lane reported the truncated run as green on every run.
+  ;; Proven locally: same namespaces, `< /dev/null` exits 0 mid-run,
+  ;; `< <(sleep 600)` prints the summary and exits 1 on the real failure.
+  ;;
+  ;; Driven in CHILD JVMs, because the property is about the process the
+  ;; watchdog lives in. /dev/null cannot be told from a pipe by attributes on
+  ;; every platform, so the discriminator is TIME: a stdin already at EOF when
+  ;; the watchdog installs was never a live parent's pipe. ^:external: the
+  ;; child requires slopp.kernel.rt off the classpath, which the in-image
+  ;; oracle does not carry.
+  (let [code (str "(require 'slopp.kernel.rt)"
+                  " (println :armed (some? (slopp.kernel.rt/install-parent-watchdog!)))"
+                  " (Thread/sleep 1500)"
+                  " (println :survived)")]
+    (testing "stdin at EOF from the start: nothing to watch, the JVM lives"
+      (let [r (sh/sh "sh" "-c" (str "clojure -M -e " (pr-str code) " < /dev/null"))]
+        (is (zero? (:exit r)) (pr-str r))
+        (is (re-find #":armed false" (str (:out r))) (pr-str r))
+        (is (re-find #":survived" (str (:out r)))
+            (str "a JVM whose stdin was never a parent's pipe must outlive the install: " (pr-str r)))))
+    (testing "stdin an open pipe: the watchdog arms, and a parent that closes it ends the child"
+      (let [;; the writer OUTLIVES the boot: a JVM takes seconds to come up,
+            ;; and a pipe closed before the install is the /dev/null case
+            ;; above, not a parent dying. It closes once :armed has printed,
+            ;; which is what a parent's death looks like from the child
+            script (str "tmp=$(mktemp); ( while ! grep -q armed \"$tmp\" 2>/dev/null; do sleep 0.2; done ) | "
+                        "clojure -M -e " (pr-str code) " | tee \"$tmp\"; rm -f \"$tmp\"")
+            r (sh/sh "sh" "-c" script)]
+        ;; the pipe closes the moment :armed shows, long before the 1500ms
+        ;; sleep ends: the watchdog fires and :survived never prints
+        (is (re-find #":armed true" (str (:out r))) (pr-str r))
+        (is (not (re-find #":survived" (str (:out r))))
+            (str "a closed parent pipe must still end the child: " (pr-str r)))))))
