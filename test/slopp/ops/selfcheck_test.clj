@@ -19,7 +19,7 @@
             [clojure.string :as str]
             [slopp.store :as store]
             [slopp.index.refs :as refs]
-            [slopp.ops.external :as external] [slopp.project.capabilities :as capabilities] [rewrite-clj.node :as n]))
+            [slopp.ops.external :as external] [slopp.project.capabilities :as capabilities] [rewrite-clj.node :as n] [clojure.edn :as edn]))
 
 (deftest ^:external
   ^{:correspondence "the public WRITE verbs in the operation surface vs what the MCP wire dispatches — a verb nobody can reach is surface an agent is told about and cannot use"}
@@ -358,3 +358,24 @@
              " or a headless schema map makes slopp.mcp.tools unloadable on a"
              " fresh boot while a running image keeps serving the value it"
              " already has"))))
+
+(deftest ^:external the-manifest-pins-the-clojure-the-kernel-needs
+  ;; The kernel binds `clojure.core/*repl*`, a Clojure 1.12 var, and every
+  ;; generated deps.edn — the projection's, a build's — is the store's
+  ;; manifest. With no Clojure pinned, tools.deps takes the CLI's bundled
+  ;; default; on the CI runner that was older than 1.12, and the v0.3.0
+  ;; release jar died at boot compiling `slopp.kernel.boot`. The checkout's
+  ;; own deps.edn had masked it on every local build.
+  ;;
+  ;; Read off the MATERIALIZED deps.edn this tier runs beside, because that
+  ;; file is what a release's build reads. `built-store` is a code-only seam
+  ;; and carries no manifest at all.
+  (let [f     (java.io.File. "deps.edn")
+        deps  (some-> f slurp edn/read-string :deps)
+        coord (get deps 'org.clojure/clojure)
+        v     (:mvn/version coord)]
+    (is (.exists f) "the tier runs beside a generated deps.edn")
+    (is (some? coord)
+        (str "slopp's manifest declares Clojure itself, like every other dependency it ships with: " (pr-str (keys deps))))
+    (is (and (string? v) (<= 0 (compare v "1.12")))
+        (str "the kernel binds *repl*, which is 1.12+: " (pr-str coord)))))
