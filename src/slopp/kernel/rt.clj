@@ -312,19 +312,39 @@
 
 (defn ^:export install-parent-watchdog!
   "Start the parent-death watchdog in THIS process, install-once by thread
-  name. Stdin is a pipe from the parent JVM, so EOF means the parent's fds
-  closed — and EOF is a LEVEL, not an edge: a parent that died before this
-  ran still reads as EOF, so a late install fires immediately. nrepl images
-  board it on their launch command line; test runners call this from
-  testmain; both go through the same name guard, so however many surfaces
-  run it, exactly one thread results."
+  name; the thread when one was started, nil when one already ran or there
+  is nothing to watch. Stdin is a pipe from the parent JVM, so EOF means the
+  parent's fds closed. nrepl images board it on their launch command line;
+  test runners call this from testmain; both go through the same name guard,
+  so however many surfaces run it, exactly one thread results.
+
+  **A stdin already at EOF when this runs was never a live parent's pipe.**
+  A JVM started with stdin at `/dev/null` — a CI runner, a `< /dev/null`
+  shell — reads EOF at once and is orphaned by nothing; armed there, the
+  watchdog exited the process with status 0 partway through a test run, no
+  summary printed, and the from-files CI lane reported the truncated run as
+  green on every run. `/dev/null` cannot be told from a pipe by attributes
+  on every platform, so the discriminator is TIME: the first read happens
+  here, on the installing thread, and an immediate EOF installs nothing. A
+  real parent's pipe blocks that read — so it is bounded by `available`,
+  which is 0 for both an idle pipe and EOF, and only a read that RETURNS -1
+  at install time counts. The earlier docstring said EOF was a level, not an
+  edge, so a parent already dead at install would fire at once; that case
+  is now the same as no parent, which is what it looks like from here."
   []
   (when-not (some #(= "slopp-parent-watchdog" (.getName ^Thread %))
                   (keys (Thread/getAllStackTraces)))
-    (doto (Thread. (fn [] (try (while (not (neg? (.read System/in))))
-                               (catch Throwable _))
-                     (System/exit 0))
-                   "slopp-parent-watchdog")
-      (.setDaemon true)
-      (.start)))
-  nil)
+    (let [in System/in
+          ;; EOF NOW? Only when stdin is not blocking on a live writer: a
+          ;; pipe with nothing in it blocks, /dev/null answers -1 at once.
+          ;; `available` is 0 for both, so the probe is a read on a thread
+          ;; that is given a moment to come back — a live pipe never does.
+          probe (future (.read in))
+          eof?  (= -1 (deref probe 200 ::pending))]
+      (when-not eof? (doto (Thread. (fn [] (try (while (not (neg? (deref probe)))
+                                     (while (not (neg? (.read in)))))
+                                   (catch Throwable _))
+                         (System/exit 0))
+                       "slopp-parent-watchdog")
+          (.setDaemon true)
+          (.start))))))
