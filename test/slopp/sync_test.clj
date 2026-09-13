@@ -1039,3 +1039,17 @@
         (rm-rf! dir-a)
         (rm-rf! (.getParentFile (io/file dir-b)))
         (rm-rf! (.getParentFile (io/file bare)))))))
+
+(deftest the-test-command-takes-a-shard-count
+  ;; `slopp.sync test <dir> [shards]`. The runner derived the shard count
+  ;; from cores, and a two-core CI runner got ONE: the whole suite serial in
+  ;; one JVM, past the twenty-minute shard timeout, retried once, and red
+  ;; about nothing. The time goes to child image boots that wait rather than
+  ;; compute, so the count is the caller's to set, and the command carries it.
+  (let [seen (atom nil)]
+    (with-redefs [external/external-test-run! (fn [_ & {:keys [parallel]}] (reset! seen parallel) {:status :green})
+                  external/open! (fn [& _] (atom {}))
+                  ops/close! (fn [_] nil)]
+      (is (= 4 (sync/test-args "/tmp/x" "4")))
+      (is (nil? (sync/test-args "/tmp/x" nil)) "absent means auto, as before")
+      (is (thrown? Exception (sync/test-args "/tmp/x" "four")) "a count that is not one refuses"))))

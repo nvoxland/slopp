@@ -1036,12 +1036,27 @@
         (when-not (:error r) r)))
     (catch Exception _ nil)))
 
+(defn test-args
+  "The shard count `slopp.sync test <dir> [shards]` was given, as a number,
+  or nil for the runner's own choice. Refuses a value that is not a positive
+  integer rather than silently running serial: the whole reason the argument
+  exists is that the runner's choice on a two-core CI box was one shard,
+  and a typo that reproduced that would be indistinguishable from it."
+  [_dir shards]
+  (when shards
+    (let [n (try (Long/parseLong (str shards)) (catch NumberFormatException _ nil))]
+      (when-not (and n (pos? n))
+        (throw (ex-info (str "slopp.sync test <dir> [shards]: " (pr-str shards)
+                            " is not a shard count (a positive integer)")
+                        {:shards shards})))
+      n)))
+
 (defn -main
   "clojure -M -m slopp.sync clone <url> <dir> | import <dir> | import-dir <store-dir> <from-dir> | push <dir> [url] | pull <dir> | test <dir> | kernel <file-copy> <store-copy> [accepted,names]"
   [& [cmd a b c]]
   (let [usage (str "usage: clone <url> <dir> | import <dir>"
                    " | import-dir <store-dir> <from-dir> | push <dir> [url]"
-                   " | pull <dir> | test <dir>"
+                   " | pull <dir> | test <dir> [shards]"
                    " | kernel <file-copy> <store-copy> [accepted,names]")
         r (case cmd
             "clone"  (clone! a b)
@@ -1057,7 +1072,7 @@
                        (try (pull! sess)
                             (finally (ops/close! sess))))
             "test"   (let [sess (external/open! {:slopp.ops/dir a})]
-                       (try (external/external-test-run! sess)
+                       (try (external/external-test-run! sess :parallel (test-args a b))
                             (finally (ops/close! sess))))
             ;; The kernel exists as a hand-maintained file AND as a store
             ;; namespace, and no TEST can compare them: in every context a
