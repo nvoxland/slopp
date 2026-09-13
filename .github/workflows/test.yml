@@ -215,7 +215,13 @@ jobs:
         run: |
           git branch slopp HEAD 2>/dev/null || true
           clojure -M -m slopp.sync clone "$PWD" /tmp/store
+      # FOUR shards, said out loud: the runner derives its default from cores,
+      # and a two-core runner got ONE — the whole suite serial in one JVM,
+      # into the twenty-minute shard timeout, retried once, red about
+      # nothing. The time is child image boots that wait rather than
+      # compute, so four shards on two cores is the same three-and-a-half
+      # minute floor the suite has everywhere else.
       - name: Run the store's suite (isolated tier, built from the store)
         env:
           SLOPP_CLOJURE: clojure
-        run: clojure -M -m slopp.sync test /tmp/store
+        run: clojure -M -m slopp.sync test /tmp/store 4
