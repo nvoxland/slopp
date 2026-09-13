@@ -116,7 +116,8 @@ jobs:
           png = b"\x89PNG\r\n\x1a\n<3slopp"
           src = '''(ns app.web
             (:require [slopp.http :as http]
-                      [slopp.http.static :as static]))
+                      [slopp.http.static :as static]
+                      [slopp.rest :as rest]))
 
           (defn ^{:http/method :get :rest/path "/api/hello" :http/auth :public
                   :rest/response [:map [:msg :string]]} hello
@@ -127,9 +128,13 @@ jobs:
           (defn -main
             "Serve the declared endpoints + the /assets mount, and block."
             [& _]
+            ;; the endpoint DECLARES a contract, and a context that serves one
+            ;; without honouring it is refused at assembly — `validating` is
+            ;; what turns the declaration into an enforced one
             (http/serve! {:http/namespaces '[app.web]
                           :http/routes (static/mount-routes {"/assets" "public"}
                                                             (static/file-or-resource-reader "."))
+                          :http/wrap-context rest/validating
                           :http/port 8087})
             @(promise))
           '''
