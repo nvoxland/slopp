@@ -306,9 +306,15 @@ Background: `.context/dogfooding.md`.
 
 Three workflows, all on the human-owned branch, all checking out `slopp/main`:
 
-- `test.yml` — the suite from files, plus **via-slopp**: the pushed code
-  imports *itself* into a fresh store, putting every namespace through every
-  gate, then runs the store-built suite.
+- `test.yml` — **via-slopp**: the pushed code imports *itself* into a fresh
+  store, putting every namespace through every gate, then runs the sharded
+  external tier over it (`slopp.sync test`). There is deliberately no
+  "suite from files" lane any more: `clojure -M:test` over the projected tree
+  was never the suite (two namespaces assume slopp's own runner), and
+  rt-test's watchdog read the runner's `/dev/null` stdin as a dead parent and
+  exited 0 mid-run, so the lane stayed green while never finishing. Both
+  cloning jobs check out full history: the clone grafts onto the branch's
+  commits and a one-commit checkout dies inside JGit.
 - `native-proof.yml` — a sample app built through slopp, compiled to a GraalVM
   native binary, executed.
 - `release.yml` — manual dispatch with a version input: build the uberjar,

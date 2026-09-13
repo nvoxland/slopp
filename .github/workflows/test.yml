@@ -8,33 +8,17 @@ on:
   schedule:
     - cron: '17 5 * * *'
 jobs:
-  test-files:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: slopp/main
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-      - uses: DeLaGuardo/setup-clojure@13.0
-        with:
-          cli: latest
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.m2
-            ~/.gitlibs
-            ~/.deps.clj
-            ~/.clojure
-          key: deps-${{ runner.os }}-${{ hashFiles('deps.edn') }}
-          restore-keys: |
-            deps-${{ runner.os }}-
-      - name: Run the suite from the slopp branch
-        env:
-          SLOPP_CLOJURE: clojure
-        run: clojure -M:test
+  # There is no "suite from files" lane any more, and its absence is a
+  # finding. `clojure -M:test` from the checkout ran cognitect over the
+  # projected tree, and that was never the suite: two namespaces assume
+  # slopp's own runner (rt-test's tracing sink, cli-test's fixture namespace)
+  # and failed on every run — and rt-test armed a parent-death watchdog in
+  # the runner's JVM, which read the runner's /dev/null stdin as a dead
+  # parent and exited 0 mid-run, before cognitect's summary. The lane stayed
+  # green for months while never finishing. The suite is what `slopp.sync
+  # test` runs — the sharded external tier over a store built from this
+  # checkout — and that is test-via-slopp below, which is also the only run
+  # that puts every namespace through every write gate on the way in.
   # The SHIPPED prose — plugins/slopp/skills/** and docs/** — is the product,
   # and until now nothing checked it. The guard that exists for this class,
   # mcp-test's slopp-prose-never-names-a-tool-that-does-not-exist, scans STORE
@@ -205,6 +189,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: slopp/main
+          fetch-depth: 0   # the clone GRAFTS onto the branch's history and walks
+                           # its commits — a one-commit checkout dies inside JGit
+                           # as "Walk failure", reproduced locally with --depth 1
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
