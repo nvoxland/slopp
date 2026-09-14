@@ -1035,10 +1035,9 @@
 
     
 
-        daemon?
-    (str "slopp.kernel.boot: daemon (" mode ") — one slopp for the machine, serving"
-         " whatever projects attach; its own code is loaded from the jar and " dir
-         " is only a working directory it neither adopts nor writes")
+            daemon?
+    (str "slopp.kernel.boot: daemon (" mode ") — no project store at " dir
+         "; the daemon serves whatever projects attach, each with its own store")
 
     store-file?
     (str "slopp.kernel.boot: the store at " dir " has no namespaces yet — a freshly"
