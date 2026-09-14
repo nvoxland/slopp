@@ -1015,6 +1015,41 @@
        :main  'slopp.daemon/-main
        :args  []})))
 
+(defn boot-note
+  "The single line boot logs about where it loaded slopp's program from,
+  decided after [[load-store!]] runs. `loaded?` is whether any namespace came
+  from the store at `dir`; `daemon?` whether the entry is the machine daemon.
+
+  The daemon loads its own code from the JAR's classpath, so an empty `dir`
+  is not a project it serves — it reads no store there and writes none. Saying
+  otherwise (the unadopted-directory / first-write-creates-a-store line) made
+  a neutral working directory look like a project the daemon adopts and
+  manages. A NON-daemon boot that finds no store genuinely IS serving that
+  directory, so it keeps that message. A boot that DID load a program says so
+  — that covers both a source checkout and the daemon self-host loop, where
+  the code really does come from the dir's store."
+  [{:keys [daemon? loaded? store-file? dir mode]}]
+  (cond
+    loaded?
+    (str "slopp.kernel.boot: loaded slopp's program from the store at " dir " (" mode ")")
+
+    
+
+        daemon?
+    (str "slopp.kernel.boot: daemon (" mode ") — one slopp for the machine, serving"
+         " whatever projects attach; its own code is loaded from the jar and " dir
+         " is only a working directory it neither adopts nor writes")
+
+    store-file?
+    (str "slopp.kernel.boot: the store at " dir " has no namespaces yet — a freshly"
+         " adopted store, or the wrong directory (a populated one lives at "
+         dir "/.slopp/store.db)")
+
+    :else
+    (str "slopp.kernel.boot: no slopp store at " dir " — serving an unadopted"
+         " directory and leaving it untouched. The first write creates "
+         dir "/.slopp/store.db")))
+
 ^:unsafe (defn -main
   "clojure -M -m slopp.kernel.boot <dir> [--snapshot | --live] [--main ns/fn arg...]
 
@@ -1024,29 +1059,24 @@
   and hot-reloads changed namespaces (the watcher is a DAEMON thread — it
   never keeps the JVM alive after the program exits). --main trampolines any
   store CLI — in a fileless tree this is THE entry point: e.g.
-    clojure -M -m slopp.kernel.boot . --main slopp.sync/-main push . <url>"
+    clojure -M -m slopp.kernel.boot . --main slopp.sync/-main push . <url>
+
+  The daemon is the ordinary entry, and its code ships in the jar, so booting
+  it from a neutral dir loads NO store from that dir — [[boot-note]] says so
+  rather than treating the working directory as a project to adopt."
   [& args]
-  (let [{:keys [dir live? main args]} (parse-args args)]
+  (let [{:keys [dir live? main args]} (parse-args args)
+        daemon? (= main 'slopp.daemon/-main)
+        mode    (if live? "live" "snapshot")]
     (reset! boot-info {:dir dir
                        :mode (if live? :live :snapshot)
                        :booted-at (System/currentTimeMillis)})
-    (log! "slopp.kernel.boot: loading store at " dir " (" (if live? "live" "snapshot") ")")
     (let [sources (load-store! dir)]
-      ;; a typo'd dir CREATES an empty .slopp/store.db and loads zero
-      ;; namespaces; without this the real error surfaced downstream as
-      ;; requiring-resolve's "Could not locate …__init.class" — say it here
-      (when (empty? sources)
-        ;; two different situations, and only one is a mistake: an EMPTY
-        ;; store means someone pointed at the wrong dir, while NO store is
-        ;; the ordinary case for a dir that never adopted slopp — the
-        ;; server is expected to serve those and leave them alone
-        (if (.exists (io/file dir ".slopp" "store.db"))
-          (log! "slopp.kernel.boot: the store at " dir " has no namespaces yet —"
-                " a freshly adopted store, or the wrong directory (a"
-                " populated one lives at " dir "/.slopp/store.db).")
-          (log! "slopp.kernel.boot: no slopp store at " dir " — serving an"
-                " unadopted directory and leaving it untouched. Your first"
-                " write creates " dir "/.slopp/store.db.")))
+      (log! (boot-note {:daemon?     daemon?
+                        :loaded?     (boolean (seq sources))
+                        :store-file? (.exists (io/file dir ".slopp" "store.db"))
+                        :dir         dir
+                        :mode        mode}))
       ;; a namespace that did not load is now SURVIVABLE (load-store! is
       ;; best-effort), which makes saying so the whole job: an agent whose
       ;; store came up half-loaded must learn it from orientation rather than
