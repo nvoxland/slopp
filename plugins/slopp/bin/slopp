@@ -1,12 +1,13 @@
 #!/bin/bash
 # slopp CLI — the same release jar the MCP server runs, for direct use:
-#   slopp <op> [json|edn|@file]                one tool call, routed to the machine's daemon (started on demand)
+#   slopp <op> [json|edn|@file]                one tool call, routed to the running daemon
 #   slopp --call <op> [json|edn|@file]         the same call, the long-standing spelling
 #   slopp --main slopp.sync/-main import .     build the store from the repo's slopp branch
 #   slopp --main slopp.sync/-main test .       isolated suite from a store build
 #   slopp --doctor                             self-check the plugin wiring end-to-end
 #   slopp daemon [port] | stop | status        ONE slopp for the machine: MCP over HTTP for every project
-# Fetches and caches the versioned jar on first run; java 21+ required.
+# `slopp daemon` is yours to start and stop; nothing else here starts one.
+# It fetches and caches the versioned jar on first run; java 21+ required.
 set -euo pipefail
 
 VERSION="v0.3.0"
@@ -162,15 +163,16 @@ PYEOF
     ;;
 esac
 
-# ---- route the call to the machine's daemon, starting one if none answers ----
+# ---- route the call to the running daemon ----
 # There is no other way to run a tool call: the one-shot JVM that used to
 # open the store here stranded its writes on a thread nothing landed, and
-# the kernel refuses --call by name now. A call with no daemon STARTS one
-# (the same on-demand start the plugin's pipe does) and waits for it.
+# the kernel refuses --call by name now. A call with no daemon FAILS and
+# says so; the daemon is a process the user starts (`slopp daemon`) and
+# owns, never one a tool call brings up behind them.
 if [ -n "$TOOL" ] && [ -s "$ARGSFILE" ]; then
-  python3 - "$TOOL" "$ARGSFILE" "$0" <<'PYEOF'
-import json, os, subprocess, sys, time, threading, urllib.request
-tool, argsfile, me = sys.argv[1], sys.argv[2], sys.argv[3]
+  python3 - "$TOOL" "$ARGSFILE" <<'PYEOF'
+import json, os, sys, time, threading, urllib.request
+tool, argsfile = sys.argv[1], sys.argv[2]
 headers = {"Content-Type": "application/json", "X-Slopp-Dir": os.getcwd()}
 def machine_port():
     try: return int(json.load(open(os.path.expanduser("~/.slopp/config.json"))).get("daemon-port") or 7357)
@@ -191,22 +193,13 @@ def ensure():
         return live()
     except Exception:
         pass
-    port = PORT
-    if port != machine_port():
-        print(f"slopp: nothing answers on port {port}, which is a dev instance, not the machine's"
-              f" daemon — the machine daemon starts and refreshes it while its project is open there", file=sys.stderr)
-        sys.exit(1)
-    print(f"slopp: no daemon answering — starting one on port {port}", file=sys.stderr)
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
-    subprocess.Popen([me, "daemon", str(port)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL, env=env, start_new_session=True)
-    deadline = time.time() + 90
-    while time.time() < deadline:
-        try:
-            return live()
-        except Exception:
-            time.sleep(0.3)
-    raise RuntimeError("the daemon did not come up in 90s")
+    if PORT != machine_port():
+        print(f"slopp: no daemon answers on port {PORT}, a dev instance — its project's machine daemon"
+              f" starts it on attach and re-serves it at every done", file=sys.stderr)
+    else:
+        print(f"slopp: no slopp daemon answers on port {PORT} — start one with `slopp daemon`"
+              f" (it stays up until `slopp daemon stop`)", file=sys.stderr)
+    sys.exit(2)
 try:
     pf = ensure()
     # `slopp <op>` names its project by cwd (X-Slopp-Dir), so a project
@@ -289,7 +282,7 @@ if [ "${1:-}" = "--doctor" ]; then
       if out=$("$0" query_project '{}' 2>/dev/null | tail -1); then
         say "ok " "store probe via the daemon: query_project -> ${out:0:60}…"
       else
-        say "FAIL" "store at .slopp/store.db but the routed probe call failed ('slopp daemon status')"; rc=1
+        say "FAIL" "store at .slopp/store.db but the routed probe call failed — is a daemon running? ('slopp daemon status'; 'slopp daemon' starts one)"; rc=1
       fi
     fi
   else
@@ -298,8 +291,8 @@ if [ "${1:-}" = "--doctor" ]; then
   exit $rc
 fi
 
-# --warm: ensure the jar is cached, run nothing (the SessionStart hook uses
-# this so the one-time download never races the MCP connection timeout).
+# --warm: ensure the jar is cached, run nothing — for an install script or
+# an image build that wants the fetch done before the first `slopp daemon`.
 WARM=0
 if [ "${1:-}" = "--warm" ]; then
   WARM=1

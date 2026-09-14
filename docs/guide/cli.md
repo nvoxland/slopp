@@ -11,7 +11,7 @@ on first use.
 
 ```sh
 slopp <op> [json|edn|@file]             # one tool call, routed to the machine's daemon
-slopp daemon [port] | stop | status     # the daemon: one slopp for the machine, started on demand
+slopp daemon [port] | stop | status     # the daemon: one slopp for the machine, yours to start
 slopp --main slopp.sync/-main import .  # build a store from the repo's slopp branch
 slopp --main slopp.sync/-main test .    # isolated suite from a store build
 slopp --doctor                          # self-check the wiring end to end
@@ -39,9 +39,9 @@ slopp --call report '{"contains":"invoice"}'
 slopp --call commit_point '{"description":"release 1.2","agent":"ci"}'
 ```
 
-Every call routes to the machine's daemon, which starts if none answers,
-and runs on a session the daemon keeps for the project in the current
-directory. A WRITE names its `thread` — the line it goes to — and a write
+Every call routes to the machine's daemon -- the one you started with
+`slopp daemon`; with none answering, the call fails and says so -- and runs
+on a session the daemon keeps for the project in the current directory. A WRITE names its `thread` — the line it goes to — and a write
 that names none is refused, naming `thread_open`; a script passes the same
 id on every call so its writes share one line and its `done` lands them.
 `agent` is an optional label and defaults to the thread. `--call <op>` is

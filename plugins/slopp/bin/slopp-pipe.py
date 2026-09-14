@@ -11,18 +11,24 @@ server is launched IN THE PROJECT DIR, so the one fact the daemon needs
 (which project) is this process's cwd, for free. A plugin-level HTTP entry
 cannot name it — its headersHelper runs in the plugin root and receives no
 project variable — and a per-project .mcp.json needs an approval prompt and
-duplicates the plugin's entry. A pipe also outlives Claude Code's ~7 s
-HTTP startup window: it starts a dead daemon and waits for it to bind.
+duplicates the plugin's entry.
+
+The pipe FINDS a daemon; it never starts one. The daemon is a process the
+user runs and owns (`slopp daemon`, in a terminal or a service), and when
+none answers on the configured port this entry fails with a sentence
+saying so — a server nobody started is a server nobody knows to stop,
+look at, or upgrade. Mid-session, a daemon that went away (a `slopp daemon
+stop`, a restart onto a new jar) is waited for briefly, so a client
+survives the restart it was asked to make.
 
     SLOPP_DAEMON_URL   override the daemon's address (else the daemon file)
     SLOPP_DAEMON_PORT  which daemon: the machine's (default; its port is
                        daemon-port in ~/.slopp/config.json, else 7357) or a
-                       DEV instance on another port — one a project's dev
-                       config runs, which this never starts, only finds
+                       DEV instance on another port, one a project's dev
+                       config runs. Neither is ever started from here.
 """
 import json
 import os
-import subprocess
 import sys
 import time
 import urllib.error
@@ -51,6 +57,8 @@ def daemon_file():
     port = wanted_port()
     name = "daemon.json" if port == machine_port() else f"daemon-{port}.json"
     return os.path.expanduser("~/.slopp/" + name)
+# how long a mid-session call waits for a daemon the user is bringing back
+RECONNECT_WAIT = float(os.environ.get("SLOPP_PIPE_RECONNECT_WAIT") or 60)
 PROJECT = os.path.realpath(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
 SLUG = os.path.basename(PROJECT.rstrip("/")) or "root"
 
@@ -79,37 +87,51 @@ def status_ok(url):
         return False
 
 
-def ensure_daemon():
-    """A live daemon's url — starting one, detached, when none answers."""
-    url = live_url()
-    if url and status_ok(url):
-        return url
-    port = wanted_port()
-    if port != machine_port():
-        # a DEV instance: a project's dev config runs it, refreshed at every
-        # done by the machine daemon. Starting one here would put a released
-        # daemon on the in-progress version's port and call it that.
-        log(f"nothing answers on port {port}, which is a dev instance, not the"
-            f" machine's daemon — it is started and refreshed by the machine"
-            f" daemon when its project is open there (a done re-serves it)")
-        sys.exit(1)
-    log(f"no daemon answering — starting one on port {port}")
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
-    subprocess.Popen([os.path.join(HERE, "slopp"), "daemon", str(port)],
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL, env=env, start_new_session=True)
-    deadline = time.time() + 90
-    while time.time() < deadline:
+def require_daemon(wait=0):
+    """A live daemon's url. None when nothing answers on the configured
+    port within `wait` seconds — and that is the caller's to report; nothing
+    here starts a daemon."""
+    deadline = time.time() + wait
+    while True:
         url = live_url()
         if url and status_ok(url):
             return url
-        time.sleep(0.3)
-    log("the daemon did not come up in 90s")
-    sys.exit(1)
+        if time.time() >= deadline:
+            return None
+        time.sleep(0.5)
+
+
+def error_reply(line, message):
+    """A JSON-RPC error for the request on `line`, so the client learns why
+    rather than waiting on a call that will never answer; empty for a
+    notification, which takes no reply."""
+    try:
+        rid = json.loads(line).get("id")
+    except Exception:
+        rid = None
+    if rid is None:
+        return ""
+    return json.dumps({"jsonrpc": "2.0", "id": rid,
+                       "error": {"code": -32000, "message": "slopp: " + message}})
+
+
+def no_daemon_sentence():
+    if os.environ.get("SLOPP_DAEMON_URL"):
+        return (f"no slopp daemon answers at {os.environ['SLOPP_DAEMON_URL']} (SLOPP_DAEMON_URL)"
+                f" — start one with `slopp daemon`, then reconnect")
+    port = wanted_port()
+    if port != machine_port():
+        return (f"no daemon answers on port {port}, a dev instance — its project's"
+                f" machine daemon starts it on attach and re-serves it at every done")
+    return (f"no slopp daemon answers on port {port} — start one with `slopp daemon`"
+            f" (it stays up until `slopp daemon stop`), then reconnect")
 
 
 def main():
-    base = ensure_daemon()
+    base = require_daemon()
+    if not base:
+        log(no_daemon_sentence())
+        sys.exit(1)
     endpoint = f"{base}/projects/{SLUG}/mcp"
     session = None
     initialize = None   # the client's own initialize, replayed on the client's behalf
@@ -173,7 +195,7 @@ def main():
                     # /api/ under a live pipe, and replaying initialize at
                     # the old endpoint was a 404 forever), so the base is
                     # re-read from its file first, not assumed.
-                    base = ensure_daemon()
+                    base = require_daemon(RECONNECT_WAIT) or base
                     endpoint = f"{base}/projects/{SLUG}/mcp"
                     session = reinitialize()
                     if session:
@@ -182,21 +204,22 @@ def main():
                 break
             except Exception as e:
                 # the daemon went away under us (a `slopp daemon stop`, a
-                # kernel restart). Bring one up and try ONCE more: the answer
-                # is late rather than the session dead. The session id is
-                # gone with the old daemon; a 404 on the retry tells the
-                # client to re-initialize.
+                # restart onto a new jar). Wait for the one the user brings
+                # back and try again: the answer is late rather than the
+                # session dead. The session id went with the old daemon, so
+                # the pipe re-initializes before re-sending.
                 if attempt < 3:
-                    log(f"daemon unreachable ({e}) — ensuring one and retrying")
-                    base = ensure_daemon()
-                    endpoint = f"{base}/projects/{SLUG}/mcp"
-                    session = reinitialize()
-                    req = post(line, session)
-                    continue
+                    log(f"daemon unreachable ({e}) — waiting for one to answer")
+                    found = require_daemon(RECONNECT_WAIT)
+                    if found:
+                        base = found
+                        endpoint = f"{base}/projects/{SLUG}/mcp"
+                        session = reinitialize()
+                        req = post(line, session)
+                        continue
                 log(f"daemon unreachable: {e}")
-                body = None
-        if body is None and not line:
-            break
+                body = error_reply(line, no_daemon_sentence())
+                break
         if body.strip():
             out.write(body.strip() + "\n")
             out.flush()

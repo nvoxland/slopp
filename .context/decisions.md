@@ -6922,7 +6922,8 @@ run against the daemon.
   stdio server is launched in the project dir, so `bin/slopp-pipe.py` knows
   the project for free, needs no per-project `.mcp.json` and no approval
   prompt, and can wait for a daemon to bind past the HTTP client's ~7 s
-  startup window (it starts a dead one itself). The daemon still speaks MCP
+  startup window (it started a dead one itself until `D-daemon-is-yours`,
+  2026-09-13). The daemon still speaks MCP
   over HTTP directly (ruling 1); the pipe is a transport adapter that
   implements none of it. Harnesses that can set a header get the direct URL.
 - **Push is a line on the next answer, not a notification (ruling 7,
@@ -7166,7 +7167,8 @@ project's app server like any other's. Nathan's framing, 2026-09-12.
   copy, not the staler one.
 - **The pipe and the CLI honour `SLOPP_DAEMON_PORT`** to pick the daemon file,
   and never START a daemon on a port that is not the machine's: a dev instance
-  is the machine daemon's to run.
+  is the machine daemon's to run. (Superseded the next day by `D-daemon-is-yours`:
+  they never start one on ANY port.)
 
 **What it costs.** A fix to a tool in use reaches the dev instance at the next
 done and the machine daemon at the next release. Two daemons of different
@@ -7176,6 +7178,40 @@ or the release ships first — the ordinary migration rule, and the one
 bootstrapping constraint left. No pinning: a project exists on a daemon while
 something is attached, and the second agent's attach is what puts slopp2 on
 the dev instance's picker.
+
+## D-daemon-is-yours (2026-09-13, user decision) — the daemon is a process the user starts; the plugin finds one or fails
+
+**Decision.** `slopp daemon` is the only thing that starts a daemon, and a
+person runs it. The plugin's MCP entry (`bin/slopp-pipe.py`), `slopp <op>`
+and the prompt hook FIND the daemon recorded for the configured port; with
+none live, the pipe exits with a sentence naming the port and the command,
+`slopp <op>` fails the same way, and the hook falls back to its sqlite
+bundle as it already did. Mid-session, a daemon that goes away is waited for
+(60 s) and the pending call is answered with a JSON-RPC error rather than the
+pipe dying, so a `slopp daemon stop` + `slopp daemon` onto a new jar keeps
+the client's session. The SessionStart hook that pre-fetched the jar is gone
+with the auto-start; the explicit `slopp daemon` fetches the pinned release
+on its first run, and `slopp --warm` remains for install scripts.
+
+**Why.** Revises `D-daemon`'s "`bin/slopp <op>` STARTS one if none answers"
+and the pipe's "it starts a dead one itself". A server nobody started is a
+server nobody knows to stop, look at, or upgrade: the auto-start put a
+detached JVM on the machine from whichever plugin copy ran first, holding
+whichever jar that copy pinned, and the question "what is running and where
+did it come from" had no honest answer (the 2026-09-12 session found a
+daemon still running from a checkout's `target/slopp.jar` under a stale
+`settings.local.json`). One daemon per machine is a thing a person owns,
+like a database server; the plugin is a client of it. Nathan's framing,
+2026-09-13: "have the user have an explicit slopp daemon they start
+independently, and the plugin fails if it cannot find one running on the
+configured port."
+
+**What it costs.** The first session on a fresh machine fails once, with
+the sentence; the README and the install page lead with `slopp daemon`. The
+`native-proof` and release smoke lanes already start the daemon explicitly
+and are unchanged. Not revised: a project's dev instance is still started
+by the machine daemon on attach and refreshed at done — that is the
+daemon serving a project's declared app, not the plugin starting a daemon.
 
 ## G6-revised (2026-09-12, user decision) — the repo is `nvoxland/slopp`; `slopp3` is deleted, not renamed
 

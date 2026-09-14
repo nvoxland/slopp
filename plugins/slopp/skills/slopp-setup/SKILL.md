@@ -62,10 +62,12 @@ and `bypassPermissions` never classifies.
 
 **One slopp for the machine.** The plugin's server entry is a PIPE onto
 the daemon — one process for every project on the box, MCP over HTTP
-behind a stdio face — never a JVM per session. It starts a daemon if none
-answers, names the project by its cwd, and changes nothing about the
-tools. What the daemon buys and how it is reached: `help {topic
-"running"}`, under "One slopp for the machine".
+behind a stdio face — never a JVM per session. The daemon is the user's
+to start (`slopp daemon`; `slopp daemon stop` ends it) — nothing in the
+plugin starts one, and a session with none on the configured port fails
+with a sentence saying to start it. The pipe names the project by its cwd
+and changes nothing about the tools. What the daemon buys and how it is
+reached: `help {topic "running"}`, under "One slopp for the machine".
 
 ## Importing a repo that's published this way
 
@@ -180,8 +182,10 @@ ordinary git.
 
 `slopp <op> [args]` runs ONE tool call against the store in the current
 directory and prints the result — args as JSON, EDN, or `@file`. It routes
-to the machine's daemon and starts one if none answers, so a bare CI box
-works; the call runs on a session the daemon keeps for that project. A
+to the machine's daemon — one YOU started (`slopp daemon`; on a CI box,
+start it in the background and wait for `slopp daemon status`) — and fails
+with a sentence when none answers; the call runs on a session the daemon
+keeps for that project. A
 READ needs nothing more. A WRITE needs a `thread` — the line it goes to —
 and a write that names none is REFUSED, naming the door: `slopp
 thread_open '{}'` mints an id (`t-xxxxxxxx`), and a script passes that

@@ -21,17 +21,22 @@ commits) flow back into stores via `git_pull`'s form-granular 3-way merge.
 /plugin install slopp@slopp
 ```
 
-The plugin bundles the MCP server (the versioned release jar, fetched and
-checksum-verified on first launch), the workflow skills (`slopp`,
-`slopp-setup`), and a `slopp` CLI on the session PATH. It serves whatever
-project you're in. Offline/no-marketplace install: unpack a checkout of
+The plugin bundles the workflow skills (`slopp`, `slopp-setup`), a `slopp`
+CLI on the session PATH, and an MCP entry that is a pipe onto **one daemon
+for the machine**, which you start yourself and which serves whatever
+project each session is in:
+
+```sh
+slopp daemon        # fetches the versioned release jar (~27MB, checksum-verified) on first run, then stays up
+slopp daemon stop   # when you want it gone; `slopp daemon status` asks it
+```
+
+The plugin never starts a daemon behind you: with none running on the
+configured port, the server entry fails and says so — start one, then
+reconnect with `/mcp`. Offline/no-marketplace install: unpack a checkout of
 `plugins/slopp/` into `~/.claude/skills/slopp/` — it loads as a plugin from
 there (add `"slopp@skills-dir": true` under `enabledPlugins` in
 `~/.claude/settings.json` if the server doesn't come up).
-
-First launch downloads the ~27MB jar; a SessionStart hook pre-warms the
-cache, but if the very first session's MCP connection times out mid-download,
-reconnect with `/mcp` once the fetch finishes — every later start is instant.
 
 If you run Claude Code in `auto` permission mode, allow the server once
 (`"permissions": {"allow": ["mcp__plugin_slopp_slopp"]}` in

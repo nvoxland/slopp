@@ -152,7 +152,9 @@ routes to `~/.slopp/daemon-7358.json` and never starts a daemon there. So: a
 fix to a TOOL you are using reaches the dev instance at the next done and the
 machine daemon at the next release. Until a release is cut, `target/slopp.jar`
 built from a commit point is the base (`SLOPP_JAR=$PWD/target/slopp.jar`, no
-`SLOPP_LIVE`): `slopp daemon stop`, and the next call starts it. The older
+`SLOPP_LIVE`): `slopp daemon stop`, then `slopp daemon` — the daemon is
+yours to run (2026-09-13); no call or session start brings one up, and a
+session with none on the port fails until you do. The older
 loop — `SLOPP_LIVE=1`, the daemon booted from this dir, the tool you use being
 the code you edit — still works and is what `.claude/settings.json` set
 before.

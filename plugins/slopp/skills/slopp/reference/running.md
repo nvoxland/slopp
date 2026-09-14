@@ -132,8 +132,11 @@ and the pages a human opens sit beside it:
 
 It records itself in `~/.slopp/daemon.json` (`url pid token`, readable by
 its owner only — the token is the write door's secret); `slopp
-<op>` and the prompt hook route there, and `slopp <op>` starts a daemon
-when that file names nothing alive. A second `slopp daemon` on the same
+<op>` and the prompt hook route there. **The daemon is the user's to start
+and stop** (`slopp daemon`, `slopp daemon stop`): nothing else starts one,
+and a call or a session with nothing live on the configured port fails with
+a sentence saying to start it — a server nobody started is a server nobody
+knows to stop, look at, or upgrade. A second `slopp daemon` on the same
 port refuses with the bind diagnosis. The daemon boots slopp's OWN code from the dir it
 is given, so the verb passes a neutral one (`~/.slopp`). A write through the door with
 no `thread` is refused, like a one-shot; a project's dev app server is
@@ -142,14 +145,15 @@ session's `done` refreshes that one server.
 
 **This is the only server.** The plugin's stdio entry is a PIPE onto the
 daemon — `bin/slopp-pipe.py`, one small process per session instead of a
-JVM — which starts a daemon if none answers, names the project by its cwd,
-and re-attaches by itself after a daemon restart or an idle reap. Nothing
-about the tools changes; subagents share the pipe as they shared the
-server. The per-session JVM is retired (2026-09-08): there is no
-`SLOPP_DAEMON=0`, no stdio loop in the jar, and `java -jar slopp.jar <dir>`
-starts a daemon. A shell call (`slopp <op> '{…}'`) routes to the daemon
-too, starting one if none answers — the one-shot JVM that used to open the
-store on its own is gone with the writes it stranded.
+JVM — which finds the running daemon, names the project by its cwd, and
+re-attaches by itself after a daemon restart or an idle reap (it waits up
+to a minute for the one you bring back, then answers the pending call with
+an error naming the port). Nothing about the tools changes; subagents share
+the pipe as they shared the server. The per-session JVM is retired
+(2026-09-08): there is no `SLOPP_DAEMON=0`, no stdio loop in the jar, and
+`java -jar slopp.jar <dir>` IS `slopp daemon`. A shell call (`slopp <op>
+'{…}'`) routes to the daemon too and fails without one — the one-shot JVM
+that used to open the store on its own is gone with the writes it stranded.
 
 **Working ON slopp is working through a released slopp.** The machine daemon
 is a release; slopp's own checkout is a project like any other, and its dev

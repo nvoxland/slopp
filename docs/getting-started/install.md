@@ -14,14 +14,21 @@ slopp needs **Java 21+** and nothing else. Everything below runs the same jar.
 /plugin install slopp@slopp
 ```
 
-That gives you the MCP server, the workflow skills (`slopp`, `slopp-setup`,
-`slopp-style`, `slopp-review`), a `slopp-reader` subagent, and a `slopp` CLI on
-the session PATH. The server runs in whatever project directory you are in.
+That gives you the workflow skills (`slopp`, `slopp-setup`, `slopp-style`,
+`slopp-review`), a `slopp-reader` subagent, a `slopp` CLI on the session PATH,
+and an MCP entry that is a pipe onto the machine's **daemon**: one slopp
+process serving every project you open, which you start yourself:
 
-The first launch downloads the release jar (~27MB) and checksum-verifies it. A
-SessionStart hook pre-warms that cache, but if the very first session's MCP
-connection times out mid-download, reconnect with `/mcp` once the fetch
-finishes. Every later start is instant.
+```sh
+slopp daemon
+```
+
+The first run downloads the release jar (~27MB), checksum-verifies it, and
+boots; the daemon then stays up until `slopp daemon stop`. Nothing in the
+plugin starts one for you -- a server nobody started is a server nobody knows
+to stop or upgrade -- so with no daemon on the configured port the MCP entry
+fails with a sentence saying so, and `/mcp` reconnects once you have started
+one. The daemon serves whatever project directory each session is in.
 
 If you run Claude Code in `auto` permission mode, allow the server once, in
 the project's or your user `.claude/settings.json`:

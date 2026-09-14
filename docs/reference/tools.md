@@ -84,7 +84,7 @@ the picker; the root, `http://127.0.0.1:7357/`, is the picker itself.
 !!! note "Nothing to install"
 
     The pages ship in the jar -- `public/` carries the compiled bundle -- so
-    the daemon the plugin starts serves them with nothing else installed.
+    the daemon serves them with nothing else installed.
     They began life as a separate application (`slopp-ui`) that consumed a
     project's published API over HTTP without opening its store; that
     discipline is kept by construction now that they live in the daemon.
