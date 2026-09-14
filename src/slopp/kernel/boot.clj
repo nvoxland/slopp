@@ -1003,7 +1003,7 @@
     (when (= "--call" (first post))
       (throw (ex-info (str "--call is retired: a one-shot JVM opened the store with no"
                            " daemon and stranded its writes. Run `slopp <op> '{…}'` —"
-                           " it routes to the machine's daemon and starts one if none answers.")
+                           " it routes to the machine's daemon, the one `slopp daemon` started.")
                       {:args (vec args)})))
     (if (second post)
       {:dir   dir
