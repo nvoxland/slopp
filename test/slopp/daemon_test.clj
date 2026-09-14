@@ -938,3 +938,23 @@
             (is (= 200 (:status rep)) (pr-str rep))
             (is (= "session pause" (:label dn)) (pr-str dn)))))
       (finally (daemon/reset-all!)))))
+
+(deftest ^:external an-attach-under-the-underscore-slug-is-named-by-its-dir
+  ;; The plugin's .mcp.json is one URL for every project, `/api/projects/_/mcp`,
+  ;; with the dir in a header — the same `_` the CLI door reads as "by dir".
+  ;; The display name is then the dir's basename, never the placeholder: the
+  ;; first HTTP-entry session listed its project as `_` and the brief handed
+  ;; out `/p/_`.
+  (let [d   (tmp-dir!)
+        ctx (daemon/context)]
+    (try
+      (let [r (slopp.http/handle! ctx {:request-method :post
+                                       :uri "/api/projects/_/mcp"
+                                       :headers {"x-slopp-dir" d}
+                                       :body {:jsonrpc "2.0" :id 1 :method "initialize"
+                                              :params {:protocolVersion "2025-03-26" :capabilities {}
+                                                       :clientInfo {:name "t" :version "0"}}}})]
+        (is (= 200 (:status r)) (pr-str r))
+        (is (= (.getName (java.io.File. ^String d)) (:slug (first (projects! ctx))))
+            (pr-str (projects! ctx))))
+      (finally (daemon/reset-all!)))))

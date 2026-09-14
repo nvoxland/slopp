@@ -686,7 +686,8 @@
                              (let [{:keys [dir error]} (project-dir req)]
                                (if error
                                  {:error error}
-                                 (attach! dir (get-in req [:path-params :slug])
+                                 (attach! dir (let [slug (get-in req [:path-params :slug])]
+                                                (when (not= "_" slug) slug))
                                           :sid (get-in req [:headers "mcp-session-id"])))))
    :slopp.mcp.http/detach! detach!})
 
