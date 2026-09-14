@@ -5,7 +5,7 @@
   (:require [cheshire.core :as json]
             [clojure.test :refer [deftest is testing]]
             [slopp.daemon :as daemon]
-            [slopp.http :as slopp.http] [slopp.ops.external :as external] [slopp.ops :as ops] [slopp.cache :as cache] [slopp.mcp :as mcp] [slopp.http.routes :as routes] [clojure.string :as str] [slopp.sync :as sync] [slopp.store :as store] [clojure.java.shell :as sh]))
+            [slopp.http :as slopp.http] [slopp.ops.external :as external] [slopp.ops :as ops] [slopp.cache :as cache] [slopp.mcp :as mcp] [slopp.http.routes :as routes] [clojure.string :as str] [slopp.sync :as sync] [slopp.store :as store] [clojure.java.shell :as sh] [clojure.java.io :as io] [slopp.store.db :as db] [slopp.ops.engine :as engine]))
 
 (defn- tmp-dir!
   "A fresh empty directory: a project nobody has written to yet. Canonical,
@@ -67,11 +67,11 @@
             (is (= 200 (:status r2)) (pr-str r2))
             (is (= #{d1 d2} (set (map :dir ps))) (pr-str ps))
             (daemon/detach! (get-in r2 [:headers "Mcp-Session-Id"]))))
-        (testing "an unknown session that names its dir is re-attached under a new id"
+        (testing "an unknown session that names its dir is re-attached under the id it holds"
           (let [r (post d1 "one" "nope" {:jsonrpc "2.0" :id 3 :method "ping"})
                 new (get-in r [:headers "Mcp-Session-Id"])]
             (is (= 200 (:status r)) (pr-str r))
-            (is (and (string? new) (not= "nope" new)) (pr-str (:headers r)))
+            (is (= "nope" new) (pr-str (:headers r)))
             (daemon/detach! new)))
         (testing "a standalone stream is declined, not broken"
           (let [r (slopp.http/handle! ctx {:request-method :get :uri "/api/projects/one/mcp"
@@ -468,11 +468,12 @@
   ;; not on the literal default: a machine that moved its daemon to 7400
   ;; still has one daemon.json, and a dev instance that happens to sit on
   ;; 7357 there is the other one.
-  (is (= "daemon.json" (.getName (daemon/daemon-file daemon/default-port daemon/default-port))))
-  (is (= "daemon-7358.json" (.getName (daemon/daemon-file 7358 daemon/default-port))))
-  (is (= "daemon.json" (.getName (daemon/daemon-file 7400 7400))))
-  (is (= "daemon-7357.json" (.getName (daemon/daemon-file 7357 7400))))
-  (is (= (daemon/daemon-file) (daemon/daemon-file (daemon/machine-port)))))
+  (is (= "daemon.json" (.getName (daemon/daemon-file daemon/default-port))))
+  (is (= "daemon-7358.json" (.getName (daemon/daemon-file 7358))))
+  (is (= "daemon-7400.json" (.getName (daemon/daemon-file 7400)))
+      "a moved daemon records under its port: the shell derives the same name from the same one knob")
+  (is (= (daemon/daemon-file) (daemon/daemon-file daemon/default-port)))
+  (is (= "daemon.json" (.getName (daemon/daemon-file)))))
 
 (deftest ^:external a-stale-session-id-is-re-attached-not-refused
   ;; A stdio client never re-initializes on its own: after the daemon
@@ -500,9 +501,14 @@
                            :params {:name "thread_open" :arguments {:thread "t-back"}}})
               new (get-in r [:headers "Mcp-Session-Id"])]
           (is (= 200 (:status r)) (pr-str r))
-          (is (and (string? new) (not= sid new)) (pr-str (:headers r)))
+          (is (= sid new) "re-attached under the id the client holds — a direct HTTP client never adopts another")
           (is (re-find #"t-back" (str (:body r))) (pr-str r))
-          (is (= [d] (mapv :dir (projects! ctx))) "re-attached, the project is open again")))
+          (is (= [d] (mapv :dir (projects! ctx))) "re-attached, the project is open again")
+          (let [r2 (post sid {:jsonrpc "2.0" :id 5 :method "tools/call"
+                              :params {:name "thread_list" :arguments {}}})]
+            (is (= 200 (:status r2)) (pr-str r2))
+            (is (= 1 (:sessions (first (projects! ctx))))
+                "the second request found the session; nothing was minted twice"))))
       (testing "no id at all, but a dir: attached where it stands"
         (let [r (post nil {:jsonrpc "2.0" :id 4 :method "tools/call"
                            :params {:name "thread_list" :arguments {}}})]
@@ -556,6 +562,7 @@
         mounted  (filter #(str/starts-with? (:path %) "/assets/") served)]
     (is (= #{"/api/projects" "/api/status"
              "/api/projects/:slug/mcp" "/api/projects/:slug/call"
+             "/api/projects/:slug/cli" "/api/projects/:slug/hook"
              "/api/projects/:slug/**" "/api/otel/v1/logs"
              "/**" "/css/style.css"}
            (set (map :path declared)))
@@ -747,16 +754,16 @@
   ;; port has four sources now, in an order worth pinning: the argument, the
   ;; environment, what the MANAGER told a declared entry, the machine's
   ;; setting, the default.
-  (is (= {:port 7358} (daemon/daemon-port "7358" nil nil nil)))
-  (is (= {:port 7400} (daemon/daemon-port nil "7400" nil nil)) "the environment, when no argument")
-  (is (= {:port 7358} (daemon/daemon-port "7358" "7400" nil nil)) "the argument wins")
-  (is (= {:port 7358} (daemon/daemon-port nil nil "7358" nil))
+  (is (= {:port 7358} (daemon/daemon-port "7358" nil nil)))
+  (is (= {:port 7400} (daemon/daemon-port nil "7400" nil)) "the environment, when no argument")
+  (is (= {:port 7358} (daemon/daemon-port "7358" "7400" nil)) "the argument wins")
+  (is (= {:port 7358} (daemon/daemon-port nil nil "7358"))
       "the manager's word: slopp's dev instance is told its port, not passed it")
-  (is (= {:port 7400} (daemon/daemon-port nil "7400" "7358" nil)) "the environment beats the manager")
-  (is (= {:port 7401} (daemon/daemon-port nil nil nil 7401)) "the machine's setting, when nothing else says")
-  (is (= {:port daemon/default-port} (daemon/daemon-port nil nil nil nil)) "the default otherwise")
-  (is (re-find #"not a port" (:error (daemon/daemon-port "seven" nil nil nil))))
-  (is (re-find #"not a port" (:error (daemon/daemon-port "70000" nil nil nil)))))
+  (is (= {:port 7400} (daemon/daemon-port nil "7400" "7358")) "the environment beats the manager")
+  (is (= {:port daemon/default-port} (daemon/daemon-port nil nil nil)) "the default otherwise")
+  (is (re-find #"SLOPP_DAEMON_PORT" (:error (daemon/daemon-port "seven" nil nil))) "the refusal names the one knob")
+  (is (re-find #"not a port" (:error (daemon/daemon-port "seven" nil nil))))
+  (is (re-find #"not a port" (:error (daemon/daemon-port "70000" nil nil)))))
 
 (deftest ^:external a-daemon-that-loads-only-its-closure-still-serves-its-pages
   ;; The jar's shape, driven for real: a fresh JVM that requires slopp.daemon
@@ -773,3 +780,161 @@
     (is (re-find #":page 200" (str (:out r))) (pr-str r))
     (is (re-find #":css 200" (str (:out r))) (pr-str r))
     (is (re-find #":nope 404" (str (:out r))) "and an address no page claims is still refused")))
+
+(deftest ^:external the-hook-door-records-the-ask-and-answers-the-map
+  ;; The prompt hook posts what Claude Code hands it and prints the answer:
+  ;; the ask goes into the project's mailbox (where the next write opens
+  ;; its turn from), and the map — the store line, the agent's thread, the
+  ;; recent asks — comes back as text. A system continuation is not an
+  ;; ask and reaches no mailbox. A project nobody opened gets nothing: a
+  ;; read never opens one.
+  (let [d     (tmp-dir!)
+        ctx   (daemon/context)
+        token (daemon/token)
+        hook  (fn [dir body]
+                (slopp.http/handle! ctx {:request-method :post
+                                         :uri "/api/projects/_/hook"
+                                         :headers {"x-slopp-dir" dir "x-slopp-token" token}
+                                         :body {:hook body}}))
+        mail  (fn [sid] (io/file d ".slopp" (str "pending-intent." sid)))]
+    (try
+      (testing "a project nobody opened: nothing is written, nothing said"
+        (let [r (hook d {:hook_event_name "UserPromptSubmit" :session_id "s-hook" :prompt "hello"})]
+          (is (= 200 (:status r)) (pr-str r))
+          (is (= "" (str (:body r))) (pr-str r))
+          (is (not (.exists (mail "s-hook"))))))
+      ;; open the project the way a shell does
+      (.close (db/open! d))
+      (slopp.http/handle! ctx {:request-method :post :uri "/api/projects/_/call"
+                               :headers {"x-slopp-dir" d}
+                               :body {:tool "thread_open" :arguments {:thread "t-hook"} :token token}})
+      (testing "an ask is recorded and answered with the map"
+        (let [r (hook d {:hook_event_name "UserPromptSubmit" :session_id "s-hook" :prompt "open a thread for me"})]
+          (is (= 200 (:status r)) (pr-str r))
+          (is (re-find #"text/plain" (get-in r [:headers "Content-Type"])) (pr-str (:headers r)))
+          (is (re-find #"^\[slopp\] .*namespaces" (str (:body r))) (pr-str r))
+          (is (re-find #"thread: s-hook" (str (:body r))) (pr-str r))
+          (is (.exists (mail "s-hook")) "the session's own mailbox")
+          (is (.exists (io/file d ".slopp" "pending-intent")) "and the unscoped one an older server reads")
+          (is (= {:session-id "s-hook" :prompt "open a thread for me"}
+                 (json/parse-string (slurp (mail "s-hook")) true)))))
+      (testing "a system continuation is not an ask: no mailbox, the tail alone"
+        (.delete (mail "s-hook"))
+        (let [r (hook d {:hook_event_name "UserPromptSubmit" :session_id "s-hook" :prompt "<task-notification>done</task-notification>"})]
+          (is (= 200 (:status r)) (pr-str r))
+          (is (re-find #"thread: s-hook" (str (:body r))) (pr-str r))
+          (is (not (.exists (mail "s-hook"))))))
+      (testing "an event the daemon has no opinion on is an empty answer"
+        (let [r (hook d {:hook_event_name "SessionStart" :session_id "s-hook"})]
+          (is (= 200 (:status r)) (pr-str r))
+          (is (= "" (str (:body r))) (pr-str r))))
+      (finally (daemon/reset-all!)))))
+
+(deftest ^:external the-hook-door-judges-a-bash-command
+  ;; PreToolUse denies the one smell with no in-session use — a raw store
+  ;; read — every time; PostToolUse advises on the rest once per session
+  ;; per half hour, and says nothing about an innocent command.
+  (let [d     (tmp-dir!)
+        ctx   (daemon/context)
+        token (daemon/token)
+        hook  (fn [body]
+                (slopp.http/handle! ctx {:request-method :post
+                                         :uri "/api/projects/_/hook"
+                                         :headers {"x-slopp-dir" d "x-slopp-token" token}
+                                         :body {:hook body}}))
+        bash  (fn [event sid cmd]
+                (hook {:hook_event_name event :session_id sid :tool_name "Bash"
+                       :tool_input {:command cmd}}))]
+    (try
+      (.close (db/open! d))
+      (slopp.http/handle! ctx {:request-method :post :uri "/api/projects/_/call"
+                               :headers {"x-slopp-dir" d}
+                               :body {:tool "thread_open" :arguments {:thread "t-bash"} :token token}})
+      (testing "a raw store read is denied before it runs"
+        (let [r (bash "PreToolUse" "s-1" "sqlite3 .slopp/store.db 'select 1'")
+              j (json/parse-string (:body r) true)]
+          (is (= 200 (:status r)) (pr-str r))
+          (is (= "deny" (get-in j [:hookSpecificOutput :permissionDecision])) (pr-str r))))
+      (testing "archaeology is advised after it ran, once per session per half hour"
+        (let [r1 (bash "PostToolUse" "s-1" "git log -3")
+              r2 (bash "PostToolUse" "s-1" "git log -5")
+              r3 (bash "PostToolUse" "s-2" "git log -5")]
+          (is (re-find #"query_changes" (str (:body r1))) (pr-str r1))
+          (is (= "" (str (:body r2))) "the same session is not told twice")
+          (is (re-find #"query_changes" (str (:body r3))) "another session has not heard it")))
+      (testing "an innocent command gets nothing"
+        (is (= "" (str (:body (bash "PostToolUse" "s-1" "ls -la"))))))
+      (finally (daemon/reset-all!)))))
+
+(deftest ^:external the-cli-door-takes-a-text-frame-and-answers-text
+  ;; `slopp <op>` posts header lines, a blank line and the payload — the
+  ;; shell builds no JSON — and prints what comes back: 200 with the op's
+  ;; answer, 409 with the refusal when the op refused, 400 for a frame that
+  ;; is not a call, 403 without the token.
+  (let [d     (tmp-dir!)
+        ctx   (daemon/context)
+        token (daemon/token)
+        cli   (fn [frame & [tok]]
+                (slopp.http/handle! ctx {:request-method :post
+                                         :uri "/api/projects/_/cli"
+                                         :headers (cond-> {"x-slopp-dir" d}
+                                                    (not= tok :none) (assoc "x-slopp-token" (or tok token)))
+                                         :body frame}))]
+    (try
+      (testing "a tool with JSON arguments"
+        (let [r (cli "tool: thread_open\n\n{\"thread\":\"t-frame\"}")]
+          (is (= 200 (:status r)) (pr-str r))
+          (is (re-find #"text/plain" (get-in r [:headers "Content-Type"])) (pr-str (:headers r)))
+          (is (re-find #"t-frame" (str (:body r))) (pr-str r))))
+      (testing "a tool with EDN arguments"
+        (let [r (cli "tool: thread_open\n\n{:thread \"t-edn\"}")]
+          (is (= 200 (:status r)) (pr-str r))
+          (is (re-find #"t-edn" (str (:body r))) (pr-str r))))
+      (testing "a write naming no thread is the door's refusal, as a 409 with the words"
+        (let [r (cli "verb: add\ntarget: x.y\n\n(ns x.y)\n(defn f [] 1)\n")]
+          (is (= 409 (:status r)) (pr-str r))
+          (is (re-find #"thread_open" (str (:body r))) (pr-str r))))
+      (testing "a frame that is not a call is a 400 saying why"
+        (let [r (cli "verb: change\n\n(defn f [] 1)")]
+          (is (= 400 (:status r)) (pr-str r))
+          (is (re-find #"section markers" (str (:body r))) (pr-str r))))
+      (testing "without the token, nothing runs"
+        (is (= 403 (:status (cli "tool: thread_list\n\n{}" :none)))))
+      (finally (daemon/reset-all!)))))
+
+(deftest ^:external the-stop-hook-runs-the-session-pause-done-under-the-token
+  ;; Stop is a write — the pause done on the agent's thread — so it needs
+  ;; the daemon's token like every write from a shell; a project with no
+  ;; store has nothing to pause.
+  (let [d     (tmp-dir!)
+        ctx   (daemon/context)
+        token (daemon/token)
+        hook  (fn [body tok]
+                (slopp.http/handle! ctx {:request-method :post
+                                         :uri "/api/projects/_/hook"
+                                         :headers (cond-> {"x-slopp-dir" d}
+                                                    tok (assoc "x-slopp-token" tok))
+                                         :body {:hook body}}))
+        stop  {:hook_event_name "Stop" :session_id "s-stop"}]
+    (try
+      (testing "no store: nothing to pause, nothing said"
+        (let [r (hook stop token)]
+          (is (= 200 (:status r)) (pr-str r))
+          (is (= "" (str (:body r))))))
+      (.close (db/open! d))
+      (slopp.http/handle! ctx {:request-method :post :uri "/api/projects/_/call"
+                               :headers {"x-slopp-dir" d}
+                               :body {:tool "thread_open" :arguments {:thread "s-stop"} :token token}})
+      (testing "without the token, a write does not run"
+        (is (= 403 (:status (hook stop nil)))))
+      (testing "with it, the pause done runs on the session's thread"
+        (let [r (hook stop token)]
+          (is (= 200 (:status r)) (pr-str r))
+          (let [rep (slopp.http/handle! ctx {:request-method :post :uri "/api/projects/_/call"
+                                             :headers {"x-slopp-dir" d}
+                                             :body {:tool "query_commits" :arguments {} :token token}})
+                ses (:reader (#'daemon/api! d))
+                dn  (db/last-marker (:db @ses) (engine/session-line ses) :done)]
+            (is (= 200 (:status rep)) (pr-str rep))
+            (is (= "session pause" (:label dn)) (pr-str dn)))))
+      (finally (daemon/reset-all!)))))

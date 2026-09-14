@@ -256,3 +256,14 @@
     (testing "and an object body still decodes as before"
       (is (= {:tool "x"} (get-in (rest.contract/decode-request schema {:body {:tool "x"}})
                                  [:value :body]))))))
+
+(deftest a-string-request-contract-takes-the-body-as-text
+  ;; The carriers merge, so a body has to be an object — unless the contract
+  ;; says the body IS text. `:rest/request :string` is a door for a shell
+  ;; that posts a source blob and builds no JSON around it: the text arrives
+  ;; as it stands, and the answer for no text is the contract's 400.
+  (is (= {:value {:path-params {:slug "_"} :query-params nil :body "tool: x\n\n{}"}}
+         (rest.contract/decode-request :string {:path-params {:slug "_"} :body "tool: x\n\n{}"})))
+  (is (re-find #"text" (:error (rest.contract/decode-request :string {:path-params {} :body nil}))))
+  (is (re-find #"text" (:error (rest.contract/decode-request :string {:path-params {} :body {:a 1}})))
+      "an object is not the text the contract asked for"))

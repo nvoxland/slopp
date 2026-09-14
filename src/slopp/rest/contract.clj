@@ -103,6 +103,18 @@
     (nil? schema)
     {:value {:path-params path-params :query-params query-params :body body}}
 
+    ;; the contract says the body IS text — a shell posting a source blob
+    ;; with no JSON around it — so it travels as it stands and the merge
+    ;; rule below, which is for object bodies, does not apply
+    (= :string schema)
+    (if (string? body)
+      {:value {:path-params path-params :query-params query-params :body body}}
+      {:error (str "request does not match the declared contract: the body must"
+                   " be text, and this one is "
+                   (cond (nil? body) "empty"
+                         (map? body)  "a JSON object"
+                         :else        (str "a " (.getSimpleName (class body)))))})
+
     ;; the carriers MERGE, so a body has to be an object to take part. An
     ;; array, a bare scalar, or the raw text an adapter passes through when
     ;; the body did not parse is the caller's fault and gets the caller's

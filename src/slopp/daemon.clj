@@ -21,7 +21,7 @@
             ;; the stylesheet (the v0.3.0 jar answered 404 everywhere).
             [slopp.ui.pages]
             [slopp.ui.shell]
-            [slopp.ui.styles]))
+            [slopp.ui.styles] [slopp.daemon.hooks :as hooks] [slopp.read.history :as history] [slopp.ops.engine :as engine] [clojure.java.io :as io]))
 
 (defonce ^:private state
   ;; `:projects` {dir {:slug :dir :opened-at :sessions #{sid}
@@ -110,6 +110,23 @@
                   :app (when (:url app)
                          {:url (:url app)
                           :branch (some-> reader deref :branch str)})})))))
+
+(defn ^{:export true
+        :breaking-ok "the [port machine] arity is REMOVED with the machine setting: the default port's daemon is the machine's, and any other port records under its own name"}
+  daemon-file
+  "Where a daemon records itself: `~/.slopp/daemon.json` — `{url port token
+  pid started}` — for the default port, `~/.slopp/daemon-<port>.json` for
+  any other. The shell derives the same name from the same one knob
+  (`SLOPP_DAEMON_PORT`), so the two never disagree; a dev instance on
+  another port (slopp's own, run from its store by the same machinery every
+  project's dev instance gets) never takes the default's file over on boot.
+  One writer per file by construction."
+  ([] (daemon-file default-port))
+  ([port]
+   (java.io.File. (System/getProperty "user.home")
+                  (if (= (long port) (long default-port))
+                    ".slopp/daemon.json"
+                    (str ".slopp/daemon-" port ".json")))))
 
 (defn- store-file?
   "Whether `dir` has a store yet — a project's first durable write creates
@@ -597,17 +614,17 @@
 
   Under the lock for the whole open, deliberately: two first-attaches on
   one dir must not both mint the project."
-  [dir slug]
+  [dir slug & {:keys [sid]}]
   (locking state
     (let [now     (System/currentTimeMillis)
-          sid     (str (java.util.UUID/randomUUID))
+          sid     (or (not-empty (str sid)) (str (java.util.UUID/randomUUID)))
           [proj first?] (ensure-project! dir slug)
           owner   (delay (:reader (api! dir)))
           session (external/open! {:slopp.ops/dir         dir
                                    :slopp.ops/lazy-image? true
                                    ;; the session's own label; the THREAD an
                                    ;; agent writes on is what it passes
-                                   :slopp.ops/agent-id    (str "mcp-" (subs sid 0 8))})]
+                                   :slopp.ops/agent-id    (str "mcp-" (subs sid 0 (min 8 (count sid))))})]
       (swap! session assoc :require-turns? true :daemon? true
              :app-owner owner
              :op-cards mcp/op-cards
@@ -660,55 +677,6 @@
           (swap! state assoc-in [:projects dir :cli] {:session session :last-seen now})
           session)))))
 
-^:unsafe (defn ^{:http/method :post :rest/path "/api/projects/:slug/call" :http/auth :public
-                 :rest/request call-contract
-                 :rest/response :any
-                 :rest/unconstrained-ok "the op's own answer as the CLI prints it: {isError text}"}
-  call-endpoint
-  "`POST /api/projects/:slug/call` — the write door: `{tool arguments
-  token}` runs on the project named by `X-Slopp-Dir` (slug `_`) or by an
-  open project's slug, on its CLI session. The token is the daemon's and
-  [[slopp.mcp/http-call!]] checks it. A WRITE naming no thread is refused
-  here with the same words a one-shot uses, because the alternative is the
-  same stranding: the call would land on the CLI session's own line, which
-  nothing a shell knows about ever lands. Refused as an ANSWER — 200 with
-  `isError`, the shape every refusal on this door has — because a 4xx reads
-  to the CLI as a failed route, and it falls back to booting a one-shot JVM
-  that refuses again after loading the whole store (the first end-to-end
-  run did exactly that)."
-  [req]
-  (let [{:keys [dir error]} (project-dir req)
-        raw (fn [status m]
-              {:status status :http/raw true
-               :headers {"Content-Type" "application/json"}
-               :body (json/generate-string m)})
-        b    (or (:body req) {})
-        tool (:tool b)
-        args (or (:arguments b) {})]
-    (cond
-      error
-      (raw 400 {:error error})
-
-      ;; the token BEFORE any work. http-call! checks it too, but by then
-      ;; cli-session! had opened the project, minted a CLI session and held
-      ;; both for ten minutes on a dir nobody authenticated for
-      (not= (str (:token b)) (str (token)))
-      (raw 403 {:error "bad or missing token — read it from ~/.slopp/daemon.json"})
-
-      (and (string? tool)
-           (mcp/write-tool? tool)
-           (nil? (:thread args)) (nil? (:agent args)) (nil? (:agent b)))
-      (raw 200 {:isError true
-                :text (str "error: a write through the daemon names no thread — it would land"
-                           " on a line nothing you know about ever lands. Pass {thread \"…\"}:"
-                           " the id from your [slopp] block, or one minted by"
-                           " thread_open {} and carried on every later call.")})
-
-      :else
-      (mcp/http-call! (assoc req :body b)
-                      (cli-session! dir (let [slug (get-in req [:path-params :slug])]
-                                          (when (not= "_" slug) slug)))))))
-
 (defn- mcp-doors
   "This daemon's doors, lent to the MCP envelope: sessions by id, attach
   by the dir a request names, detach."
@@ -718,7 +686,8 @@
                              (let [{:keys [dir error]} (project-dir req)]
                                (if error
                                  {:error error}
-                                 (attach! dir (get-in req [:path-params :slug])))))
+                                 (attach! dir (get-in req [:path-params :slug])
+                                          :sid (get-in req [:headers "mcp-session-id"])))))
    :slopp.mcp.http/detach! detach!})
 
 ^:unsafe (defn ^{:http/method :post :rest/path "/api/projects/:slug/mcp" :http/auth :public
@@ -766,30 +735,31 @@
       (.setWritable f true true)))
   (spit f content))
 
-(defn ^{:breaking-ok "the 2-arity is REMOVED rather than defaulted: its only caller is -main, and the two sources it gained (the manager's word, the machine's setting) are the whole point of the change"}
+(defn ^{:breaking-ok "the machine-setting source is REMOVED: ~/.slopp/config.json's daemon-port is retired for the one knob SLOPP_DAEMON_PORT, which the plugin's MCP url can read and a file cannot"}
   daemon-port
   "The port `slopp daemon [port]` listens on, as `{:port n}` or `{:error
-  sentence}` for a value that is not one. Four sources, in order: the
-  argument `arg`; the environment (`env`, `SLOPP_DAEMON_PORT`); what the
-  MANAGER told a declared entry (`told`, the `slopp.app-port` property —
-  slopp's own dev instance is told its port rather than passed it, so the
-  run config's `run.daemon.port` is the one place it is spelled); the
-  machine's setting (`machine`, [[machine-port]]'s answer); else
-  [[default-port]]. A bad value used to be an uncaught NumberFormatException:
-  a stack trace where the one fact that matters is which value was wrong."
-  [arg env told machine]
+  sentence}` for a value that is not one. Three sources, in order: the
+  argument `arg`; the environment (`env`, `SLOPP_DAEMON_PORT` — the ONE
+  knob, because the plugin's MCP entry is a URL Claude Code expands from
+  the environment and a settings file would be a second source it cannot
+  read); what the MANAGER told a declared entry (`told`, the
+  `slopp.app-port` property — slopp's own dev instance is told its port
+  rather than passed it, so the run config's `run.daemon.port` is the one
+  place it is spelled); else [[default-port]]. A bad value used to be an
+  uncaught NumberFormatException: a stack trace where the one fact that
+  matters is which value was wrong."
+  [arg env told]
   (let [raw (some->> [arg env told] (map #(some-> % str str/trim not-empty)) (some identity))]
     (cond
       (nil? raw)
-      {:port (or machine default-port)}
+      {:port default-port}
 
       :else
       (let [n (try (Long/parseLong raw) (catch NumberFormatException _ nil))]
         (if (and n (< 0 n 65536))
           {:port n}
           {:error (str (pr-str raw) " is not a port (1–65535) — slopp daemon [port],"
-                       " SLOPP_DAEMON_PORT=<n>, run.<name>.port in a dev config,"
-                       " or daemon-port in ~/.slopp/config.json")})))))
+                       " SLOPP_DAEMON_PORT=<n>, or run.<name>.port in a dev config")})))))
 
 (defn- own-reader!
   "A read-only reader on the daemon's OWN store at `dir`, for the assets the
@@ -916,42 +886,6 @@
       (.start reaper)
       {:url (str "http://127.0.0.1:" (:port srv) "/api/") :port (:port srv) :token (token)})))
 
-^:reads (defn machine-config
-  "The machine's slopp settings — `~/.slopp/config.json` as a map with keyword
-  keys, `{}` when there is none or it does not parse. The daemon boots from
-  a neutral dir and has no store to read a setting from, so what it is told
-  beyond its arguments lives beside its daemon file. `daemon-port` is the one
-  key today; the pipe and the CLI read the same file to know which port to
-  start a daemon on."
-  []
-  (let [f (java.io.File. (System/getProperty "user.home") ".slopp/config.json")]
-    (or (when (.exists f)
-          (try (json/parse-string (slurp f) true) (catch Exception _ nil)))
-        {})))
-
-^:reads (defn ^:export machine-port
-  "The port THE daemon of this machine listens on: `daemon-port` in
-  [[machine-config]], else [[default-port]]. What [[daemon-file]] calls the
-  machine's file, and what the pipe and the CLI start a daemon on."
-  []
-  (or (some-> (:daemon-port (machine-config)) long) default-port))
-
-(defn ^:export daemon-file
-  "Where a daemon records itself: `~/.slopp/daemon.json` — `{url port token
-  pid started}`, THE daemon of the machine, what every pipe and the CLI
-  route to — for the machine's port ([[machine-port]]: its configured one,
-  else the default); `~/.slopp/daemon-<port>.json` for any other. A daemon
-  on another port is a DEV instance (slopp's own, run from its store by the
-  same machinery every project's dev instance gets), and it must not take
-  the machine's file over on boot. One writer per file by construction."
-  ([] (daemon-file (machine-port)))
-  ([port] (daemon-file port (machine-port)))
-  ([port machine]
-   (java.io.File. (System/getProperty "user.home")
-                  (if (= (long port) (long machine))
-                    ".slopp/daemon.json"
-                    (str ".slopp/daemon-" port ".json")))))
-
 ^:unsafe (defn -main
   "Run the daemon: `slopp daemon [port]` — which is `slopp <dir> [--live]
   --main slopp.daemon/-main [port]`. The dir is what the kernel loads
@@ -974,7 +908,7 @@
   as the holder sends someone to kill the wrong thing."
   [& [port]]
   (let [{p :port err :error} (daemon-port port (System/getenv "SLOPP_DAEMON_PORT")
-                                       (System/getProperty "slopp.app-port") (machine-port))]
+                                       (System/getProperty "slopp.app-port"))]
     (if err
       (do (.println System/err (str "slopp daemon: " err))
           (System/exit 2))
@@ -1007,3 +941,218 @@
 
                                :else (ex-message e))))
               (System/exit 1))))))))
+
+(defn- text
+  "A text/plain answer: what a hook or a shell prints as it stands."
+  [status s]
+  {:status status :http/raw true
+   :headers {"Content-Type" "text/plain; charset=utf-8"}
+   :body (str s)})
+
+(defn- door!
+  "The write door's checks, then the call: the token BEFORE any work (a
+  403 that had opened the project and minted a CLI session for it left
+  both held for ten minutes on a dir nobody authenticated for), then a
+  WRITE naming no thread refused as an ANSWER — 200 with `isError`, the
+  shape every refusal on this door has — because it would land on the CLI
+  session's own line, which nothing a shell knows about ever lands. `b` is
+  `{tool arguments token agent}`; the answer is [[slopp.mcp/http-call!]]'s."
+  [req dir b]
+  (let [raw  (fn [status m]
+               {:status status :http/raw true
+                :headers {"Content-Type" "application/json"}
+                :body (json/generate-string m)})
+        tool (:tool b)
+        args (or (:arguments b) {})]
+    (cond
+      (not= (str (:token b)) (str (token)))
+      (raw 403 {:error "bad or missing token — read it from ~/.slopp/daemon.json"})
+
+      (and (string? tool)
+           (mcp/write-tool? tool)
+           (nil? (:thread args)) (nil? (:agent args)) (nil? (:agent b)))
+      (raw 200 {:isError true
+                :text (str "error: a write through the daemon names no thread — it would land"
+                           " on a line nothing you know about ever lands. Pass {thread \"…\"}:"
+                           " the id from your [slopp] block, or one minted by"
+                           " thread_open {} and carried on every later call.")})
+
+      :else
+      (mcp/http-call! (assoc req :body b)
+                      (cli-session! dir (let [slug (get-in req [:path-params :slug])]
+                                          (when (not= "_" slug) slug)))))))
+
+^:unsafe (defn ^{:http/method :post :rest/path "/api/projects/:slug/call" :http/auth :public
+                 :rest/request call-contract
+                 :rest/response :any
+                 :rest/unconstrained-ok "the op's own answer as the CLI prints it: {isError text}"}
+  call-endpoint
+  "`POST /api/projects/:slug/call` — the write door: `{tool arguments
+  token}` runs on the project named by `X-Slopp-Dir` (slug `_`) or by an
+  open project's slug, on its CLI session. The token is the daemon's and
+  [[slopp.mcp/http-call!]] checks it. A WRITE naming no thread is refused
+  here with the same words a one-shot uses, because the alternative is the
+  same stranding: the call would land on the CLI session's own line, which
+  nothing a shell knows about ever lands. Refused as an ANSWER — 200 with
+  `isError`, the shape every refusal on this door has — because a 4xx reads
+  to the CLI as a failed route, and it falls back to booting a one-shot JVM
+  that refuses again after loading the whole store (the first end-to-end
+  run did exactly that)."
+  [req]
+  (let [{:keys [dir error]} (project-dir req)]
+    (if error
+      {:status 400 :http/raw true
+       :headers {"Content-Type" "application/json"}
+       :body (json/generate-string {:error error})}
+      (door! req dir (or (:body req) {})))))
+
+(defn- mailbox!
+  "Record an ask for the next write to open its turn from: this session's
+  own `pending-intent.<sid>` and the unscoped `pending-intent` an older
+  server reads — two files, so a second session's ask can never overwrite
+  an unread first."
+  [dir sid prompt]
+  (let [payload (json/generate-string {:session-id sid :prompt prompt})
+        safe    (str/replace (str sid) #"[^A-Za-z0-9_-]" "")]
+    (spit (io/file dir ".slopp" "pending-intent") payload)
+    (when-not (str/blank? safe)
+      (spit (io/file dir ".slopp" (str "pending-intent." safe)) payload))))
+
+(defn- tail-data
+  "What [[slopp.daemon.hooks/tail-context]] prints, read off the project's
+  reader on its line: the store's size, the last commit point, the recent
+  asks, the whole-store verdict when it still stands, the last done."
+  [reader sid]
+  (let [conn (:db @reader)
+        line (engine/session-line reader)
+        fc   (db/last-full-check conn line)
+        st   (when fc (history/standing-full-check fc (db/ops-after conn line (:id fc))))]
+    {:namespaces         (count (:namespaces (:store @reader)))
+     :last-commit        (:description (first (db/newest-commit-markers conn line 1)))
+     :sid                sid
+     :recent-asks        (keep :intent (db/recent-markers conn line :turn-begin 8))
+     :standing-verdict   (when st (or (#{:red :green} (:status st)) :recorded))
+     :last-done-failures (get-in (db/last-marker conn line :done) [:findings :failures])}))
+
+(defn- bundle!
+  "The ask's orientation bundle, asked of the project's own API context —
+  `GET /api/bundle`, the read the mounted API serves — so the prompt hook
+  and a consumer of the API get one answer."
+  [dir ask sid cli?]
+  (let [enc (fn [s] (java.net.URLEncoder/encode (str s) "UTF-8"))
+        r   (slopp.http/handle! (:ctx (api! dir))
+                                {:request-method :get :uri "/api/bundle" :headers {}
+                                 :query-string (str "ask=" (enc ask)
+                                                    (when sid (str "&session-id=" (enc sid)))
+                                                    (when cli? "&cli=1"))})]
+    (when (= 200 (:status r))
+      (:bundle (:body r)))))
+
+(defn- prompt-hook!
+  "The prompt hook's answer for project `dir`: the ask into the mailbox
+  (unless it is a system continuation), then the map — the orientation
+  bundle for the ask and the tail lines — as one text. A project nobody
+  opened gets nothing written and nothing said: a read never opens one,
+  and its MCP server attaches it before the first ask arrives."
+  [dir {:keys [session_id prompt]} cli?]
+  (let [sid    (not-empty (str session_id))
+        system (hooks/system-turn? prompt)]
+    (if-not (and (store-file? dir) (get-in @state [:projects dir]))
+      ""
+      (do (when-not system (mailbox! dir sid prompt))
+          (let [reader (:reader (api! dir))
+                bundle (when-not system
+                         (bundle! dir (subs (str prompt) 0 (min 2000 (count (str prompt)))) sid cli?))]
+            (hooks/prompt-answer bundle (hooks/tail-context (tail-data reader sid))))))))
+
+(defn- bash-hook!
+  "The Bash hook's answer: the verdict on the command, with an advisory
+  held by a per-project, per-session cooldown so a session is told once
+  per half hour. Nothing outside a project with a store."
+  [dir {:keys [hook_event_name session_id tool_input]}]
+  (if-not (store-file? dir)
+    ""
+    (let [v (hooks/bash-verdict hook_event_name (:command tool_input))]
+      (or (when (:smell v)
+            (let [now (System/currentTimeMillis)
+                  [fire? cools] (hooks/cooldown (get-in @state [:hook-cooldowns dir]) session_id (:smell v) now)]
+              (swap! state assoc-in [:hook-cooldowns dir] cools)
+              (when fire? (hooks/hook-json hook_event_name v))))
+          (when (:verdict v) (hooks/hook-json hook_event_name v))
+          ""))))
+
+(def ^:private hook-contract
+  "What Claude Code hands a hook on stdin — the fields slopp reads; the rest
+  ride along unread."
+  [:map
+   [:slug {:doc "an open project's display name, or `_` to name the project by X-Slopp-Dir"} :string]
+   [:hook {:doc "Claude Code's hook payload, as it came on stdin; its shape is the harness's and stays open here"}
+    [:map
+     [:hook_event_name {:doc "UserPromptSubmit, PreToolUse, PostToolUse, Stop, …"} :string]
+     [:session_id {:optional true :doc "the harness session — the agent's thread id"} :string]
+     [:prompt {:optional true :doc "the verbatim ask, on UserPromptSubmit"} :string]
+     [:tool_input {:optional true :doc "the tool's input, on PreToolUse/PostToolUse; `command` for Bash"} [:map [:command {:optional true :doc "the shell command the Bash tool ran or is about to run"} :string]]]]]])
+
+^:unsafe (defn ^{:http/method :post :rest/path "/api/projects/:slug/hook" :http/auth :public
+                 :rest/request hook-contract
+                 :rest/media-type "text/plain"
+                 :rest/response :string}
+  hook-endpoint
+  "`POST /api/projects/:slug/hook` — the plugin's hooks, one door: the
+  Claude Code hook payload in, what the hook prints out, as text. On
+  `UserPromptSubmit` the ask is recorded and the map returned; on
+  `PreToolUse`/`PostToolUse` the Bash verdict, as the hook's JSON or
+  nothing; on `Stop` the session-pause `done` on the agent's thread — a
+  write, so it needs the daemon's token in `X-Slopp-Token` like every
+  write from a shell. `X-Slopp-Cli: 1` asks for the CLI voice in the map.
+  Any other event is an empty answer. The rules are
+  [[slopp.daemon.hooks]]'s; the shell side has none to keep in step."
+  [req]
+  (let [{:keys [dir error]} (project-dir req)
+        b     (or (:hook (:body req)) {})
+        event (:hook_event_name b)
+        sid   (not-empty (str (:session_id b)))]
+    (cond
+      error (text 400 error)
+
+      (= "UserPromptSubmit" event)
+      (text 200 (prompt-hook! dir b (= "1" (get-in req [:headers "x-slopp-cli"]))))
+
+      (#{"PreToolUse" "PostToolUse"} event)
+      (text 200 (bash-hook! dir b))
+
+      (= "Stop" event)
+      (cond
+        (not (store-file? dir)) (text 200 "")
+        (not= (str (get-in req [:headers "x-slopp-token"])) (str (token)))
+        (text 403 "bad or missing token — read it from ~/.slopp/daemon.json")
+        :else (do (door! req dir {:tool "done" :token (token)
+                                  :arguments {:agent sid :thread sid :label "session pause"}})
+                  (text 200 "")))
+
+      :else (text 200 ""))))
+
+^:unsafe (defn ^{:http/method :post :rest/path "/api/projects/:slug/cli" :http/auth :public
+                 :rest/request :string
+                 :rest/media-type "text/plain"
+                 :rest/response :string}
+  cli-endpoint
+  "`POST /api/projects/:slug/cli` — `slopp <op>` from a shell: the TEXT
+  frame [[slopp.daemon.hooks/cli-frame]] reads (header lines, a blank
+  line, the payload — the op's arguments as JSON or EDN, or a verb's raw
+  source blob), the token in `X-Slopp-Token`, the project by `X-Slopp-Dir`.
+  It is [[call-endpoint]] for a client that builds no JSON and prints what
+  it gets: the op's answer as text, 200 when it answered, 409 when it
+  refused, 400 for a frame that is not a call, 403 without the token."
+  [req]
+  (let [{:keys [dir error]} (project-dir req)
+        call (hooks/cli-call (hooks/cli-frame (:body req)))]
+    (cond
+      error         (text 400 error)
+      (:error call) (text 400 (:error call))
+      :else
+      (let [r (door! req dir (assoc call :token (get-in req [:headers "x-slopp-token"])))
+            b (try (json/parse-string (:body r) true) (catch Exception _ nil))]
+        (if (= 200 (:status r))
+          (text (if (:isError b) 409 200) (:text b))
+          (text (:status r) (or (:error b) (:body r))))))))
