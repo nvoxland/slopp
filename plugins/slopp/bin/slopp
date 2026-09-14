@@ -35,6 +35,8 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   exit 0
 fi
 
+. "$(cd "$(dirname "$0")" && pwd)/slopp-daemon-file"
+
 # ---- CLI dialect: normalize every spelling to (TOOL, args-file) ----
 #   slopp --call <op> [json|edn|@file]      the long-standing spelling
 #   slopp <op> [json]                       same thing, bare
@@ -50,41 +52,25 @@ case "${1:-}" in
     # ~/.slopp/daemon.json; stop sends SIGTERM to that pid and clears the
     # file, status prints /api/status. Everything else is a start.
     if [ "${2:-}" = "stop" ] || [ "${2:-}" = "status" ]; then
-      python3 - "$2" <<'PYEOF'
-import json, os, signal, sys, time, urllib.request
-def machine_port():
-    try: return int(json.load(open(os.path.expanduser("~/.slopp/config.json"))).get("daemon-port") or 7357)
-    except Exception: return 7357
-port = int(os.environ.get("SLOPP_DAEMON_PORT") or machine_port())
-f = os.path.expanduser("~/.slopp/" + ("daemon.json" if port == machine_port() else f"daemon-{port}.json"))
-try:
-    info = json.load(open(f))
-except Exception:
-    print(f"slopp daemon: none recorded (no {f})"); sys.exit(1)
-pid, url = int(info["pid"]), info["url"].rstrip("/")
-try:
-    os.kill(pid, 0); alive = True
-except Exception:
-    alive = False
-if sys.argv[1] == "status":
-    try:
-        with urllib.request.urlopen(url + "/status", timeout=3) as r: print(f"pid {pid}: " + r.read().decode())
-    except Exception as e:
-        print(f"slopp daemon: pid {pid} {'alive' if alive else 'dead'}, {url} not answering ({e})"); sys.exit(1)
-    sys.exit(0)
-if alive:
-    os.kill(pid, signal.SIGTERM)
-    for _ in range(50):
-        time.sleep(0.2)
-        try: os.kill(pid, 0)
-        except Exception: break
-    print(f"slopp daemon: stopped pid {pid}")
-else:
-    print(f"slopp daemon: pid {pid} was already gone")
-try: os.remove(f)
-except Exception: pass
-PYEOF
-      exit $?
+      daemon_file
+      if [ ! -f "$DAEMON_FILE" ]; then echo "slopp daemon: none recorded (no $DAEMON_FILE)"; exit 1; fi
+      read_daemon_file
+      if kill -0 "$DPID" 2>/dev/null; then alive=1; else alive=0; fi
+      if [ "$2" = "status" ]; then
+        if body="$(curl -sS -m 3 "$DURL/status" 2>&1)"; then
+          echo "pid $DPID: $body"; exit 0
+        fi
+        echo "slopp daemon: pid $DPID $([ "$alive" = 1 ] && echo alive || echo dead), $DURL not answering ($body)"; exit 1
+      fi
+      if [ "$alive" = 1 ]; then
+        kill "$DPID" 2>/dev/null || true
+        for _ in $(seq 1 50); do kill -0 "$DPID" 2>/dev/null || break; sleep 0.2; done
+        echo "slopp daemon: stopped pid $DPID"
+      else
+        echo "slopp daemon: pid $DPID was already gone"
+      fi
+      rm -f "$DAEMON_FILE"
+      exit 0
     fi
     # The daemon boots slopp's OWN code from the dir it is given — the
     # kernel loads every namespace of that dir's store into the JVM — so it
@@ -97,7 +83,10 @@ PYEOF
     DIR="${SLOPP_DAEMON_DIR:-$HOME/.slopp}"
     mkdir -p "$DIR"
     shift
-    set -- "$DIR" ${SLOPP_LIVE:+--live} --main slopp.daemon/-main "$@"
+    # the port is passed explicitly: with no --main argument the kernel hands
+    # the entry its DIR, and a dir is not a port
+    daemon_file
+    set -- "$DIR" ${SLOPP_LIVE:+--live} --main slopp.daemon/-main "${1:-$PORT}"
     ;;
   --call)
     TOOL="${2:-}"; RAW="${3-}"; [ -z "$RAW" ] && RAW="{}"
@@ -105,51 +94,32 @@ PYEOF
     if [ "${RAW#@}" != "$RAW" ]; then cat "${RAW#@}" > "$ARGSFILE"; else printf '%s' "$RAW" > "$ARGSFILE"; fi
     ;;
   add|replace|change)
-    ARGSFILE="$(mktemp)"; PROG="$(mktemp)"
-    cat > "$PROG" <<'PYEOF'
-import json, sys
-argsfile = sys.argv[1]
-argv = sys.argv[2:]
-verb = argv[0]; rest = list(argv[1:])
-def flag(name, default=None):
-    if name in rest:
-        i = rest.index(name); v = rest[i+1]; del rest[i:i+2]; return v
-    return default
-prompt = flag("--prompt")
-accept = flag("--accept")
-body = sys.stdin.read()
-if verb in ("add", "replace"):
-    target = rest[0] if rest else ""
-    if not target:
-        print(f"slopp {verb}: name the target namespace (slopp {verb} <ns>[/<name>] <<EOF)", file=sys.stderr)
-        sys.exit(2)
-    ns, _, nm = target.partition("/")
-    step = {"ns": ns, "source": body}
-    if nm: step["name"] = nm
-    args = {"prompt": prompt or f"slopp {verb} {target}", "impl": [step]}
-else:
-    args = {"prompt": prompt or "slopp change", "tests": [], "impl": []}
-    if accept: args["accept"] = [a for a in accept.split(",") if a]
-    section, ns, buf = None, None, []
-    def close():
-        if section and ns and "".join(buf).strip():
-            args[section].append({"ns": ns, "source": "".join(buf)})
-    for line in body.splitlines(keepends=True):
-        w = line.split()
-        if len(w) == 2 and w[0] in (";;;tests", ";;;impl"):
-            close(); section, ns, buf = w[0][3:], w[1], []
-        else:
-            buf.append(line)
-    close()
-    if not (args["tests"] or args["impl"]):
-        print("slopp change: stdin needs ';;;tests <ns>' / ';;;impl <ns>' section markers", file=sys.stderr)
-        sys.exit(2)
-    if not args["tests"]: del args["tests"]
-json.dump(args, open(argsfile, "w"))
-print("change")
-PYEOF
-    TOOL="$(python3 "$PROG" "$ARGSFILE" "$@")" || { rm -f "$PROG" "$ARGSFILE"; exit 2; }
-    rm -f "$PROG"
+    # The heredoc carries RAW source — no JSON escaping, which is the
+    # point. The daemon splits it into steps (`;;;tests <ns>` / `;;;impl
+    # <ns>` sections for change; one step for add/replace); this side
+    # only frames it: header lines, a blank line, then the blob.
+    VERB="$1"; shift
+    PROMPT=""; ACCEPT=""; TARGET=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --prompt) PROMPT="${2-}"; shift 2 ;;
+        --accept) ACCEPT="${2-}"; shift 2 ;;
+        *) TARGET="$1"; shift ;;
+      esac
+    done
+    if [ "$VERB" != "change" ] && [ -z "$TARGET" ]; then
+      echo "slopp $VERB: name the target namespace (slopp $VERB <ns>[/<name>] <<EOF)" >&2; exit 2
+    fi
+    TOOL="$VERB"; ARGSFILE="$(mktemp)"
+    {
+      printf 'verb: %s\n' "$VERB"
+      [ -n "$TARGET" ] && printf 'target: %s\n' "$TARGET"
+      [ -n "$PROMPT" ] && printf 'prompt: %s\n' "$PROMPT"
+      [ -n "$ACCEPT" ] && printf 'accept: %s\n' "$ACCEPT"
+      printf '\n'
+      cat
+    } > "$ARGSFILE"
+    FRAMED=1
     ;;
   -*|"") : ;;
   *)
@@ -169,71 +139,35 @@ esac
 # the kernel refuses --call by name now. A call with no daemon FAILS and
 # says so; the daemon is a process the user starts (`slopp daemon`) and
 # owns, never one a tool call brings up behind them.
+#
+# The call is one POST of a TEXT frame — header lines, a blank line, the
+# payload (the op's arguments as JSON or EDN, or a verb's raw blob) — so
+# the shell never builds JSON; the daemon parses and answers text.
 if [ -n "$TOOL" ] && [ -s "$ARGSFILE" ]; then
-  python3 - "$TOOL" "$ARGSFILE" <<'PYEOF'
-import json, os, sys, time, threading, urllib.request
-tool, argsfile = sys.argv[1], sys.argv[2]
-headers = {"Content-Type": "application/json", "X-Slopp-Dir": os.getcwd()}
-def machine_port():
-    try: return int(json.load(open(os.path.expanduser("~/.slopp/config.json"))).get("daemon-port") or 7357)
-    except Exception: return 7357
-PORT = int(os.environ.get("SLOPP_DAEMON_PORT") or machine_port())
-DAEMON_FILE = os.path.expanduser("~/.slopp/" + ("daemon.json" if PORT == machine_port() else f"daemon-{PORT}.json"))
-def live():
-    pf = json.load(open(DAEMON_FILE))
-    os.kill(int(pf["pid"]), 0)
-    with urllib.request.urlopen(pf["url"].rstrip("/") + "/status", timeout=2) as r:
-        if r.status != 200:
-            raise RuntimeError("daemon not answering")
-    if not pf.get("token"):
-        raise RuntimeError("daemon file carries no token")
-    return pf
-def ensure():
-    try:
-        return live()
-    except Exception:
-        pass
-    if PORT != machine_port():
-        print(f"slopp: no daemon answers on port {PORT}, a dev instance — its project's machine daemon"
-              f" starts it on attach and re-serves it at every done", file=sys.stderr)
-    else:
-        print(f"slopp: no slopp daemon answers on port {PORT} — start one with `slopp daemon`"
-              f" (it stays up until `slopp daemon stop`)", file=sys.stderr)
-    sys.exit(2)
-try:
-    pf = ensure()
-    # `slopp <op>` names its project by cwd (X-Slopp-Dir), so a project
-    # nobody has attached is opened for the call and reaped when idle.
-    url = pf["url"].rstrip("/") + "/projects/_/call"
-    token = pf["token"]
-    args = json.load(open(argsfile))
-    if not isinstance(args, dict):
-        raise RuntimeError("arguments must be a JSON object")
-except Exception as e:
-    print(f"slopp: cannot reach a daemon ({e}) — `slopp daemon status` says what is recorded", file=sys.stderr)
-    sys.exit(2)
-body = json.dumps({"tool": tool, "arguments": args, "token": token}).encode()
-stop = threading.Event()
-def beat():
-    t0 = time.time()
-    while not stop.wait(10):
-        print(f"slopp: {tool} still running ({int(time.time()-t0)}s)...", file=sys.stderr)
-threading.Thread(target=beat, daemon=True).start()
-req = urllib.request.Request(url, data=body, headers=headers)
-try:
-    with urllib.request.urlopen(req, timeout=3600) as r:
-        out = json.load(r)
-except Exception as e:
-    stop.set()
-    print(f"slopp: the daemon refused or dropped the call ({e})", file=sys.stderr)
-    sys.exit(2)
-stop.set()
-print(out.get("text", ""))
-sys.exit(1 if out.get("isError") else 0)
-PYEOF
-  rc=$?
-  rm -f "$ARGSFILE"
-  exit "$rc"
+  daemon_file
+  if [ ! -f "$DAEMON_FILE" ] || { read_daemon_file; ! kill -0 "$DPID" 2>/dev/null; } \
+     || ! curl -sf -m 2 -o /dev/null "$DURL/status"; then
+    echo "slopp: $(no_daemon_sentence)" >&2
+    rm -f "$ARGSFILE"; exit 2
+  fi
+  if [ "${FRAMED:-0}" != "1" ]; then
+    FRAME="$(mktemp)"
+    { printf 'tool: %s\n\n' "$TOOL"; cat "$ARGSFILE"; } > "$FRAME"
+    rm -f "$ARGSFILE"; ARGSFILE="$FRAME"
+  fi
+  OUT="$(mktemp)"
+  # a heartbeat while a long op runs, so a shell knows the call is alive
+  ( t0=$(date +%s); while sleep 10; do echo "slopp: $TOOL still running ($(( $(date +%s) - t0 ))s)..." >&2; done ) &
+  BEAT=$!
+  code="$(curl -sS -m 3600 -o "$OUT" -w '%{http_code}' --data-binary @"$ARGSFILE" \
+            -H "Content-Type: text/plain; charset=utf-8" \
+            -H "X-Slopp-Dir: $PWD" -H "X-Slopp-Token: $DTOKEN" \
+            "$DURL/projects/_/cli" 2>&1)" || { kill "$BEAT" 2>/dev/null; echo "slopp: the daemon refused or dropped the call ($code)" >&2; rm -f "$ARGSFILE" "$OUT"; exit 2; }
+  kill "$BEAT" 2>/dev/null; wait "$BEAT" 2>/dev/null || true
+  cat "$OUT"; echo
+  rm -f "$ARGSFILE" "$OUT"
+  [ "$code" = "200" ] && exit 0
+  exit 1
 fi
 
 # A bare <dir> used to serve MCP over stdio on that store, one JVM per
@@ -254,7 +188,7 @@ checksum() {
 }
 
 # --doctor: check the whole wiring in one command (Q6) — java, jar cache,
-# hook/skill files, python3 (the hooks need it), and a live store probe.
+# hook/skill files, curl (the hooks and the CLI need it), and a live store probe.
 # Exit 0 = everything an agent session needs is in place.
 if [ "${1:-}" = "--doctor" ]; then
   rc=0
@@ -264,7 +198,7 @@ if [ "${1:-}" = "--doctor" ]; then
   for f in hooks/hooks.json skills/slopp/SKILL.md skills/slopp-setup/SKILL.md .mcp.json; do
     if [ -f "$ROOT/$f" ]; then say "ok " "plugin file: $f"; else say "FAIL" "plugin file missing: $f"; rc=1; fi
   done
-  if command -v python3 >/dev/null 2>&1; then say "ok " "python3 (prompt/done hooks)"; else say "FAIL" "no python3 — the intent + done hooks will not fire"; rc=1; fi
+  if command -v curl >/dev/null 2>&1; then say "ok " "curl (the hooks and the CLI talk to the daemon with it)"; else say "FAIL" "no curl — the hooks and 'slopp <op>' cannot reach the daemon"; rc=1; fi
   if [ -n "${SLOPP_JAR:-}" ]; then
     if [ -f "$SLOPP_JAR" ]; then say "ok " "SLOPP_JAR override: $SLOPP_JAR"; else say "FAIL" "SLOPP_JAR set but missing: $SLOPP_JAR"; rc=1; fi
   elif [ -f "$JAR" ]; then

@@ -16,8 +16,8 @@ slopp needs **Java 21+** and nothing else. Everything below runs the same jar.
 
 That gives you the workflow skills (`slopp`, `slopp-setup`, `slopp-style`,
 `slopp-review`), a `slopp-reader` subagent, a `slopp` CLI on the session PATH,
-and an MCP entry that is a pipe onto the machine's **daemon**: one slopp
-process serving every project you open, which you start yourself:
+and an MCP entry pointed at the machine's **daemon**: one slopp process
+serving every project you open, which you start yourself:
 
 ```sh
 slopp daemon
@@ -48,8 +48,8 @@ Check the wiring end to end:
 slopp --doctor
 ```
 
-It reports on java, the cached jar, the hook and skill files, python3 (the
-hooks need it), and a live store probe. Exit 0 means a session has everything
+It reports on java, the cached jar, the hook and skill files, curl (the
+hooks and the CLI reach the daemon with it), and a live store probe. Exit 0 means a session has everything
 it needs.
 
 ### Offline or no marketplace

@@ -1,0 +1,30 @@
+#!/bin/bash
+# The plugin's hooks, as one shell call each: Claude Code's hook payload on
+# stdin is POSTed to the running daemon, and whatever the daemon answers is
+# the hook's stdout. The daemon decides everything — which ask to record,
+# what map to inject, which Bash command routes around the store, the
+# session-pause done — so this script has no logic to keep in step with
+# it, and needs nothing beyond bash and curl. Silent on any failure: a
+# hook that breaks a session is worse than a missed hint. The one thing it
+# says on its own is that no daemon answers, on a prompt in a project that
+# has a store — the agent then knows what to ask for.
+#
+#   slopp-hook [seconds]   # stdin: the hook's JSON; stdout: the hook's answer
+set -u
+HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/slopp-daemon-file"
+IN="$(cat)"
+daemon_file
+if [ ! -f "$DAEMON_FILE" ] || { read_daemon_file; ! kill -0 "$DPID" 2>/dev/null; }; then
+  case "$IN" in *'"hook_event_name":"UserPromptSubmit"'*|*'"hook_event_name": "UserPromptSubmit"'*) no_daemon ;; esac
+  exit 0
+fi
+# stdin is already JSON, so wrapping it under one key needs no escaping;
+# the daemon's contract names the envelope and leaves the payload's shape
+# to Claude Code, whose keys grow with the harness
+printf '{"hook":%s}' "$IN" | curl -sS -m "${1:-8}" --data-binary @- \
+  -H "Content-Type: application/json" \
+  -H "X-Slopp-Dir: $PWD" -H "X-Slopp-Token: $DTOKEN" \
+  ${SLOPP_CLI:+-H "X-Slopp-Cli: 1"} \
+  "$DURL/projects/_/hook" 2>/dev/null || true
+exit 0

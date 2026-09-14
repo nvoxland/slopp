@@ -7149,6 +7149,7 @@ project's app server like any other's. Nathan's framing, 2026-09-12.
 
 - **The machine daemon's port is a machine setting** — `daemon-port` in
   `~/.slopp/config.json` — because the daemon has no store to read one from.
+  (Retired by `D-no-pipe`, 2026-09-14: `SLOPP_DAEMON_PORT` is the one knob.)
   Precedence in `daemon-port`: argument, `SLOPP_DAEMON_PORT`, what the manager
   told a declared entry, the machine setting, 7357. `daemon.json` belongs to
   the machine's configured port, not the literal default.
@@ -7212,6 +7213,55 @@ the sentence; the README and the install page lead with `slopp daemon`. The
 and are unchanged. Not revised: a project's dev instance is still started
 by the machine daemon on attach and refreshed at done — that is the
 daemon serving a project's declared app, not the plugin starting a daemon.
+
+## D-no-pipe (2026-09-14, user decision) — the plugin is bash + curl + java; the daemon holds every rule, and Claude Code talks to it directly
+
+**Decision.** The plugin ships no Python and no per-session process. Its MCP
+entry is the daemon's URL —
+`http://127.0.0.1:${SLOPP_DAEMON_PORT:-7357}/api/projects/_/mcp` with
+`X-Slopp-Dir: ${CLAUDE_PROJECT_DIR}` — and the hooks and `slopp <op>` are
+one `curl` each onto two new declared doors: `POST /api/projects/:slug/hook`
+(the Claude Code hook payload in, what the hook prints out; the ask into the
+mailbox and the map on `UserPromptSubmit`, the Bash verdict as the hook's JSON
+on `PreToolUse`/`PostToolUse`, the session-pause `done` on `Stop` under the
+token) and `POST /api/projects/:slug/cli` (a TEXT frame — header lines, a
+blank line, the payload — so a shell never builds JSON around a source blob;
+`:rest/request :string` is the contract for a text body, added for it). The
+rules the scripts carried live in `slopp.daemon.hooks`, pure and tested; the
+shell has none to keep in step. Two consequences fell out:
+
+- **A stale session id is re-attached under the SAME id.** Claude Code's HTTP
+  transport echoes the id `initialize` gave it and never adopts another, so
+  the pipe-era "re-attach under a fresh id" would have minted a session per
+  request after a daemon restart. Now a restart costs one late answer.
+- **One knob for the port: `SLOPP_DAEMON_PORT`.** `daemon-port` in
+  `~/.slopp/config.json` (D-release-base) is retired: the MCP url is expanded
+  from the environment and cannot read a file, and two sources that can
+  disagree is the failure the pipe used to paper over. `daemon.json` is the
+  default port's record; any other port records under `daemon-<port>.json`.
+
+**Why.** Nathan, 2026-09-14: "Since we're shipping slopp to others to use, I
+don't want to be adding dependencies for them, including requiring python to
+exist." Everything the Python did was JSON-over-HTTP glue or logic that
+belonged in the daemon anyway; moving the logic first made the transport a
+thin, swappable layer, and the measurement then removed the layer:
+
+**Measured (Claude Code 2.1.270, `claude -p` against a fake MCP server that
+logs headers):** a PLUGIN `.mcp.json` expands `${CLAUDE_PROJECT_DIR}`,
+`${PWD}`, `${CLAUDE_PLUGIN_ROOT}` and `${VAR:-default}` in both `url` and
+`headers`; a PROJECT `.mcp.json` expands environment variables (`${PWD}`,
+`${HOME}`) but NOT `${CLAUDE_PROJECT_DIR}`, which is not in the process
+environment; `--mcp-config <file>` expands nothing. D-daemon's "env
+expansion in headers is unreliable" was measured against the wrong loader.
+So the plugin loader gives the daemon the one fact the pipe existed to carry.
+
+**What it costs.** curl joins the floor (it ships on macOS, Windows 10+ and
+nearly every Linux, and the launcher already fetched the jar with it). The
+DELETE-on-exit the pipe sent is now the client's; the idle reaper (two hours)
+closes what a client leaves. A native `slopp` client — instant, no curl, a
+Windows story without bash — is the next step if the floor should drop
+further, and with the logic in the daemon it is a transport swap; slopp's own
+`build-native.sh` is the way to build it.
 
 ## G6-revised (2026-09-12, user decision) — the repo is `nvoxland/slopp`; `slopp3` is deleted, not renamed
 

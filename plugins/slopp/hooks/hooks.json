@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/prompt-hook.py\" 2>/dev/null || true",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/slopp-hook\" 8 2>/dev/null || true",
             "timeout": 10
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/bash-smell-hook.py\" 2>/dev/null || true",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/slopp-hook\" 5 2>/dev/null || true",
             "timeout": 10
           }
         ]
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/bash-smell-hook.py\" 2>/dev/null || true",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/slopp-hook\" 5 2>/dev/null || true",
             "timeout": 10
           }
         ]
@@ -40,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -c 'import json,sys,os,subprocess; d=json.load(sys.stdin); sid=d.get(\"session_id\",\"\"); os.path.exists(\".slopp/store.db\") and subprocess.run([os.environ.get(\"CLAUDE_PLUGIN_ROOT\",\"\")+\"/bin/slopp\",\"--call\",\"done\",json.dumps({\"agent\": sid, \"thread\": sid, \"label\": \"session pause\"})], capture_output=True, timeout=280)' 2>/dev/null || true",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/slopp-hook\" 280 2>/dev/null || true",
             "async": true,
             "timeout": 300,
             "statusMessage": "slopp: tidying + re-verifying your changes"

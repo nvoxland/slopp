@@ -1,0 +1,27 @@
+# Sourced by bin/slopp and bin/slopp-hook: where the daemon this shell
+# should talk to recorded itself, and how to read that record.
+#   daemon_file       sets PORT and DAEMON_FILE — ~/.slopp/daemon.json for the
+#                     default port (7357), daemon-<port>.json for any other;
+#                     SLOPP_DAEMON_PORT is the one knob, the same one the
+#                     plugin's MCP url and the daemon itself read
+#   read_daemon_file  sets DURL, DPID and DTOKEN from that file
+#   no_daemon         one sentence on stdout saying what to start, when the
+#                     cwd is a slopp project (so the agent learns it too)
+# The file is one line of compact JSON the daemon wrote; sed reads its
+# fields so nothing beyond bash and curl is needed on the client.
+DEFAULT_PORT=7357
+daemon_file() {
+  PORT="${SLOPP_DAEMON_PORT:-$DEFAULT_PORT}"
+  if [ "$PORT" = "$DEFAULT_PORT" ]; then DAEMON_FILE="$HOME/.slopp/daemon.json"; else DAEMON_FILE="$HOME/.slopp/daemon-$PORT.json"; fi
+}
+read_daemon_file() {
+  DURL="$(sed -n 's/.*"url":"\([^"]*\)".*/\1/p' "$DAEMON_FILE" | sed 's#/*$##')"
+  DPID="$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$DAEMON_FILE")"
+  DTOKEN="$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' "$DAEMON_FILE")"
+}
+no_daemon_sentence() {
+  echo "no slopp daemon answers on port $PORT — start one with \`slopp daemon\` (it stays up until \`slopp daemon stop\`; a project's dev instance on another port is started by its machine daemon on attach)"
+}
+no_daemon() {
+  [ -f .slopp/store.db ] && echo "[slopp] $(no_daemon_sentence)"
+}

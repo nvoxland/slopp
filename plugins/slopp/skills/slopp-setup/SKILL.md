@@ -60,13 +60,14 @@ rule names the plugin's server, so it covers every family and op. Nothing
 changes under the other modes: a prompting mode asks you per call anyway,
 and `bypassPermissions` never classifies.
 
-**One slopp for the machine.** The plugin's server entry is a PIPE onto
-the daemon — one process for every project on the box, MCP over HTTP
-behind a stdio face — never a JVM per session. The daemon is the user's
-to start (`slopp daemon`; `slopp daemon stop` ends it) — nothing in the
-plugin starts one, and a session with none on the configured port fails
-with a sentence saying to start it. The pipe names the project by its cwd
-and changes nothing about the tools. What the daemon buys and how it is
+**One slopp for the machine.** The plugin's server entry is the daemon's
+own MCP-over-HTTP URL — one process for every project on the box, never a
+JVM or a pipe per session; the project is named by a header Claude Code
+fills from the project dir. The daemon is the user's to start (`slopp
+daemon`; `slopp daemon stop` ends it) — nothing in the plugin starts one,
+and a session with none on the configured port (`SLOPP_DAEMON_PORT`, else
+7357) fails with a sentence saying to start it. The hooks and the CLI are
+`curl` calls onto the same daemon; the plugin needs bash, curl and java. What the daemon buys and how it is
 reached: `help {topic "running"}`, under "One slopp for the machine".
 
 ## Importing a repo that's published this way

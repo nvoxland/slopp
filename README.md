@@ -22,9 +22,9 @@ commits) flow back into stores via `git_pull`'s form-granular 3-way merge.
 ```
 
 The plugin bundles the workflow skills (`slopp`, `slopp-setup`), a `slopp`
-CLI on the session PATH, and an MCP entry that is a pipe onto **one daemon
-for the machine**, which you start yourself and which serves whatever
-project each session is in:
+CLI on the session PATH, and an MCP entry pointed at **one daemon for the
+machine**, which you start yourself and which serves whatever project each
+session is in. Beyond Java, the plugin needs only bash and curl:
 
 ```sh
 slopp daemon        # fetches the versioned release jar (~27MB, checksum-verified) on first run, then stays up

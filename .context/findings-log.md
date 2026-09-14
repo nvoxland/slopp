@@ -3184,3 +3184,24 @@ arms only on a live pipe. The `^:external` tier is excluded from CI for now
 `ideas/product/external-tier-cost.md`); the in-image suite through
 `slopp.image.testmain` gates both workflows in ~21s.
 
+
+## 2026-09-14 — MCP header expansion, measured per loader
+
+`claude -p` (2.1.270) against a fake MCP-over-HTTP server that logs headers,
+three configurations, same `.mcp.json` body:
+
+| loader | `${CLAUDE_PROJECT_DIR}` | `${PWD}`, `${HOME}` | `${VAR:-default}` |
+|---|---|---|---|
+| plugin `.mcp.json` (`--plugin-dir`) | expanded | expanded | expanded (url and headers) |
+| project `.mcp.json` | literal | expanded | — |
+| `--mcp-config <file>` | literal | literal | — |
+
+D-daemon (2026-09-07) recorded "env expansion in headers is unreliable" and
+built the stdio pipe on it; that was measured against a non-plugin loader.
+The plugin loader hands the daemon the project dir, so the pipe went
+(`D-no-pipe`). Also found while replacing it: `slopp daemon` with no port
+argument handed `-main` the DIR (the kernel's `[dir]` default for a `--main`
+with no args), which the pipe had masked by always passing the port; the
+launcher passes it now. And the auto-require displaced an existing alias for
+the second time (`slopp.rest.contract-test`, `rest.contract` → `contract`),
+breaking the file at load — recorded in `ideas/`.

@@ -53,7 +53,7 @@ ignored.
 - **Java 21+** and the **Clojure CLI**. `mise.toml` pins temurin-21 and
   clojure 1.12.5 — `mise install` picks both up.
 - **Docker**, only if you want to preview the docs site.
-- **python3**, only if you are exercising the Claude Code plugin hooks.
+- **curl**, which the plugin's hooks and CLI use to reach the daemon (python3 only for the dev scripts under `bin/`).
 
 `mise.toml` also sets `SLOPP_CLOJURE=clojure`: `slopp.image.repl` probes homebrew
 paths for the owned-image launcher before trusting PATH, and forcing the bare
@@ -147,8 +147,9 @@ released jar from a neutral dir, and slopp2 is opened on it like any other
 project. The in-progress version is slopp2's dev instance — `run.daemon.main =
 slopp.daemon/-main`, `run.daemon.port = 7358` in the `dev` config — booted from
 the store by the machine daemon and refreshed at every `done`. To exercise it,
-start a second agent with `SLOPP_DAEMON_PORT=7358` in its environment; the pipe
-routes to `~/.slopp/daemon-7358.json` and never starts a daemon there. So: a
+start a second agent with `SLOPP_DAEMON_PORT=7358` in its environment; the
+plugin's MCP url, hooks and CLI all name that port and never start a daemon
+there. So: a
 fix to a TOOL you are using reaches the dev instance at the next done and the
 machine daemon at the next release. Until a release is cut, `target/slopp.jar`
 built from a commit point is the base (`SLOPP_JAR=$PWD/target/slopp.jar`, no
@@ -166,7 +167,7 @@ store namespace (like `slopp.kernel.rt`) and the jar bundles the STORE copy —
 kernel edits go to both. session_brief's `:host` section states what the
 server is actually running.
 
-### Profiling the server — which side of the pipe
+### Profiling the server — which side of the wire
 
 "slopp is slow" has two possible homes, and the transcript cannot tell them
 apart: a tool call's span there is the harness's view and includes whatever
@@ -178,8 +179,8 @@ jcmd <daemon pid> JFR.start filename=out.jfr        # profile the daemon from ou
 jfr print --events jdk.ExecutionSample out.jfr
 ```
 
-It speaks raw JSON-RPC over stdio to the plugin's pipe onto the daemon —
-exactly what Claude Code runs — and prints each call's round trip. On 2026-09-03 the transcripts showed a ~1.3 s floor under every
+It speaks MCP over HTTP to the daemon's endpoint — exactly what Claude
+Code's plugin entry does — and prints each call's round trip. On 2026-09-03 the transcripts showed a ~1.3 s floor under every
 slopp call while this measured 0.00–0.38 s for the same ops: the gap was
 Claude Code's auto-mode permission classifier (a model call per unallowed
 MCP tool call), fixed by allowing the server in `.claude/settings.json`,

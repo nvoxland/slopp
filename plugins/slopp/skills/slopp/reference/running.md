@@ -111,9 +111,10 @@ that job running while somebody works on it.
 ### One slopp for the machine: `slopp daemon`
 
 `slopp daemon [port]` runs ONE slopp process for every project on the box.
-Its port is the argument, else `SLOPP_DAEMON_PORT`, else `daemon-port` in
-`~/.slopp/config.json` (the machine's setting — the daemon boots from a
-neutral dir and has no store to read one from), else 7357. It binds first and
+Its port is the argument, else `SLOPP_DAEMON_PORT`, else 7357 — ONE knob,
+because the plugin's MCP entry is a URL Claude Code expands from the
+environment, and a settings file would be a second source it cannot read.
+It binds first and
 loads nothing until something attaches; a project opens on its first
 attachment and closes on its last. Its typed surface is under one prefix,
 and the pages a human opens sit beside it:
@@ -143,17 +144,22 @@ no `thread` is refused, like a one-shot; a project's dev app server is
 started once by the daemon, on the first branch attached, and every
 session's `done` refreshes that one server.
 
-**This is the only server.** The plugin's stdio entry is a PIPE onto the
-daemon — `bin/slopp-pipe.py`, one small process per session instead of a
-JVM — which finds the running daemon, names the project by its cwd, and
-re-attaches by itself after a daemon restart or an idle reap (it waits up
-to a minute for the one you bring back, then answers the pending call with
-an error naming the port). Nothing about the tools changes; subagents share
-the pipe as they shared the server. The per-session JVM is retired
-(2026-09-08): there is no `SLOPP_DAEMON=0`, no stdio loop in the jar, and
-`java -jar slopp.jar <dir>` IS `slopp daemon`. A shell call (`slopp <op>
-'{…}'`) routes to the daemon too and fails without one — the one-shot JVM
-that used to open the store on its own is gone with the writes it stranded.
+**This is the only server, and the plugin talks to it directly.** The
+plugin's MCP entry is the daemon's URL
+(`http://127.0.0.1:${SLOPP_DAEMON_PORT:-7357}/api/projects/_/mcp`, the
+project named by an `X-Slopp-Dir: ${CLAUDE_PROJECT_DIR}` header Claude Code
+expands) — no process per session at all. A session id the daemon no
+longer holds (a restart, an idle reap) is re-attached UNDER THAT ID when
+the request names its dir, so a daemon restart costs one late answer, not
+a reconnect. The hooks and `slopp <op>` are one `curl` each onto the
+daemon's `hook` and `cli` doors; the rules they used to carry (which ask to
+record, which Bash command routes around the store, how a heredoc splits
+into steps) live in `slopp.daemon.hooks`, tested. The plugin needs bash,
+curl and java, nothing else. The per-session JVM is retired (2026-09-08):
+there is no `SLOPP_DAEMON=0`, no stdio loop in the jar, and `java -jar
+slopp.jar <dir>` IS `slopp daemon`. A shell call fails without a daemon —
+the one-shot JVM that used to open the store on its own is gone with the
+writes it stranded.
 
 **Working ON slopp is working through a released slopp.** The machine daemon
 is a release; slopp's own checkout is a project like any other, and its dev
@@ -162,9 +168,9 @@ slopp.daemon/-main`, `run.daemon.port = 7358`. The machine daemon boots that
 child from the store, refreshes it at every `done`, and the child — told its
 role — serves whatever attaches to IT and never manages its own project's app
 server. To drive the in-progress version, give a second agent
-`SLOPP_DAEMON_PORT=7358` (or `SLOPP_DAEMON_URL`): the pipe and the CLI then
-route to `~/.slopp/daemon-7358.json` and never START a daemon there — a dev
-instance is the machine daemon's to run. A new release replaces the base;
+`SLOPP_DAEMON_PORT=7358`: the MCP url, the hooks and the CLI then all name
+that port (the record is `~/.slopp/daemon-7358.json`) and never START a
+daemon there — a dev instance is the machine daemon's to run. A new release replaces the base;
 until one is cut, a jar built from a commit point is the base. Two daemons of
 different versions will hold one store, so the store format must stay readable
 by the previous release, or the release ships first. (`SLOPP_LIVE=1

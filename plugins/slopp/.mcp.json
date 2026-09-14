@@ -1,7 +1,9 @@
 {
   "mcpServers": {
     "slopp": {
-      "command": "${CLAUDE_PLUGIN_ROOT}/bin/slopp-server",
+      "type": "http",
+      "url": "http://127.0.0.1:${SLOPP_DAEMON_PORT:-7357}/api/projects/_/mcp",
+      "headers": {"X-Slopp-Dir": "${CLAUDE_PROJECT_DIR}"},
       "alwaysLoad": true
     }
   }
