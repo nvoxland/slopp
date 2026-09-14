@@ -1035,9 +1035,8 @@
 
     
 
-            daemon?
-    (str "slopp.kernel.boot: daemon (" mode ") — no project store at " dir
-         "; the daemon serves whatever projects attach, each with its own store")
+                daemon?
+    nil
 
     store-file?
     (str "slopp.kernel.boot: the store at " dir " has no namespaces yet — a freshly"
@@ -1071,11 +1070,12 @@
                        :mode (if live? :live :snapshot)
                        :booted-at (System/currentTimeMillis)})
     (let [sources (load-store! dir)]
-      (log! (boot-note {:daemon?     daemon?
-                        :loaded?     (boolean (seq sources))
-                        :store-file? (.exists (io/file dir ".slopp" "store.db"))
-                        :dir         dir
-                        :mode        mode}))
+            (when-let [note (boot-note {:daemon?     daemon?
+                                  :loaded?     (boolean (seq sources))
+                                  :store-file? (.exists (io/file dir ".slopp" "store.db"))
+                                  :dir         dir
+                                  :mode        mode})]
+        (log! note))
       ;; a namespace that did not load is now SURVIVABLE (load-store! is
       ;; best-effort), which makes saying so the whole job: an agent whose
       ;; store came up half-loaded must learn it from orientation rather than
