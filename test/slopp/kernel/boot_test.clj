@@ -667,14 +667,12 @@
       (is (= [] (boot/with-dependents sources #{}))))))
 
 (deftest boot-note-does-not-treat-the-daemons-cwd-as-a-project
-    (testing "daemon, no store at its dir: not a project here, no adoption/first-write talk"
-    (let [note (boot/boot-note {:daemon? true :loaded? false :store-file? false
-                               :dir "/home/me/.slopp" :mode "snapshot"})]
-      (is (re-find #"no project store" note))
-      (is (re-find #"projects attach" note))
-      (is (not (re-find #"first write creates" note)) "the daemon adopts no project here")
-      (is (not (re-find #"unadopted" note)))
-      (is (not (re-find #"(?i)jar" note)) "how its own code loaded is not this line's business")))
+      (testing "daemon, no store at its dir: nothing to narrate — -main announces the daemon itself"
+    (is (nil? (boot/boot-note {:daemon? true :loaded? false :store-file? false
+                              :dir "/home/me/.slopp" :mode "snapshot"})))
+    (is (nil? (boot/boot-note {:daemon? true :loaded? false :store-file? true
+                              :dir "/home/me/.slopp" :mode "snapshot"}))
+        "even an empty store file at the daemon's dir is not this line's problem"))
   (testing "a NON-daemon boot serving an unadopted dir keeps the first-write message"
     (let [note (boot/boot-note {:daemon? false :loaded? false :store-file? false
                                :dir "/proj" :mode "snapshot"})]
