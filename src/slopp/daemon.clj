@@ -888,13 +888,14 @@
       {:url (str "http://127.0.0.1:" (:port srv) "/api/") :port (:port srv) :token (token)})))
 
 ^:unsafe (defn -main
-  "Run the daemon: `slopp daemon [port]` — which is `slopp <dir> [--live]
-  --main slopp.daemon/-main [port]`. The dir is what the kernel loads
-  slopp's OWN code from, every namespace of that dir's store, so it is a
-  NEUTRAL dir (`~/.slopp`, no store) in use; never a user's project, whose
-  store would be loaded as if it were slopp. The projects it serves are
-  whatever attaches. Records itself — address, pid, the write door's token
-  — in [[daemon-file]] for its port, owner-readable only, and blocks.
+  "Run the daemon: `slopp daemon [port]`. Normally its own code ships in the
+  JAR and the directory it is launched in is a NEUTRAL working directory
+  (`~/.slopp`, no project store): it serves whatever projects ATTACH, each
+  with its own store, and holds no project of its own. (The self-host loop
+  passes a checkout dir with `--live`, and then that store IS the code.) It
+  records its address, pid and the write door's token in [[daemon-file]] —
+  `~/.slopp/daemon.json`, or `daemon-<port>.json` for a non-default port —
+  owner-readable only, and blocks.
 
   slopp's own DEV instance is this same fn on another port (7358),
   declared in its store's dev config as `run.daemon.main` and run from the
@@ -921,7 +922,8 @@
                                :pid (.pid (java.lang.ProcessHandle/current))
                                :started (System/currentTimeMillis)}))
             (.println System/err (str "slopp daemon: " (:url r)
-                                      " (pid " (.pid (java.lang.ProcessHandle/current)) ")"))
+                                      " (pid " (.pid (java.lang.ProcessHandle/current)) ")"
+                                      " — address + token in " (str f)))
             @(promise))
           (catch clojure.lang.ExceptionInfo e
             (let [live   (try (json/parse-string (slurp f) true) (catch Exception _ nil))
