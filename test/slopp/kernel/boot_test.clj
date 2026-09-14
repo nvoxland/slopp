@@ -665,3 +665,28 @@
 
     (testing "nothing changed, nothing reloads"
       (is (= [] (boot/with-dependents sources #{}))))))
+
+(deftest boot-note-does-not-treat-the-daemons-cwd-as-a-project
+  (testing "daemon, no store at its dir: code from the jar, dir neither adopted nor written"
+    (let [note (boot/boot-note {:daemon? true :loaded? false :store-file? false
+                               :dir "/home/me/.slopp" :mode "snapshot"})]
+      (is (re-find #"one slopp for the machine" note))
+      (is (re-find #"neither adopts nor writes" note))
+      (is (not (re-find #"first write creates" note)) "the daemon never writes its cwd")
+      (is (not (re-find #"unadopted" note)))))
+  (testing "a NON-daemon boot serving an unadopted dir keeps the first-write message"
+    (let [note (boot/boot-note {:daemon? false :loaded? false :store-file? false
+                               :dir "/proj" :mode "snapshot"})]
+      (is (re-find #"unadopted" note))
+      (is (re-find #"first write creates /proj/\.slopp/store\.db" note))))
+  (testing "an empty store present, non-daemon: the wrong-dir warning"
+    (let [note (boot/boot-note {:daemon? false :loaded? false :store-file? true
+                               :dir "/proj" :mode "live"})]
+      (is (re-find #"no namespaces yet" note))))
+  (testing "a program that loaded says so with dir and mode — checkout or daemon self-host"
+    (is (re-find #"loaded slopp's program from the store at /proj \(live\)"
+                 (boot/boot-note {:daemon? true :loaded? true :store-file? true
+                                  :dir "/proj" :mode "live"})))
+    (is (re-find #"loaded slopp's program from the store at /proj"
+                 (boot/boot-note {:daemon? false :loaded? true :store-file? true
+                                  :dir "/proj" :mode "snapshot"})))))
