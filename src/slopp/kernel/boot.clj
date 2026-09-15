@@ -986,15 +986,17 @@
 
 ;; --- entry ---
 (defn parse-args
-  "Parse boot's CLI: <dir> [--snapshot|--live] [--main ns/fn arg...].
-  Everything after the --main symbol passes through to it verbatim (:args);
-  with no explicit args the main receives [dir] (the app convention). With
-  no --main at all the entry is the DAEMON, `slopp.daemon/-main`, with no
-  args: the dir is what boot loads slopp's code from and never the port, so
-  a bare `java -jar slopp.jar <dir>` is one slopp for the machine on the
-  default port. `--call` is retired — a tool call from a shell is
-  `slopp <op> '{…}'`, routed to the daemon, which starts one on demand —
-  and is refused here by name rather than silently starting a daemon."
+  "Parse boot's CLI: <dir> [--main ns/fn arg...]. Everything after the --main
+  symbol passes through to it verbatim (:args); with no explicit args the main
+  receives [dir] (the app convention). With no --main at all the entry is the
+  DAEMON, `slopp.daemon/-main`, with no args: the dir is what boot loads
+  slopp's code from and never the port, so a bare `java -jar slopp.jar <dir>`
+  is one slopp for the machine on the default port.
+
+  `--call` is retired — a tool call from a shell is `slopp <op> '{…}'`, routed
+  to the daemon. Whether a process hot-reloads its OWN code from its store is
+  read from `SLOPP_LIVE` in its environment ([[-main]]), not a flag: snapshot
+  is the default, so a built app just runs off its jar."
   [args]
   (let [[pre post] (split-with #(not (#{"--main" "--call"} %)) args)
         dir  (or (first (remove #(str/starts-with? % "--") pre))
@@ -1007,11 +1009,9 @@
                       {:args (vec args)})))
     (if (second post)
       {:dir   dir
-       :live? (boolean (some #{"--live"} pre))
        :main  (symbol (second post))
        :args  (if (seq extra) extra [dir])}
       {:dir   dir
-       :live? (boolean (some #{"--live"} pre))
        :main  'slopp.daemon/-main
        :args  []})))
 
@@ -1049,37 +1049,39 @@
          dir "/.slopp/store.db")))
 
 ^:unsafe (defn -main
-  "clojure -M -m slopp.kernel.boot <dir> [--snapshot | --live] [--main ns/fn arg...]
+  "clojure -M -m slopp.kernel.boot <dir> [--main ns/fn arg...]
 
   Load the store's program into THIS jvm and run its entry point (default
   slopp.daemon/-main with no args: one slopp for the machine, on the default
-  port — the dir is what is loaded, never the port). --live tracks the store
-  and hot-reloads changed namespaces (the watcher is a DAEMON thread — it
-  never keeps the JVM alive after the program exits). --main trampolines any
+  port — the dir is what is loaded, never the port). --main trampolines any
   store CLI — in a fileless tree this is THE entry point: e.g.
     clojure -M -m slopp.kernel.boot . --main slopp.sync/-main push . <url>
+
+  Whether this process HOT-RELOADS its own code from the store as the store
+  changes is read from `SLOPP_LIVE` in the environment, not a flag: set it and
+  boot watches the store's data_version and reloads changed namespaces (the
+  watcher is a DAEMON thread — it never keeps the JVM alive after the program
+  exits); unset (the default) freezes the loaded version at startup, so a
+  built app just runs off its jar.
 
   The daemon is the ordinary entry, and its code ships in the jar, so booting
   it from a neutral dir loads NO store from that dir — [[boot-note]] says so
   rather than treating the working directory as a project to adopt."
   [& args]
-  (let [{:keys [dir live? main args]} (parse-args args)
+  (let [{:keys [dir main args]} (parse-args args)
+        live?   (boolean (not-empty (System/getenv "SLOPP_LIVE")))
         daemon? (= main 'slopp.daemon/-main)
         mode    (if live? "live" "snapshot")]
     (reset! boot-info {:dir dir
                        :mode (if live? :live :snapshot)
                        :booted-at (System/currentTimeMillis)})
     (let [sources (load-store! dir)]
-            (when-let [note (boot-note {:daemon?     daemon?
+      (when-let [note (boot-note {:daemon?     daemon?
                                   :loaded?     (boolean (seq sources))
                                   :store-file? (.exists (io/file dir ".slopp" "store.db"))
                                   :dir         dir
                                   :mode        mode})]
         (log! note))
-      ;; a namespace that did not load is now SURVIVABLE (load-store! is
-      ;; best-effort), which makes saying so the whole job: an agent whose
-      ;; store came up half-loaded must learn it from orientation rather than
-      ;; from the first confusing failure downstream.
       (when-let [f (seq (:load-failures (meta sources)))]
         (swap! boot-info assoc :load-failures (vec f))))
     (when live?

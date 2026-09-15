@@ -231,7 +231,7 @@ normal setup needs none of them.
 A reasonable swarm profile is `SLOPP_WARM_SPARE=0` plus a shorter lease:
 
 ```sh
-SLOPP_WARM_SPARE=0 SLOPP_BRANCH_IMAGE_TTL_MS=120000 slopp <dir> --live
+SLOPP_WARM_SPARE=0 SLOPP_BRANCH_IMAGE_TTL_MS=120000 slopp daemon
 ```
 
 **What you are buying, and with what.** You buy memory with image-boot
@@ -275,7 +275,7 @@ and the symptom is slower tests rather than wrong ones — so if your suite slow
 down noticeably after an upgrade, this is the first thing to try:
 
 ```sh
-SLOPP_IMAGE_JVM_OPTS="" slopp <dir> --live      # the previous collector
+SLOPP_IMAGE_JVM_OPTS="" slopp daemon             # the previous collector
 ```
 
 Nothing here reaches the external test tier, whose shard JVMs are launched

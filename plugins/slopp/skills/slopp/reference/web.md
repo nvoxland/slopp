@@ -298,7 +298,7 @@ The rules that matter:
   {:http/namespaces ['my.ui]}) {:request-method :get :uri "/x"})` via
   `query_eval` — the full pipeline, rendered HTML in the response map.
   Test on data first (call the handler with a synthetic `{:http/reads …}`
-  request); pin one rendered string per component. Under `--live`, an
+  request); pin one rendered string per component. Under a live server, an
   edited page hot-serves — browser F5, no build step.
 
 **CSS is garden — the same story for stylesheets (`slopp.http.css`).** A
@@ -673,7 +673,7 @@ declare the app; slopp owns the loop.
 - **Dev loop (optional):** `config_file {path "client" key "auto-compile" value
   "true"}` recompiles the bundle after a client-ns write — ASYNC and
   non-blocking (single-flight + coalescing): the write returns
-  `:client-recompiling`, and a `--live` server serves fresh JS once the
+  `:client-recompiling`, and a live server serves fresh JS once the
   background compile commits. Off by default. Also fine: `:cljs` forms can be
   renamed/moved/extracted like any code — the refactor ops handle them.
 - **One benign rough edge:** the D6 `!`-effect warning fires on idiomatic cljs

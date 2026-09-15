@@ -464,7 +464,7 @@ its store-backed static reader moved to `api.web/store-reader`.
 
 - **MCP stdio** (`clojure -M -m slopp.mcp [dir]`) — Claude Code and Codex
   (`config.toml` recipe in README). Optional dir = durable session. The
-  in-repo `.mcp.json` runs it THROUGH `slopp.kernel.boot` (`-m slopp.kernel.boot . --snapshot`)
+  in-repo `.mcp.json` runs it THROUGH `slopp.kernel.boot` (`-m slopp.kernel.boot .`)
   so slopp serves from its own store, no exported source — see
   "Running from the store" below.
 - ~~**Git smart-HTTP**~~ — **REMOVED 2026-08-02.** Serving the store to a git
@@ -574,7 +574,7 @@ its store-backed static reader moved to `api.web/store-reader`.
 
 ## Running from the store (`slopp.kernel.boot`)
 
-- The entry `clojure -M -m slopp.kernel.boot <dir> [--snapshot|--live]` runs the
+- The entry `clojure -M -m slopp.kernel.boot <dir> [--main ns/fn]` runs the
   store's program WITHOUT exported source: `load-store!` reads every ns's
   byte-exact source with raw next.jdbc, `dependency-order`s them (parses ns
   requires — a self-contained mirror of `store/ns-dependency-order`), and

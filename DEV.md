@@ -25,7 +25,7 @@ and produces the exact signature of a stale jar — your fix runs nowhere and
 nothing says why. (`deps.edn` puts `src` on the classpath, so a plain REPL
 from a checkout does load the disk copy; that is the only thing it is for.)
 
-What IS special about the kernel is that `--live` cannot hot-reload it — it is
+What IS special about the kernel is that live mode cannot hot-reload it — it is
 the code doing the reloading. A change there needs `build` → `clojure -T:build
 uber` → restart the MCP server.
 
@@ -70,13 +70,14 @@ code and the other serving you.
 From a checkout:
 
 ```sh
-clojure -M -m slopp.kernel.boot . --live
+SLOPP_LIVE=1 clojure -M -m slopp.kernel.boot .
 ```
 
-`--live` watches the store's `data_version` and hot-reloads changed namespaces
-and everything that requires them (dependencies first), so an edit you just
-committed is live in the server that made it — including in handlers that
-captured a value from what you changed at `def` time. `--snapshot` freezes at startup instead.
+`SLOPP_LIVE=1` makes it watch the store's `data_version` and hot-reload changed
+namespaces and everything that requires them (dependencies first), so an edit
+you just committed is live in the server that made it — including in handlers
+that captured a value from what you changed at `def` time. Unset (the default)
+freezes at startup instead.
 
 **Startup is async (concurrent sessions).** The MCP server completes its
 `initialize` handshake as soon as the store VALUE loads and boots the image
@@ -247,7 +248,7 @@ at birth with `ns_create {platform}`.
   write-verify loop.
 - **Optional dev loop:** `config_file {path "client" key "auto-compile" value
   "true"}` makes a client-ns write recompile the bundle in the background
-  (async, single-flight), so a `--live` server serves fresh JS without a manual
+  (async, single-flight), so a live server serves fresh JS without a manual
   `compile_client`. Off by default; the write returns `:client-recompiling`.
 - Running the compiled JS against a real DOM is out of scope (browser/Cypress
   someday), not the inner loop.
@@ -296,7 +297,7 @@ Two rules for writing:
 At commit points:
 
 ```sh
-clojure -M -m slopp.kernel.boot . --snapshot --main slopp.lab.benchmark/-main
+clojure -M -m slopp.kernel.boot . --main slopp.lab.benchmark/-main
 ```
 
 The tree is fileless, so a plain `-m slopp.lab.benchmark` finds nothing.

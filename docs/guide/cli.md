@@ -80,11 +80,11 @@ distinction worth keeping, because one word covered both for a long time and
 cost several confident wrong diagnoses.
 
 ```sh
-slopp . --live       # hot-reload the server's own namespaces as the store changes
-slopp . --snapshot   # freeze the loaded version at startup
+slopp .                 # snapshot (default): freeze the loaded version at startup
+SLOPP_LIVE=1 slopp .     # hot-reload the server's own namespaces as the store changes
 ```
 
-`--live` matters when you are working on slopp itself, or on any store whose
+Live mode (`SLOPP_LIVE`) matters when you are working on slopp itself, or on any store whose
 program the server is running. It watches the journal's `data_version` and
 reloads the namespaces whose source changed **plus everything that requires
 them**, dependencies first.
@@ -96,7 +96,7 @@ changed and the handler goes on publishing the old schema forever, because its
 own source never moved. Dependencies reload first, so a dependent never
 re-captures the value that is about to change.
 
-The one layer `--live` cannot reload is the boot kernel itself
+The one layer live mode cannot reload is the boot kernel itself
 (`src/slopp/kernel/boot.clj`, `src/slopp/kernel/rt.clj`), because that is the code doing the
 loading.
 

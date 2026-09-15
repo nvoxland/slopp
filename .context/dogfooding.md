@@ -76,7 +76,7 @@ Purpose: track whether the product is getting better to use — **wall time**
 and **token cost** (chars/4 of the JSON actually sent/received through
 `mcp/handle`) to build each sample app via scripted agent sessions.
 
-- Run: `clojure -M -m slopp.kernel.boot . --snapshot --main slopp.lab.benchmark/-main`
+- Run: `clojure -M -m slopp.kernel.boot . --main slopp.lab.benchmark/-main`
   (the tree is fileless — plain `-m slopp.lab.benchmark` finds nothing; NOT part
   of `clojure -M:test` — it
   spawns several JVMs and takes minutes).
@@ -324,7 +324,7 @@ removed; done!'s green-by-vacancy fallback caught by its own first real
 use and fixed via closure-bounded selection — test-nses-reaching now
 shared by done! and the affected slice). Stale command fixed: the
 benchmark runs via the boot kernel (`clojure -M -m slopp.kernel.boot .
---snapshot --main slopp.lab.benchmark/-main`) — the tree is fileless.
+--main slopp.lab.benchmark/-main`) — the tree is fileless.
 Improvement candidates parked: :still-red compression for repeated
 identical failure sets; per-write :all fallback stays ns-scoped by
 design (fast) now that the done-point is the reaching safety net.

@@ -157,7 +157,7 @@ ends a turn's batch by definition — its verdict is what decides the next move.
    session's brief.
    **`:host-stale` means DOUBT THE VERDICT.** `done` and `full_check` carry
    it when the process that produced the result is knowingly running code the
-   store has moved past — a hot-reload that failed, or a `--snapshot` host
+   store has moved past — a hot-reload that failed, or a snapshot host
    with code deltas since it booted. The tests may have passed against the
    wrong code. Restart the server (or fix the reload failure named in
    `:failed`) and re-run before believing a green. It is absent unless there

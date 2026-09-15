@@ -16,8 +16,9 @@
 
 - **Everything goes through slopp's MCP tools** — query_* to read, edit_* to
   write. There are no files to hand-edit and no file↔store drift by
-  construction. The server runs `clojure -M -m slopp.kernel.boot . --live`
-  (`.mcp.json`), so committed edits hot-reload into the running server.
+  construction. A daemon started with `SLOPP_LIVE=1` hot-reloads committed edits into the
+  running server (the release-base default is snapshot; the dev instance is
+  re-served at each done).
 - **Red/green TDD always**: add the failing test (edit_add_form/ns_create in
   a test ns), watch the write result report red, implement, watch the
   affected tests re-run green. The trace map picks affected tests per edit.

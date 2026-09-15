@@ -63,12 +63,13 @@ on the store's files manifest names the launcher and the fn it delegates to.
 **As an MCP server** for Claude Code or any MCP client (`.mcp.json`):
 
 ```json
-{"mcpServers": {"slopp": {"command": "java", "args": ["-jar", "slopp.jar", ".", "--live"]}}}
+{"mcpServers": {"slopp": {"command": "java", "args": ["-jar", "slopp.jar", "."], "env": {"SLOPP_LIVE": "1"}}}}
 ```
 
-`--live` hot-reloads the *running server's own namespaces* as its store
-changes; `--snapshot` freezes at startup. From a checkout of this repo,
-`clojure -M -m slopp.kernel.boot . --live` does the same.
+`SLOPP_LIVE=1` in the server's environment hot-reloads the *running
+server's own namespaces* as its store changes; unset (the default) freezes
+the loaded version at startup. From a checkout of this repo, `SLOPP_LIVE=1
+clojure -M -m slopp.kernel.boot .` does the same.
 
 ## The model
 

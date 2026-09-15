@@ -84,9 +84,12 @@ case "${1:-}" in
     mkdir -p "$DIR"
     shift
     # the port is passed explicitly: with no --main argument the kernel hands
-    # the entry its DIR, and a dir is not a port
+    # the entry its DIR, and a dir is not a port. Live vs snapshot is NOT a
+    # flag: SLOPP_LIVE in the environment (already set here if the user set it)
+    # is read by the kernel, so the daemon hot-reloads its own code only when
+    # asked, and a plain start is snapshot.
     daemon_file
-    set -- "$DIR" ${SLOPP_LIVE:+--live} --main slopp.daemon/-main "${1:-$PORT}"
+    set -- "$DIR" --main slopp.daemon/-main "${1:-$PORT}"
     ;;
   --call)
     TOOL="${2:-}"; RAW="${3-}"; [ -z "$RAW" ] && RAW="{}"

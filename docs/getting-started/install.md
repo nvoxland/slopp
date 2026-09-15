@@ -67,14 +67,15 @@ Point your client at the jar:
   "mcpServers": {
     "slopp": {
       "command": "java",
-      "args": ["-jar", "/path/to/slopp.jar", ".", "--live"]
+      "args": ["-jar", "/path/to/slopp.jar", "."],
+      "env": {"SLOPP_LIVE": "1"}
     }
   }
 }
 ```
 
-`--live` hot-reloads the running *server's own* namespaces as its store
-changes; `--snapshot` freezes at startup. With no directory argument,
+`SLOPP_LIVE=1` in the environment hot-reloads the running *server's own*
+namespaces as its store changes; unset (the default) freezes at startup. With no directory argument,
 `java -jar slopp.jar` boots the current working directory -- the jar's entry
 point is itself store-tracked config (`META-INF/MANIFEST.MF` on the files
 manifest names the launcher and the fn it delegates to).
@@ -125,7 +126,7 @@ slopp --call git_clone '{"url":"https://github.com/you/proj.git","dir":"proj"}'
 
 ```sh
 git clone https://github.com/nvoxland/slopp.git && cd slopp
-clojure -M -m slopp.kernel.boot . --live
+SLOPP_LIVE=1 clojure -M -m slopp.kernel.boot .
 ```
 
 The working tree is fileless: only the boot kernel (`src/slopp/kernel/boot.clj`,
