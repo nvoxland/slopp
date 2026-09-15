@@ -7297,6 +7297,39 @@ the machine daemon's own tools update only by a jar rebuild + restart. That is
 the release-base trade made total: stability of the tools you edit with, in
 exchange for no mid-session self-modification.
 
+## D-config-env-override (2026-09-15, user decision) — per-process config override via `SLOPP_<file>.<key>`
+
+**Decision.** A config value can be overridden for ONE process by an
+environment variable named `SLOPP_<file>.<key>` (the config file, a dot, the
+dotted key — dots preserved, no case-mangling, no `CONFIG` segment):
+`SLOPP_dev.run.daemon.port=7360`. Precedence is override → store value →
+registry default; a value failing its type check falls back to the default.
+The precedence is a pure fn (`capabilities/resolve-config`, argument-injected
+so it is not a dynamic rebinding the dialect gate refuses); `env-config` reads
+the variable; `effective`, `stored?` and `runnables` consult both.
+
+**Scope.** Runtime/serving config only — `capabilities` (`effective`) and
+`dev` (`runnables`). Rule/gate severities (`rules`, `gates`) are NOT
+overridable by env, so correctness gates cannot be switched off by a variable;
+they stay store-only. The daemon's own MCP listen port remains the separate
+`SLOPP_PORT` (not a `:config` value); `SLOPP_dev.run.daemon.port` is the port
+of the dev instances the daemon MANAGES.
+
+**Why.** Nathan, 2026-09-15: two daemons sharing one `store.db` both read the
+same `run.daemon.port` (7358) and collide when each boots that project's dev
+instance (the store holds ONE value for all readers). A per-process override
+lets each daemon run its managed dev instance on its own port without forking
+the store config. The general `SLOPP_<file>.<key>` form was chosen over a
+`SLOPP_CONFIG_…` or cased scheme at Nathan's request. Anticipated by
+`runnables`' own note ("what a per-user override layer keys on when it
+arrives"); this is that layer.
+
+**What it costs.** A dot in the name means a bare `VAR=val cmd` cannot set it
+(shell identifier rules); `env '…=…' …` or a settings.json env block does.
+`effective` now reads the environment, so it is no longer a pure function of
+(store, key) — deliberate, and the reason the precedence logic is factored
+into the pure `resolve-config`.
+
 ## G6-revised (2026-09-12, user decision) — the repo is `nvoxland/slopp`; `slopp3` is deleted, not renamed
 
 G6 named `slopp3` "the permanent repo (for now)". The permanent repo is

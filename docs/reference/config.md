@@ -217,6 +217,7 @@ config_file {path "dev" key "run.worker.enabled" value "false"}
 | `run.*.args` | ordered CSV | — | arguments, in order (`--port,8080`) |
 | `run.*.url` | string | — | where a human should open it; DECLARED, not observed |
 | `run.*.enabled` | boolean | `true` | `false` silences an entry without deleting it |
+| `run.*.port` | int | — | the port this entry's dev instance binds (e.g. `run.daemon.port`) |
 
 Validated at the write, like `capabilities` and `rules` — an unregistered key
 refuses rather than recording a setting that governs nothing.
@@ -229,6 +230,33 @@ about the program — shipping it would put one developer's choices in a jar,
 and a second developer's pull would carry them back.
 
 Every other config path ships and always has.
+
+### Overriding a config value per process
+
+`SLOPP_<file>.<key>` in a process's environment overrides that config value
+for THAT process only, above the store value and the registry default:
+
+```sh
+env 'SLOPP_dev.run.daemon.port=7360' slopp daemon
+```
+
+The name is `SLOPP_` + the config file + `.` + the key, dots preserved — so
+`SLOPP_dev.run.daemon.port` overrides the `dev` file's `run.daemon.port`, and
+`SLOPP_capabilities.http.port` a served port. Precedence is **override →
+store → default**; an override that fails the key's type check falls back like
+any bad value. It is per-PROCESS, so two daemons sharing one `store.db` can
+run their dev instances on different ports (the store holds one value; each
+daemon's environment overrides it independently).
+
+A dot cannot appear in a bare shell assignment (`VAR=val cmd`), so set it with
+`env '…=…' …` or a `settings.json` `env` block — both reach `System.getenv`.
+
+Scoped to runtime/serving config: `capabilities` (`effective`) and `dev`
+(`runnables`). Rule and gate severities are deliberately NOT overridable this
+way — correctness stays in the store, not switchable by an env var. And the
+daemon's OWN listen port is the separate `SLOPP_PORT` (it is not a `:config`
+value); `SLOPP_dev.run.daemon.port` is the port of the dev instances it
+manages.
 
 ## The dependency manifest
 
