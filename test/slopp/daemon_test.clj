@@ -958,3 +958,16 @@
         (is (= (.getName (java.io.File. ^String d)) (:slug (first (projects! ctx))))
             (pr-str (projects! ctx))))
       (finally (daemon/reset-all!)))))
+
+(deftest the-app-poll-re-serves-only-on-a-main-advance
+  (testing "data-version unchanged: nothing committed since — skip, do not even read the head"
+    (is (= :none (daemon/reserve-decision 5 "h1" 5 "h1")))
+    (is (= :none (daemon/reserve-decision 5 "h1" 5 "h2")) "version is the gate; head is not read when it is unchanged"))
+  (testing "a commit that MOVED main — a landing by any writer — re-serves"
+    (is (= :reserve (daemon/reserve-decision 5 "h1" 6 "h2"))))
+  (testing "a commit that did NOT move main — a thread write, a git pin — only records the version"
+    (is (= :touch (daemon/reserve-decision 5 "h1" 6 "h1"))))
+  (testing "a commit with no readable head does not re-serve"
+    (is (= :touch (daemon/reserve-decision 5 "h1" 6 nil))))
+  (testing "first sight (nothing served yet): a head present is an advance"
+    (is (= :reserve (daemon/reserve-decision nil nil 1 "h1")))))

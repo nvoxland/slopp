@@ -2137,6 +2137,17 @@
   "Every handler-map entry (Q4) — call-tool checks here first."
   (merge env-handlers! file-handlers! sync-handlers! change-handlers!))
 
+^:unsafe (defn ^:export reserve-owner!
+  "Bring an app OWNER (a project's reader) current with its branch and
+  re-serve its managed app from the advanced value. The daemon calls this to
+  keep a dev instance current with a landing by ANY writer on the shared
+  store: `refresh-app!` alone re-serves from the owner's CURRENT store value,
+  so the owner must absorb the landing FIRST. Returns `refresh-app!`'s
+  result."
+  [owner]
+  (engine/refresh-cache! owner)
+  (refresh-app! owner))
+
 (defn- call-op!
   "THE dispatch seam every route crosses — family dispatch, the bare `--call`
   door, and explore's recursive entries — so it is where a shape is

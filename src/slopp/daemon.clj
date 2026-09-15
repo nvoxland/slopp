@@ -861,90 +861,6 @@
   []
   (slopp.http/context (serving-opts)))
 
-(defn ^:export start!
-  "Bind the daemon's listener on `port` (loopback; nil = [[default-port]])
-  and answer immediately: `{:url :port :token}`. Nothing is loaded until
-  something attaches — binding first is what fits a client's startup
-  window, which a JVM that opened a store before listening would miss. The
-  idle reaper starts beside it. A taken port throws with the bind
-  diagnosis leading, as every slopp listener does."
-  [port]
-  (locking state
-    (when (:server @state)
-      (throw (ex-info "this process already runs a daemon" {:port (:port (:server @state))})))
-    (let [srv    (slopp.http/serve! (assoc (serving-opts)
-                                           :http/host "127.0.0.1"
-                                           :http/port (or port default-port)))
-          reaper (doto (Thread. ^Runnable
-                               (fn []
-                                 (while (:server @state)
-                                   (Thread/sleep 60000)
-                                   (try (reap-idle! (System/currentTimeMillis))
-                                        (catch Throwable _ nil))))
-                               "slopp-daemon-reaper")
-                   (.setDaemon true))]
-      (swap! state assoc :server srv :reaper reaper)
-      (.start reaper)
-      {:url (str "http://127.0.0.1:" (:port srv) "/api/") :port (:port srv) :token (token)})))
-
-^:unsafe (defn -main
-  "Run the daemon: `slopp daemon [port]`. Normally its own code ships in the
-  JAR and the directory it is launched in is a NEUTRAL working directory
-  (`~/.slopp`, no project store): it serves whatever projects ATTACH, each
-  with its own store, and holds no project of its own. (The self-host loop
-  passes a checkout dir with `--live`, and then that store IS the code.) It
-  records its address, pid and the write door's token in [[daemon-file]] —
-  `~/.slopp/daemon.json`, or `daemon-<port>.json` for a non-default port —
-  owner-readable only, and blocks.
-
-  slopp's own DEV instance is this same fn on another port (7358),
-  declared in its store's dev config as `run.daemon.main` and run from the
-  store by the machinery every project's dev instance gets: booted in a
-  child image on first attach, refreshed at every done, replaced by
-  `restart {app true}`. It records itself under its own file and leaves
-  the machine's alone.
-
-  A second daemon on the port refuses and names the live one from that
-  file — after asking the OS whether that pid still runs, because a daemon
-  that did not exit cleanly leaves its file behind, and naming a dead pid
-  as the holder sends someone to kill the wrong thing."
-  [& [port]]
-  (let [{p :port err :error} (daemon-port port (System/getenv "SLOPP_PORT")
-                                       (System/getProperty "slopp.app-port"))]
-    (if err
-      (do (.println System/err (str "slopp daemon: " err))
-          (System/exit 2))
-      (let [f (daemon-file p)]
-        (try
-          (let [r (start! p)]
-            (spit-private! f (json/generate-string
-                              {:url (:url r) :port (:port r) :token (:token r)
-                               :pid (.pid (java.lang.ProcessHandle/current))
-                               :started (System/currentTimeMillis)}))
-            (.println System/err (str "slopp daemon: " (:url r)
-                                      " (pid " (.pid (java.lang.ProcessHandle/current)) ")"
-                                      " — address + token in " (str f)))
-            @(promise))
-          (catch clojure.lang.ExceptionInfo e
-            (let [live   (try (json/parse-string (slurp f) true) (catch Exception _ nil))
-                  alive? (when-let [pid (:pid live)]
-                           (let [h (java.lang.ProcessHandle/of (long pid))]
-                             (and (.isPresent h) (.isAlive (.get h)))))]
-              (.println System/err
-                        (str "slopp daemon: cannot bind port " p " — "
-                             (cond
-                               alive?
-                               (str "a daemon is already live at " (:url live)
-                                    " (pid " (:pid live) ")")
-
-                               live
-                               (str (ex-message e) ". " (str f) " names pid " (:pid live)
-                                    ", which is not running — a daemon that did not exit"
-                                    " cleanly — so something else holds the port")
-
-                               :else (ex-message e))))
-              (System/exit 1))))))))
-
 (defn- text
   "A text/plain answer: what a hook or a shell prints as it stands."
   [status s]
@@ -1159,3 +1075,144 @@
         (if (= 200 (:status r))
           (text (if (:isError b) 409 200) (:text b))
           (text (:status r) (or (:error b) (:body r))))))))
+
+(defn reserve-decision
+  "What the app-refresh poll does for one served project, given the
+  data-version and main head it was LAST served at and the pair read now.
+  Pure — the effectful poll injects the two current values.
+
+  - `:none` — nothing has committed since (data-version unchanged): skip, the
+    cheap common case, and the poll does not even read the head.
+  - `:touch` — something committed but MAIN did not move (a thread /
+    mini-journal write, a git pin, the trace map): record the new version, do
+    NOT re-serve.
+  - `:reserve` — main advanced (a landing, by any writer on the shared
+    store): re-serve the app and record both."
+  [served-version served-head version head]
+  (cond
+    (= version served-version)          :none
+    (and head (not= head served-head))  :reserve
+    :else                               :touch))
+
+^:unsafe (defn ^:export refresh-served-apps!
+  "Re-serve every managed dev instance whose MAIN line has advanced since it
+  was last served — regardless of WHO landed the done: a co-tenant session, a
+  daemon in another process, or one on another machine sharing this store.
+
+  Polled efficiently: SQLite has no cross-process push, so this gates on
+  `PRAGMA data_version` (`db/data-version`) — a microsecond in-memory counter
+  the engine bumps whenever ANOTHER connection commits — and only reads the
+  line head, and only re-serves, when that moved. The store-READ side already
+  absorbs foreign commits; [[slopp.mcp/reserve-owner!]] brings the served
+  APP with it. Never throws; a project whose store has not moved costs one
+  pragma read."
+  []
+  (doseq [[dir p] (:projects @state)
+          :let [reader (get-in p [:api :reader])]
+          :when (and reader (some-> reader deref :app-server))]
+    (try
+      (let [conn (:db @reader)
+            dv   (db/data-version conn)]
+        (when (not= dv (:served-version p))
+          (let [head (db/line-head conn (engine/session-line reader))]
+            (case (reserve-decision (:served-version p) (:served-head p) dv head)
+              :reserve (do (mcp/reserve-owner! reader)
+                           (swap! state update-in [:projects dir] assoc
+                                  :served-head head :served-version dv))
+              (swap! state assoc-in [:projects dir :served-version] dv)))))
+      (catch Throwable _ nil))))
+
+(defn ^:export start!
+  "Bind the daemon's listener on `port` (loopback; nil = [[default-port]])
+  and answer immediately: `{:url :port :token}`. Nothing is loaded until
+  something attaches — binding first is what fits a client's startup
+  window, which a JVM that opened a store before listening would miss. Two
+  background loops start beside it: the idle reaper, and the app refresher
+  ([[refresh-served-apps!]]) that keeps every managed dev instance current
+  with landings by ANY writer on the shared store. A taken port throws with
+  the bind diagnosis leading, as every slopp listener does."
+  [port]
+  (locking state
+    (when (:server @state)
+      (throw (ex-info "this process already runs a daemon" {:port (:port (:server @state))})))
+    (let [srv    (slopp.http/serve! (assoc (serving-opts)
+                                           :http/host "127.0.0.1"
+                                           :http/port (or port default-port)))
+          reaper (doto (Thread. ^Runnable
+                               (fn []
+                                 (while (:server @state)
+                                   (Thread/sleep 60000)
+                                   (try (reap-idle! (System/currentTimeMillis))
+                                        (catch Throwable _ nil))))
+                               "slopp-daemon-reaper")
+                   (.setDaemon true))
+          refresher (doto (Thread. ^Runnable
+                                  (fn []
+                                    (while (:server @state)
+                                      (Thread/sleep 250)
+                                      (try (refresh-served-apps!)
+                                           (catch Throwable _ nil))))
+                                  "slopp-daemon-refresh")
+                      (.setDaemon true))]
+      (swap! state assoc :server srv :reaper reaper :refresher refresher)
+      (.start reaper)
+      (.start refresher)
+      {:url (str "http://127.0.0.1:" (:port srv) "/api/") :port (:port srv) :token (token)})))
+
+^:unsafe (defn -main
+  "Run the daemon: `slopp daemon [port]`. Normally its own code ships in the
+  JAR and the directory it is launched in is a NEUTRAL working directory
+  (`~/.slopp`, no project store): it serves whatever projects ATTACH, each
+  with its own store, and holds no project of its own. (The self-host loop
+  passes a checkout dir with `--live`, and then that store IS the code.) It
+  records its address, pid and the write door's token in [[daemon-file]] —
+  `~/.slopp/daemon.json`, or `daemon-<port>.json` for a non-default port —
+  owner-readable only, and blocks.
+
+  slopp's own DEV instance is this same fn on another port (7358),
+  declared in its store's dev config as `run.daemon.main` and run from the
+  store by the machinery every project's dev instance gets: booted in a
+  child image on first attach, refreshed at every done, replaced by
+  `restart {app true}`. It records itself under its own file and leaves
+  the machine's alone.
+
+  A second daemon on the port refuses and names the live one from that
+  file — after asking the OS whether that pid still runs, because a daemon
+  that did not exit cleanly leaves its file behind, and naming a dead pid
+  as the holder sends someone to kill the wrong thing."
+  [& [port]]
+  (let [{p :port err :error} (daemon-port port (System/getenv "SLOPP_PORT")
+                                       (System/getProperty "slopp.app-port"))]
+    (if err
+      (do (.println System/err (str "slopp daemon: " err))
+          (System/exit 2))
+      (let [f (daemon-file p)]
+        (try
+          (let [r (start! p)]
+            (spit-private! f (json/generate-string
+                              {:url (:url r) :port (:port r) :token (:token r)
+                               :pid (.pid (java.lang.ProcessHandle/current))
+                               :started (System/currentTimeMillis)}))
+            (.println System/err (str "slopp daemon: " (:url r)
+                                      " (pid " (.pid (java.lang.ProcessHandle/current)) ")"
+                                      " — address + token in " (str f)))
+            @(promise))
+          (catch clojure.lang.ExceptionInfo e
+            (let [live   (try (json/parse-string (slurp f) true) (catch Exception _ nil))
+                  alive? (when-let [pid (:pid live)]
+                           (let [h (java.lang.ProcessHandle/of (long pid))]
+                             (and (.isPresent h) (.isAlive (.get h)))))]
+              (.println System/err
+                        (str "slopp daemon: cannot bind port " p " — "
+                             (cond
+                               alive?
+                               (str "a daemon is already live at " (:url live)
+                                    " (pid " (:pid live) ")")
+
+                               live
+                               (str (ex-message e) ". " (str f) " names pid " (:pid live)
+                                    ", which is not running — a daemon that did not exit"
+                                    " cleanly — so something else holds the port")
+
+                               :else (ex-message e))))
+              (System/exit 1))))))))
