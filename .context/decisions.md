@@ -7300,9 +7300,11 @@ exchange for no mid-session self-modification.
 ## D-config-env-override (2026-09-15, user decision) — per-process config override via `SLOPP_<file>.<key>`
 
 **Decision.** A config value can be overridden for ONE process by an
-environment variable named `SLOPP_<file>.<key>` (the config file, a dot, the
-dotted key — dots preserved, no case-mangling, no `CONFIG` segment):
-`SLOPP_dev.run.daemon.port=7360`. Precedence is override → store value →
+environment variable named `SLOPP_<FILE>_<KEY>` — `SLOPP_` + the config path
+(file then key) UPPERCASED with every dot and dash mapped to `_`, so it is a
+conventional shell-settable name: `SLOPP_DEV_RUN_DAEMON_PORT=7360`. (Built
+first as dotted `SLOPP_<file>.<key>`, changed same day to uppercase/underscore
+at Nathan's request — a dot cannot be set by a bare `VAR=val cmd`.) Precedence is override → store value →
 registry default; a value failing its type check falls back to the default.
 The precedence is a pure fn (`capabilities/resolve-config`, argument-injected
 so it is not a dynamic rebinding the dialect gate refuses); `env-config` reads
@@ -7312,21 +7314,19 @@ the variable; `effective`, `stored?` and `runnables` consult both.
 `dev` (`runnables`). Rule/gate severities (`rules`, `gates`) are NOT
 overridable by env, so correctness gates cannot be switched off by a variable;
 they stay store-only. The daemon's own MCP listen port remains the separate
-`SLOPP_PORT` (not a `:config` value); `SLOPP_dev.run.daemon.port` is the port
+`SLOPP_PORT` (not a `:config` value); `SLOPP_DEV_RUN_DAEMON_PORT` is the port
 of the dev instances the daemon MANAGES.
 
 **Why.** Nathan, 2026-09-15: two daemons sharing one `store.db` both read the
 same `run.daemon.port` (7358) and collide when each boots that project's dev
 instance (the store holds ONE value for all readers). A per-process override
 lets each daemon run its managed dev instance on its own port without forking
-the store config. The general `SLOPP_<file>.<key>` form was chosen over a
-`SLOPP_CONFIG_…` or cased scheme at Nathan's request. Anticipated by
+the store config. The general `SLOPP_<FILE>_<KEY>` form was chosen over a `SLOPP_CONFIG_…`
+scheme at Nathan's request. Anticipated by
 `runnables`' own note ("what a per-user override layer keys on when it
 arrives"); this is that layer.
 
-**What it costs.** A dot in the name means a bare `VAR=val cmd` cannot set it
-(shell identifier rules); `env '…=…' …` or a settings.json env block does.
-`effective` now reads the environment, so it is no longer a pure function of
+**What it costs.** `effective` now reads the environment, so it is no longer a pure function of
 (store, key) — deliberate, and the reason the precedence logic is factored
 into the pure `resolve-config`.
 

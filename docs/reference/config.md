@@ -233,29 +233,26 @@ Every other config path ships and always has.
 
 ### Overriding a config value per process
 
-`SLOPP_<file>.<key>` in a process's environment overrides that config value
-for THAT process only, above the store value and the registry default:
+An environment variable overrides a config value for THAT process only, above
+the store value and the registry default:
 
 ```sh
-env 'SLOPP_dev.run.daemon.port=7360' slopp daemon
+SLOPP_DEV_RUN_DAEMON_PORT=7360 slopp daemon
 ```
 
-The name is `SLOPP_` + the config file + `.` + the key, dots preserved — so
-`SLOPP_dev.run.daemon.port` overrides the `dev` file's `run.daemon.port`, and
-`SLOPP_capabilities.http.port` a served port. Precedence is **override →
-store → default**; an override that fails the key's type check falls back like
-any bad value. It is per-PROCESS, so two daemons sharing one `store.db` can
-run their dev instances on different ports (the store holds one value; each
-daemon's environment overrides it independently).
-
-A dot cannot appear in a bare shell assignment (`VAR=val cmd`), so set it with
-`env '…=…' …` or a `settings.json` `env` block — both reach `System.getenv`.
+The name is `SLOPP_` + the config path (file, then key) UPPERCASED with every
+dot and dash as `_` — so `SLOPP_DEV_RUN_DAEMON_PORT` overrides the `dev` file's
+`run.daemon.port`, and `SLOPP_CAPABILITIES_HTTP_PORT` a served port.
+Precedence is **override → store → default**; an override that fails the key's
+type check falls back like any bad value. It is per-PROCESS, so two daemons
+sharing one `store.db` can run their dev instances on different ports (the
+store holds one value; each daemon's environment overrides it independently).
 
 Scoped to runtime/serving config: `capabilities` (`effective`) and `dev`
 (`runnables`). Rule and gate severities are deliberately NOT overridable this
 way — correctness stays in the store, not switchable by an env var. And the
 daemon's OWN listen port is the separate `SLOPP_PORT` (it is not a `:config`
-value); `SLOPP_dev.run.daemon.port` is the port of the dev instances it
+value); `SLOPP_DEV_RUN_DAEMON_PORT` is the port of the dev instances it
 manages.
 
 ## The dependency manifest
