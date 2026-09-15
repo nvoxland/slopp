@@ -539,19 +539,17 @@
 
 (defonce ^{:doc "What THIS process has loaded, and how it compares to the store.
 
-  `:nses` is {ns-sym source-hash}, written by every door that loads store code
-  into this JVM — `load-store!` at boot and `watch-live!`'s reload. `:stale` is
-  the last measured answer, recomputed whenever the store's sources are in
-  hand; `:armed?` separates \"not measured yet\" from \"measured, nothing stale\",
-  because nil and [] are different claims and only one of them is a promise.
+  `:nses` is {ns-sym source-hash}, written by `load-store!` at boot. `:stale`
+  is the last measured answer, recomputed whenever the store's sources are in
+  hand; `:armed?` separates \"not measured yet\" from \"measured, nothing
+  stale\", because nil and [] are different claims and only one of them is a
+  promise.
 
-  Why a measurement and not the watcher's `:failed` map: those disagree, and
-  friction 20a is the case where the map was wrong. A rename left the watcher
-  retrying a namespace that no longer EXISTS — failing forever, reporting the
-  host stale, costing a commit-point a fresh JVM — while the process held every
-  live namespace at current source. A comparison against the store's current
-  sources answers that correctly and for free: a deleted namespace is simply
-  not in `now`, so it cannot be stale."}
+  A measurement against the store's CURRENT sources — rather than a reload
+  log — makes a deleted namespace simply absent from `now`, so it can never be
+  stale. The kernel loads once and does not track, so drift here is the store
+  having moved ahead of what this process loaded (a snapshot daemon behind the
+  store), cleared by a rebuild + restart."}
   host-loaded
   (atom {:armed? false :nses {} :stale nil}))
 
@@ -685,20 +683,13 @@
         (with-meta sources {:load-failures @failed})))
     {}))
 
-;; --- live mode: track the store, reload changed nses into this jvm ---
-^:reads (defn- data-version [conn]
-          (:data_version (jdbc/execute-one! conn ["PRAGMA data_version"])))
-
 (defonce ^:export boot-info
   ;; the host's own currency record — session_brief reads it (through the
   ;; late-ref carrier; absent in processes that didn't boot from a store) to
-  ;; answer "which code is this server actually running": :snapshot mode =
-  ;; the store AT LAUNCH, :live mode = launch + successful reloads of
-  ;; MAIN-journal commits. A branch line's writes live in its own
-  ;; mini-journal and are DELIBERATELY invisible to the watcher — host code
-  ;; tracks the main line; branch serving behavior is verified in the image
-  ;; or a fresh JVM. Keys: :dir :mode :booted-at, then :last-reload-at
-  ;; :reloads :failed maintained by watch-live!.
+  ;; answer "which code is this server actually running". The kernel loads a
+  ;; store's program once and does not reload, so this is the launch-time
+  ;; picture. Keys: :dir, :mode (always :snapshot), :booted-at, and
+  ;; :load-failures when some namespace did not load at boot.
   (atom nil))
 
 (defn ^:export current-boot-info
@@ -728,103 +719,6 @@
       (cond-> info
         (some? stale) (assoc :host-drift stale)
         (some? jh)    (assoc :jar-head jh)))))
-
-^:unsafe (defn- departed-vars
-  "The names in `interned` that `new-source` no longer defines — what a live
-  reload leaves behind.
-
-  `load-string` re-defines every form the new source contains and says nothing
-  about the ones it does not, so a DELETE reaches a `--live` host as \"still
-  there\". The store is correct, the suite is green, and the running server
-  keeps answering from a var whose definition is gone. Worse for routes than
-  for anything else: a stale route SHADOWS a catch-all, so deleting a page
-  makes the SPA that replaced it look broken.
-
-  Two directions of error, and they are not symmetric. Missing a departed name
-  leaves a stale var — the old behaviour. Reporting a name the source DOES
-  define unmaps live code. So every def shape counts, and source that will not
-  read departs NOTHING."
-  [interned new-source]
-  (let [defined (try
-                  (->> (read-string {:read-cond :allow}
-                                    (str "[" new-source "]"))
-                       (keep (fn [f]
-                               ;; a leading metadata wrapper needs no unwrapping
-                               ;; here: the READER attaches ^:unsafe to the list
-                               ;; itself, so (defn f …) is what arrives either
-                               ;; way. The store's accessors see a CST, which is
-                               ;; why they must unwrap and this must not.
-                               (when (and (seq? f) (symbol? (second f)))
-                                 (second f))))
-                       set)
-                  (catch Throwable _ ::unreadable))]
-    (if (= ::unreadable defined)
-      #{}
-      (into #{} (remove defined) interned))))
-
-^:unsafe (defn- reload-ns!
-  "Load `new-source` into `ns-sym`, clearing its aliases first and dropping
-  the vars it no longer defines after.
-
-  The two cleanups sit on OPPOSITE sides of the load, and the asymmetry is
-  the whole design:
-
-  **Vars are unmapped AFTER, and only on success.** A reload that throws
-  leaves the namespace exactly as it was. Gutting first would turn a compile
-  error into a dead namespace, which is strictly worse than the stale var
-  this exists to remove.
-
-  **Aliases are cleared BEFORE, unconditionally** — because an alias is what
-  makes the load throw. A rename rewrites every dependent's `ns` form to
-  point the same alias at a new target, and `Namespace.addAlias` refuses
-  outright: `\"Alias refs already exists in namespace slopp.api, aliasing
-  slopp.edit.refs\"`. The alias outlives the failed load, so the next poll
-  fails identically, forever. Three occurrences each cost a process restart,
-  and each was logged as a mystery because the compiler wraps the
-  `IllegalStateException` and `.getMessage` reports only the position.
-
-  Clearing first is safe in a way that gutting vars is not, and for a reason
-  worth stating: the `ns` form is the FIRST form loaded and re-establishes
-  every alias it declares, so a successful load restores them immediately. A
-  failed load leaves already-compiled vars working, since an alias resolves
-  symbols at COMPILE time and nothing at runtime reads it.
-
-  Clearing all of them rather than diffing against the new source is
-  deliberate: computing which aliases changed means re-implementing `ns`
-  require parsing — prefix lists, `:as-alias`, `:refer` — a near-duplicate of
-  Clojure's own reader that would drift from it silently."
-  [ns-sym new-source]
-  (let [existing (find-ns ns-sym)
-        before   (when existing (set (keys (ns-interns existing))))]
-    (when existing
-      (doseq [a (keys (ns-aliases existing))]
-        (ns-unalias existing a)))
-    (load-string new-source)
-    (when-let [n (find-ns ns-sym)]
-      (doseq [s (departed-vars before new-source)]
-        (ns-unmap n s)))))
-
-(defn failure-message
-  "The sentence a reload failure should REPORT: the throwable's own message,
-  plus the root cause's when they differ.
-
-  A compiler error arrives wrapped, and the wrapper's message is a POSITION,
-  not a reason — `\"Syntax error macroexpanding at (1:1).\"` is what
-  `.getMessage` gives for every macroexpansion failure in every namespace. The
-  reason is one or more causes down. Keeping only the wrapper made distinct
-  failures indistinguishable, and it cost two live-reload wedges that could
-  not be reproduced afterward because the reason never left the process.
-
-  A throwable with no message reports its class instead, since
-  `NullPointerException` is information and an empty string is not."
-  [^Throwable t]
-  (let [describe (fn [^Throwable x]
-                   (or (not-empty (str (.getMessage x)))
-                       (.getName (class x))))
-        root     (loop [x t] (if-let [c (ex-cause x)] (recur c) x))]
-    (if (identical? root t)
-      (describe t)
-      (str (describe t) " — caused by: " (describe root)))))
 
 (defn ^:export with-dependents
   "`changed` plus every namespace that (transitively) requires one of them, in
@@ -869,121 +763,6 @@
                            (into #{} (comp (mapcat rdeps) (remove seen')) frontier)))))]
     (filterv reach (dependency-order sources))))
 
-^:unsafe (defn watch-live!
-  "Poll the store's data_version; when another writer commits, reload the
-  namespaces whose source changed AND everything that requires them, in
-  dependency order. The store's green-gate means only compilable code ever
-  loads. Caveat: long-lived instances (servers, background threads) keep their
-  old closure code until re-created.
-
-  **The reload set is `with-dependents`, not the source diff, and that is not
-  an optimisation in reverse.** A great deal is evaluated ONCE at def time and
-  kept as a value — var metadata most sharply, since a route's contract rides
-  there. Change the namespace holding a schema and the dependent that captured
-  it does NOT change: its own text is byte-identical, so a source-diff reload
-  correctly skips it and the running host publishes the old contract
-  indefinitely. That shipped: `:bundle` was added to a response contract,
-  landed green, and the live host went on serving the previous schema to every
-  consumer generating a client from it.
-
-  **A reload also DROPS what the new source stopped defining.** `load-string`
-  re-defines the forms it is given and is silent about the rest, so without
-  this a deleted form keeps answering in the running host — the store correct,
-  the suite green, and the server serving a definition that no longer exists.
-  See `departed-vars` for why the error directions are not symmetric.
-
-  Resilient by construction: the ENTIRE poll body is guarded, so a transient
-  store error (contention, a swapped db file) logs and RETRIES instead of
-  killing the daemon and serving stale code forever. The version baseline
-  advances only when every namespace in the set reloaded — a failed one keeps
-  its OLD source in the baseline AND holds the version back, so the next poll
-  retries it rather than treating it as already seen. A failed DEPENDENT is
-  carried explicitly instead, because reverting the baseline cannot make one
-  look changed: its source never differed.
-
-  **A failure that keeps failing says so, and says why.** The retry note used
-  to read the same hopeful sentence forever while a reload had been stuck for
-  many minutes, and the REASON existed only in the server log — a file no
-  slopp surface exposes, on a system whose whole claim is that the store
-  answers everything. `boot-info` now carries the message and the consecutive
-  attempt count, so a verdict marked suspect can say what to do about it.
-
-  ^:unsafe: the store loader IS load-string (it evaluates rendered store
-  source), which the dialect denylist bans for ordinary code — here it is the
-  whole point."
-  [dir & {:keys [interval-ms] :or {interval-ms 500}}]
-  (let [conn (loop []
-             ;; an unadopted dir has no store until its first write
-             ;; materializes one — WAIT for it rather than dying at boot
-             (or (open-conn dir)
-                 (do (Thread/sleep (long interval-ms)) (recur))))]
-    ;; `stuck` is the namespaces whose last reload FAILED. Reverting `prev`
-    ;; retries an EDITED namespace — it goes on looking changed — but that
-    ;; trick cannot reach a DEPENDENT, whose own source never differed from
-    ;; the baseline. Without carrying them, a dependent that failed to reload
-    ;; would be dropped silently and keep serving its old definitions, which
-    ;; is the exact failure the widened reload set exists to prevent.
-    (loop [dv (data-version conn), prev (store-sources conn), stuck #{}]
-      (let [[dv' prev' stuck']
-            (try
-              (Thread/sleep (long interval-ms))
-              (let [dv2 (data-version conn)]
-                (if (= dv dv2)
-                  [dv prev stuck]
-                  (let [now       (store-sources conn)
-                        platforms (store-platforms conn)
-                        ;; what MOVED, and then what CAPTURED something from
-                        ;; it. The source diff finds the first; `with-dependents`
-                        ;; adds the second, which is the half that was missing.
-                        edited  (filter #(not= (get prev %) (get now %))
-                                        (keys now))
-                        changed (filterv #(boot-loads? platforms %)
-                                         (with-dependents
-                                           now (into (set edited) stuck)))
-                        failed  (reduce (fn [failed ns-sym]
-                                          (try (reload-ns! ns-sym (get now ns-sym))
-                                               (stamp-loaded! ns-sym)
-                                               (record-loaded! ns-sym (get now ns-sym))
-                                               failed
-                                               (catch Throwable t
-                                                 (let [why (failure-message t)]
-                                                   (log! "live-reload failed for " ns-sym ": " why)
-                                                   (assoc failed ns-sym why)))))
-                                        {} changed)
-                        loaded  (remove failed changed)]
-                    (when (seq loaded)
-                      (log! "live-reloaded: " (str/join " " loaded)))
-                    (measure-host!
-                     (into {} (filter #(boot-loads? platforms (key %))) now))
-                    ;; keep the currency record honest: a failed ns stays
-                    ;; listed until a later poll reloads it (it also holds
-                    ;; the version baseline back, below)
-                    (swap! boot-info
-                           #(when %
-                              (-> %
-                                  (assoc :last-reload-at (System/currentTimeMillis)
-                                         :failed (vec (sort (keys failed)))
-                                         ;; the REASON, and how long it has been
-                                         ;; true — "the next poll retries" is not
-                                         ;; news the twentieth time
-                                         :failed-why
-                                         (not-empty
-                                          (into {}
-                                                (for [[ns-sym why] failed]
-                                                  [ns-sym
-                                                   {:why why
-                                                    :attempts (inc (get-in % [:failed-why ns-sym :attempts] 0))}]))))
-                                  (update :reloads (fnil + 0) (count loaded)))))
-                    ;; a failed ns keeps its OLD source so it still looks changed,
-                    ;; and holding dv back keeps the version-change branch firing
-                    [(if (seq failed) dv dv2)
-                     (reduce #(assoc %1 %2 (get prev %2)) now (keys failed))
-                     (set (keys failed))])))
-              (catch Throwable t
-                (log! "live-reload poll error (continuing): " (failure-message t))
-                [dv prev stuck]))]
-        (recur dv' prev' stuck')))))
-
 ;; --- entry ---
 (defn parse-args
   "Parse boot's CLI: <dir> [--main ns/fn arg...]. Everything after the --main
@@ -994,9 +773,10 @@
   is one slopp for the machine on the default port.
 
   `--call` is retired — a tool call from a shell is `slopp <op> '{…}'`, routed
-  to the daemon. Whether a process hot-reloads its OWN code from its store is
-  read from `SLOPP_LIVE` in its environment ([[-main]]), not a flag: snapshot
-  is the default, so a built app just runs off its jar."
+  to the daemon. The kernel loads a store's program ONCE and runs it; it does
+  not reload, and there is no live/snapshot switch. A process that must track
+  its store as it changes is a dev instance the MANAGER re-serves, not a mode
+  of boot."
   [args]
   (let [[pre post] (split-with #(not (#{"--main" "--call"} %)) args)
         dir  (or (first (remove #(str/starts-with? % "--") pre))
@@ -1057,35 +837,28 @@
   store CLI — in a fileless tree this is THE entry point: e.g.
     clojure -M -m slopp.kernel.boot . --main slopp.sync/-main push . <url>
 
-  Whether this process HOT-RELOADS its own code from the store as the store
-  changes is read from `SLOPP_LIVE` in the environment, not a flag: set it and
-  boot watches the store's data_version and reloads changed namespaces (the
-  watcher is a DAEMON thread — it never keeps the JVM alive after the program
-  exits); unset (the default) freezes the loaded version at startup, so a
-  built app just runs off its jar.
+  The kernel loads a store's program ONCE and runs it — it does not reload.
+  A process that must track its store AS IT CHANGES is a DEV INSTANCE, and
+  keeping it current is the MANAGER's job: the daemon re-serves a managed
+  child at each done (slopp.webdev.live). The daemon itself, and any built
+  app, boot their code and serve it unchanged until restarted.
 
   The daemon is the ordinary entry, and its code ships in the jar, so booting
   it from a neutral dir loads NO store from that dir — [[boot-note]] says so
   rather than treating the working directory as a project to adopt."
   [& args]
   (let [{:keys [dir main args]} (parse-args args)
-        live?   (boolean (not-empty (System/getenv "SLOPP_LIVE")))
-        daemon? (= main 'slopp.daemon/-main)
-        mode    (if live? "live" "snapshot")]
+        daemon? (= main 'slopp.daemon/-main)]
     (reset! boot-info {:dir dir
-                       :mode (if live? :live :snapshot)
+                       :mode :snapshot
                        :booted-at (System/currentTimeMillis)})
     (let [sources (load-store! dir)]
       (when-let [note (boot-note {:daemon?     daemon?
                                   :loaded?     (boolean (seq sources))
                                   :store-file? (.exists (io/file dir ".slopp" "store.db"))
                                   :dir         dir
-                                  :mode        mode})]
+                                  :mode        "snapshot"})]
         (log! note))
       (when-let [f (seq (:load-failures (meta sources)))]
         (swap! boot-info assoc :load-failures (vec f))))
-    (when live?
-      (doto (Thread. ^Runnable (fn [] (watch-live! dir)))
-        (.setDaemon true)
-        (.start)))
     (apply (requiring-resolve main) args)))

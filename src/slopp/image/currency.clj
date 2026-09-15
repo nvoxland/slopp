@@ -3,9 +3,9 @@
   \"is the running process the code the store describes?\" a COMPARISON.
 
   It existed as a counter before, and a counter answers a different question.
-  `boot/watch-live!` tallies consecutive reload failures and
-  `orient/code-deltas-since` counts deltas landed since boot; between them
-  they can only observe *did a reload attempt throw*. That is wrong in both
+  A reload-failure tally and `orient/code-deltas-since` (deltas landed since
+  boot) were the counters; between them they could only observe *did a reload
+  attempt throw*. That is wrong in both
   directions and both directions were paid for in one wave: three silent
   divergences that every check called green (a `def` that captured another
   form's value, var metadata that captured a schema's value, a generated
