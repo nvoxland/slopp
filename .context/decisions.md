@@ -7330,6 +7330,53 @@ arrives"); this is that layer.
 (store, key) — deliberate, and the reason the precedence logic is factored
 into the pure `resolve-config`.
 
+## D-daemon-is-an-app (2026-09-15, user decision) — the daemon is a normal app; dev config is a `dev.<key>` overlay; no `run.<name>`
+
+**Decision.** slopp's own daemon is not a special kind of process — it is a
+normal slopp app (its served surface is its pages + API + MCP/write-door/otel
+endpoints) that additionally runs the project-manager loops in its `-main`. Its
+serving is DERIVED from its own capabilities the way any app's is, not
+hand-assembled; its listen port is the `http.port` capability; the machine
+daemon is simply slopp-built-as-a-jar, and the dev instance is slopp managed
+like any project's dev instance.
+
+The `dev` config drops the `run.<name>.*` vocabulary. It becomes a flat OVERLAY
+of the capability keys, applied when a project runs as a dev instance:
+`dev.http.port` overrides `http.port` for the dev instance, `dev.<any>`
+overrides `<any>`. The entry is `app.main` (a capability). ONE process per
+project (a built app is one jar / one `-main`; the dev supervisor starts that
+one entry) — multi-process run entries are gone (Nathan: "one process is good,
+we don't need run configs"; and `run.<name>` was dev-only anyway, never shipped).
+
+**Why.** `run.<name>.*` invented a parallel vocabulary (and a bespoke
+`run.*.port`) for what capabilities already express, and `slopp.daemon/serving-opts`
+hand-assembled a one-off copy of what `serve-plan`/`serve-code` derive for
+every other app. The only thing that genuinely made the daemon special was the
+absence of a "derive serving in a production `-main` from the app's own baked
+capabilities" path — `serve-plan` runs only for the managed dev instance.
+Nathan, 2026-09-15: "the daemon should just be a normal slopp app that just
+happens to be part of the base slopp project."
+
+**The one real constraint stays:** the machine daemon boots before any project
+store exists, so it derives its serving from its OWN baked capabilities (in the
+jar), not from a project store — which is what any built app does. Nothing
+daemon-shaped remains except that its `-main` also manages other projects.
+
+**Sequence** (each a verified landing) — tracked in
+`ideas/product/daemon-is-a-normal-app.md`:
+1. Derive `serving-opts` from slopp's own capabilities (share the `serve-plan`
+   derivation) instead of hand-assembling.
+2. The daemon reads its listen port from `http.port`; `SLOPP_PORT` becomes the
+   machine instance's override of it.
+3. Replace `run.<name>.*` with the `dev.<key>` overlay; entry via `app.main`;
+   env override `SLOPP_DEV_<KEY>`. Migrate slopp's own store
+   (`run.daemon.main`→`app.main`, `run.daemon.port`→`dev.http.port`).
+4. slopp's `-main` = derived serve + the manager loops; the boot default stays
+   `slopp.daemon/-main` (slopp's app entry).
+
+The per-process override mechanism (`D-config-env-override`, `SLOPP_<FILE>_<KEY>`)
+is the knob these steps lean on for per-instance ports.
+
 ## G6-revised (2026-09-12, user decision) — the repo is `nvoxland/slopp`; `slopp3` is deleted, not renamed
 
 G6 named `slopp3` "the permanent repo (for now)". The permanent repo is
