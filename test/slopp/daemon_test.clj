@@ -752,18 +752,19 @@
   ;; `slopp daemon seven` was an uncaught NumberFormatException — a stack
   ;; trace where the one fact that matters is which value was wrong. And the
   ;; port has four sources now, in an order worth pinning: the argument, the
-  ;; environment, what the MANAGER told a declared entry, the machine's
-  ;; setting, the default.
-  (is (= {:port 7358} (daemon/daemon-port "7358" nil nil)))
-  (is (= {:port 7400} (daemon/daemon-port nil "7400" nil)) "the environment, when no argument")
-  (is (= {:port 7358} (daemon/daemon-port "7358" "7400" nil)) "the argument wins")
-  (is (= {:port 7358} (daemon/daemon-port nil nil "7358"))
-      "the manager's word: slopp's dev instance is told its port, not passed it")
-  (is (= {:port 7400} (daemon/daemon-port nil "7400" "7358")) "the environment beats the manager")
-  (is (= {:port daemon/default-port} (daemon/daemon-port nil nil nil)) "the default otherwise")
-  (is (re-find #"SLOPP_PORT" (:error (daemon/daemon-port "seven" nil nil))) "the refusal names the one knob")
-  (is (re-find #"not a port" (:error (daemon/daemon-port "seven" nil nil))))
-  (is (re-find #"not a port" (:error (daemon/daemon-port "70000" nil nil)))))
+  ;; environment (SLOPP_PORT), what the MANAGER told a declared entry, and the
+  ;; BASE — slopp's own http.port capability, which configured-port supplies.
+  (let [base 9999]
+    (is (= {:port 7358} (daemon/daemon-port "7358" nil nil base)))
+    (is (= {:port 7400} (daemon/daemon-port nil "7400" nil base)) "the environment, when no argument")
+    (is (= {:port 7358} (daemon/daemon-port "7358" "7400" nil base)) "the argument wins")
+    (is (= {:port 7358} (daemon/daemon-port nil nil "7358" base))
+        "the manager's word: slopp's dev instance is told its port, not passed it")
+    (is (= {:port 7400} (daemon/daemon-port nil "7400" "7358" base)) "the environment beats the manager")
+    (is (= {:port base} (daemon/daemon-port nil nil nil base)) "the http.port base otherwise")
+    (is (re-find #"SLOPP_PORT" (:error (daemon/daemon-port "seven" nil nil base))) "the refusal names the one knob")
+    (is (re-find #"not a port" (:error (daemon/daemon-port "seven" nil nil base))))
+    (is (re-find #"not a port" (:error (daemon/daemon-port "70000" nil nil base))))))
 
 (deftest ^:external a-daemon-that-loads-only-its-closure-still-serves-its-pages
   ;; The jar's shape, driven for real: a fresh JVM that requires slopp.daemon

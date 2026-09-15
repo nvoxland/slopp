@@ -43,10 +43,13 @@
          :otel {:routed 0 :dropped 0} :otel-dirs {}}))
 
 (def ^:export default-port
-  "Where a daemon listens unless told otherwise (`SLOPP_PORT`, or the
-  argument to `-main`). One per machine, so one number rather than a
-  per-directory formula: the derived-port formula existed so N per-session
-  listeners would not collide, and there is one listener now."
+  "slopp's own `http.port`, BAKED — the port [[configured-port!]] falls back to
+  when no store is readable, which is the released jar's neutral-dir boot. The
+  self-host daemon reads `http.port` from its store instead, so this is the one
+  place the number is spelled when there is no store to read it from. One per
+  machine, so one number rather than a per-directory formula: the derived-port
+  formula existed so N per-session listeners would not collide, and there is one
+  listener now. SLOPP_PORT / the argument / the manager override it."
   7357)
 
 (defn- slug-for
@@ -739,28 +742,30 @@
 (defn ^{:breaking-ok "the machine-setting source is REMOVED: ~/.slopp/config.json's daemon-port is retired for the one knob SLOPP_PORT, which the plugin's MCP url can read and a file cannot"}
   daemon-port
   "The port `slopp daemon [port]` listens on, as `{:port n}` or `{:error
-  sentence}` for a value that is not one. Three sources, in order: the
-  argument `arg`; the environment (`env`, `SLOPP_PORT` — the ONE
-  knob, because the plugin's MCP entry is a URL Claude Code expands from
-  the environment and a settings file would be a second source it cannot
-  read); what the MANAGER told a declared entry (`told`, the
-  `slopp.app-port` property — slopp's own dev instance is told its port
-  rather than passed it, so the run config's `run.daemon.port` is the one
-  place it is spelled); else [[default-port]]. A bad value used to be an
-  uncaught NumberFormatException: a stack trace where the one fact that
-  matters is which value was wrong."
-  [arg env told]
+  sentence}` for a value that is not one. Four sources, in order: the
+  argument `arg`; the environment (`env`, `SLOPP_PORT` — the ONE knob,
+  because the plugin's MCP entry is a URL Claude Code expands from the
+  environment and a settings file would be a second source it cannot read);
+  what the MANAGER told a declared entry (`told`, the `slopp.app-port`
+  property — slopp's own dev instance is told its port rather than passed
+  it); else `base` — slopp's OWN `http.port` capability, supplied by
+  [[configured-port!]] (read from its store, or the baked [[default-port]]
+  when no store is readable). The daemon is a normal app, so its resting
+  port is `http.port` like any app's; the three sources above only override
+  it. A bad value used to be an uncaught NumberFormatException: a stack
+  trace where the one fact that matters is which value was wrong."
+  [arg env told base]
   (let [raw (some->> [arg env told] (map #(some-> % str str/trim not-empty)) (some identity))]
     (cond
       (nil? raw)
-      {:port default-port}
+      {:port base}
 
       :else
       (let [n (try (Long/parseLong raw) (catch NumberFormatException _ nil))]
         (if (and n (< 0 n 65536))
           {:port n}
           {:error (str (pr-str raw) " is not a port (1–65535) — slopp daemon [port],"
-                       " SLOPP_PORT=<n>, or run.<name>.port in a dev config")})))))
+                       " SLOPP_PORT=<n>, or the http.port capability")})))))
 
 (defn- own-reader!
   "A read-only reader on the daemon's OWN store at `dir`, for the assets the
@@ -1200,6 +1205,19 @@
       (.start refresher)
       {:url (str "http://127.0.0.1:" (:port srv) "/api/") :port (:port srv) :token (token)})))
 
+(defn- configured-port!
+  "slopp's own listen port from the `http.port` capability — read from its store
+  when this daemon booted from a slopp checkout ([[own-store!]]), else the baked
+  [[default-port]] for the storeless neutral-dir boot a released jar makes. The
+  base [[daemon-port]] rests at; the argument, `SLOPP_PORT` and the manager's
+  `slopp.app-port` still override it. Reading `http.port` here is what turns the
+  capability from an inert hand-kept duplicate of the port into the one place a
+  slopp checkout declares it."
+  []
+  (or (when-let [st (own-store!)]
+        (capabilities/effective st "http.port"))
+      default-port))
+
 ^:unsafe (defn -main
   "Run the daemon: `slopp daemon [port]`. Normally its own code ships in the
   JAR and the directory it is launched in is a NEUTRAL working directory
@@ -1210,12 +1228,15 @@
   `~/.slopp/daemon.json`, or `daemon-<port>.json` for a non-default port —
   owner-readable only, and blocks.
 
-  slopp's own DEV instance is this same fn on another port (7358),
-  declared in its store's dev config as `run.daemon.main` and run from the
-  store by the machinery every project's dev instance gets: booted in a
-  child image on first attach, refreshed at every done, replaced by
-  `restart {app true}`. It records itself under its own file and leaves
-  the machine's alone.
+  The port rests at slopp's own `http.port` capability ([[configured-port]]);
+  a `slopp daemon [port]` argument, `SLOPP_PORT`, or the manager's
+  `slopp.app-port` (for slopp's own dev instance) override it, in that order.
+
+  slopp's own DEV instance is this same fn on another port (7358), declared in
+  its store's dev config and run from the store by the machinery every
+  project's dev instance gets: booted in a child image on first attach,
+  refreshed at every done, replaced by `restart {app true}`. It records itself
+  under its own file and leaves the machine's alone.
 
   A second daemon on the port refuses and names the live one from that
   file — after asking the OS whether that pid still runs, because a daemon
@@ -1223,7 +1244,8 @@
   as the holder sends someone to kill the wrong thing."
   [& [port]]
   (let [{p :port err :error} (daemon-port port (System/getenv "SLOPP_PORT")
-                                       (System/getProperty "slopp.app-port"))]
+                                       (System/getProperty "slopp.app-port")
+                                       (configured-port!))]
     (if err
       (do (.println System/err (str "slopp daemon: " err))
           (System/exit 2))
