@@ -10,7 +10,7 @@
             [slopp.http :as slopp.http]
             [slopp.mcp.http :as mcp.http]
             [slopp.ops :as ops]
-            [slopp.ops.external :as external] [cheshire.core :as json] [slopp.api.otel :as api.otel] [slopp.otel :as slopp.otel] [slopp.store.db :as db] [slopp.api.server :as server] [slopp.mcp :as mcp] [slopp.rest :as slopp.rest] [slopp.sync :as sync] [slopp.store :as store] [slopp.store.artifacts :as artifacts] [slopp.http.static :as static] [slopp.cljnx :as cljnx]
+            [slopp.ops.external :as external] [cheshire.core :as json] [slopp.api.otel :as api.otel] [slopp.otel :as slopp.otel] [slopp.store.db :as db] [slopp.mcp :as mcp] [slopp.rest :as slopp.rest] [slopp.sync :as sync] [slopp.store :as store] [slopp.store.artifacts :as artifacts] [slopp.http.static :as static] [slopp.cljnx :as cljnx]
             ;; EVERYTHING this daemon serves, REQUIRED and not only named in
             ;; `serving-opts`: a route builder reads loaded vars, and a process
             ;; that loads only this namespace's closure — a managed child, a
@@ -21,7 +21,7 @@
             ;; the stylesheet (the v0.3.0 jar answered 404 everywhere).
             [slopp.ui.pages]
             [slopp.ui.shell]
-            [slopp.ui.styles] [slopp.daemon.hooks :as hooks] [slopp.read.history :as history] [slopp.ops.engine :as engine] [clojure.java.io :as io] [slopp.rules.http :as rules.http] [slopp.rules.webapp :as rules.webapp] [slopp.project.capabilities :as capabilities]))
+            [slopp.ui.styles] [slopp.daemon.hooks :as hooks] [slopp.read.history :as history] [slopp.ops.engine :as engine] [clojure.java.io :as io] [slopp.rules.http :as rules.http] [slopp.rules.webapp :as rules.webapp] [slopp.project.capabilities :as capabilities] [slopp.api.reads :as api.reads]))
 
 (defonce ^:private state
   ;; `:projects` {dir {:slug :dir :opened-at :sessions #{sid}
@@ -139,29 +139,25 @@
   (.exists (java.io.File. (str dir) ".slopp/store.db")))
 
 (defn- api!
-  "The project at `dir`'s READER — a read-only session on its branch — and
-  the read-API context assembled over it, as `{:reader :ctx}`: opened on
-  first use, and re-opened when a store has appeared since (the reader
-  before it was reading nothing). The reader answers about the BRANCH,
-  which is what a consumer of a project's API wants, and it is what OWNS
-  the project's app server: an agent's un-landed work is its own to read
-  through its thread, and the served app is the landed state. It boots no
-  oracle of its own unless something asks for one."
+  "The project at `dir`'s READER — a read-only session on its branch —
+  opened on first use, and re-opened when a store has appeared since (the
+  reader before it was reading nothing), as `{:reader}`. The reader answers
+  about the BRANCH, which is what a consumer of a project's API wants, and it
+  is what OWNS the project's app server: an agent's un-landed work is its own
+  to read through its thread, and the served app is the landed state. It boots
+  no oracle of its own unless something asks for one."
   [dir]
   (locking state
-    (let [{:keys [reader ctx] :as api} (get-in @state [:projects dir :api])]
-      (if (and ctx (or (:db @reader) (not (store-file? dir))))
+    (let [{:keys [reader] :as api} (get-in @state [:projects dir :api])]
+      (if (and reader (or (:db @reader) (not (store-file? dir))))
         api
         (let [app (some-> reader deref :app-server)]
           (when reader (try (ops/close! reader) (catch Throwable _ nil)))
           (let [reader (external/open! {:slopp.ops/dir dir
                                         :slopp.ops/read-only? true
                                         :slopp.ops/lazy-image? true})
-                ;; a server the old reader held carries over: the store
-                ;; appearing is no reason to drop what is serving
                 _      (when app (swap! reader assoc :app-server app))
-                ctx    (slopp.http/context (server/serving-opts reader))
-                api    {:reader reader :ctx ctx}]
+                api    {:reader reader}]
             (swap! state assoc-in [:projects dir :api] api)
             api))))))
 
@@ -515,31 +511,6 @@
            :headers {"Content-Type" "application/json"}
            :body "{}"}))))
 
-(defn- project-of
-  "The OPEN project a request names — by the slug in its path, or by
-  `X-Slopp-Dir` under slug `_` (the prompt hook knows its dir and no
-  slug) — or nil. A read never opens one."
-  [req]
-  (or (project-by-slug (get-in req [:path-params :slug]))
-      (when-let [dir (:dir (project-dir req))]
-        (get-in @state [:projects dir]))))
-
-(defn ^{:http/read :daemon/project-api} delegate!
-  "Read performer: answer a project-API request from the project's OWN
-  assembled context. The mount `/api/projects/<slug>` is replaced by the
-  `/api` the project's contract declares, so every contract, validator and
-  performer applies unchanged. The value is the WHOLE request — the read
-  [[project-api-endpoint]] declares has an empty path — because the project
-  is named by the slug in the path or by a header, and a read addresses one
-  value. Opens the project's reader on first use; an unknown project is 404."
-  [_ctx req]
-  (if-let [p (project-of req)]
-    (slopp.http/handle! (:ctx (api! (:dir p)))
-                        (-> req
-                            (assoc :uri (str "/api/" (get-in req [:path-params :*] "")))
-                            (dissoc :path-params :query-params :http/deps :http/reads)))
-    {:status 404 :body {:error (str "no open project " (get-in req [:path-params :slug]))}}))
-
 (defn ^{:http/method :get :rest/path "/api/projects/:slug/mcp" :http/auth :public
         :rest/response :any
         :rest/unconstrained-ok "a refusal with an Allow header, never a document"}
@@ -551,20 +522,6 @@
   {:status 405 :http/raw true
    :headers {"Allow" "POST, DELETE" "Content-Type" "application/json"}
    :body (json/generate-string {:error "no standalone stream here — answers ride the POST responses"})})
-
-(defn ^{:http/method :get :rest/path "/api/projects/:slug/**" :http/auth :public
-        :http/reads {:answer [:daemon/project-api []]}
-        :rest/response :any
-        :rest/unconstrained-ok "whatever the project's own contract answers — validated there, by the same validator"}
-  project-api-endpoint
-  "`GET /api/projects/:slug/**` — the project's typed read API, mounted:
-  `/api/projects/<slug>/<resource>` is `/api/<resource>` in the project's
-  own contract, answered from its own assembled context. The whole answer
-  is a declared READ (the performer opens the project's reader and
-  delegates) so this var does nothing but hand it back — a GET must stay
-  safe, and it is. A GET only: the reader behind it is read-only."
-  [req]
-  (:answer (:http/reads req)))
 
 (def ^:private asset-mounts
   "The static mounts the daemon serves slopp's own pages with — `{url-prefix
@@ -926,18 +883,14 @@
      :last-done-failures (get-in (db/last-marker conn line :done) [:findings :failures])}))
 
 (defn- bundle!
-  "The ask's orientation bundle, asked of the project's own API context —
-  `GET /api/bundle`, the read the mounted API serves — so the prompt hook
-  and a consumer of the API get one answer."
+  "The ask's orientation bundle for project `dir`: the `:orient/bundle` read
+  performed over the project's reader, exactly as the mounted /bundle endpoint
+  performs it — the prompt hook and a consumer of the API get one answer. Calls
+  the performer directly rather than over HTTP: the reader is the only handle it
+  needs, and there is no per-project context to route through now that the
+  daemon serves every project from one."
   [dir ask sid cli?]
-  (let [enc (fn [s] (java.net.URLEncoder/encode (str s) "UTF-8"))
-        r   (slopp.http/handle! (:ctx (api! dir))
-                                {:request-method :get :uri "/api/bundle" :headers {}
-                                 :query-string (str "ask=" (enc ask)
-                                                    (when sid (str "&session-id=" (enc sid)))
-                                                    (when cli? "&cli=1"))})]
-    (when (= 200 (:status r))
-      (:bundle (:body r)))))
+  (api.reads/orient-bundle! (:reader (api! dir)) ask sid cli?))
 
 (defn- prompt-hook!
   "The prompt hook's answer for project `dir`: the ask into the mailbox
@@ -1094,18 +1047,6 @@
               (swap! state assoc-in [:projects dir :served-version] dv)))))
       (catch Throwable _ nil))))
 
-(defn own-namespaces
-  "The namespaces the daemon serves at its OWN root — everything slopp's store
-  serves EXCEPT the project API, which `delegate!` serves per-project through
-  the mount from `slopp.api.server/serving-opts`. Derived for the reason
-  `serving-namespaces` itself is: a `:http/namespaces` list missing half an app
-  assembles happily and 404s, and a UI namespace added later is the entry a
-  hand list forgets. `served-namespaces` is the one record of what the project
-  API serves, so subtracting it here keeps the two surfaces from disagreeing."
-  [store]
-  (vec (remove (set server/served-namespaces)
-               (rules.http/serving-namespaces store))))
-
 (defn- own-store!
   "slopp's OWN store value when this daemon booted from a slopp checkout — the
   self-host loop, where `serving-opts` DERIVES its surface from the same
@@ -1126,40 +1067,43 @@
 
 (defn- serving-opts
   "Everything the daemon serves, as the opts `slopp.http/context` and
-  `slopp.http/serve!` both take — the same assembly, and now the same
-  DERIVATION, every project's app goes through:
+  `slopp.http/serve!` both take — ONE assembly for the whole server: the
+  daemon's management endpoints, the UI shell, AND every project's typed read
+  API, which is now first-class here rather than delegated into a per-project
+  context. A db-scoped endpoint carries `:http/resolve {:session
+  [:project/reader [:path-params :slug]]}`, and the `:open-reader` fn in the
+  perform-ctx is what turns that slug into a reader — so
+  `/api/projects/<slug>/<resource>` is a normal route, not a mount.
 
-  - the namespaces are `serving-namespaces` over slopp's own store MINUS the
-    project API `delegate!` mounts per-project ([[own-namespaces]]) — the
-    daemon's management endpoints plus the UI (`slopp.ui.shell`/`styles`);
-  - the mount, the bundle url, the client route table and whether contracts
-    are validated all DERIVE from slopp's own capabilities the way
-    `slopp.webdev.live/serve-plan` derives them for every managed dev instance:
-    `static-mounts`, `bundle-url`, `page-routes` (from the STORE, not an image
-    scan) and `rest`;
-  - page routes come from the store so the shell's status is derived — 404 for
-    an address no page claims — without the daemon and the build reading the
-    same marker two ways.
+  The namespaces are `serving-namespaces` over slopp's own store (the union of
+  everything that declares an endpoint and every read/effect performer); the
+  mount, bundle url, page routes and whether contracts are validated all DERIVE
+  from slopp's own capabilities the way `slopp.webdev.live/serve-plan` derives
+  them for every managed dev instance.
 
-  Reads slopp's own store when it booted from a checkout ([[own-store]]); falls
-  back to the BAKED surface — spelled namespaces, the classpath mount, the
-  image page scan — for the storeless neutral-dir boot a released jar makes.
+  Reads slopp's own store when it booted from a checkout ([[own-store!]]); falls
+  back to the BAKED surface — spelled namespaces (the daemon, the UI, and the
+  read API), the classpath mount, the image page scan — for the storeless
+  neutral-dir boot a released jar makes.
 
   One map for the listener and for a test driving the context without a port,
   so the two cannot disagree."
   []
   (if-let [st (own-store!)]
-    {:http/namespaces   (own-namespaces st)
+    {:http/namespaces   (rules.http/serving-namespaces st)
      :http/routes       (static/mount-routes (rules.http/static-mounts st) (asset-reader))
      :webapp/bundle     (rules.http/bundle-url st)
      :webapp/base       ""
      :webapp/routes     (mapv (juxt :path :page) (rules.webapp/page-routes st))
+     :http/perform-ctx  {:open-reader (fn [slug] (some-> (project-by-slug slug) :dir api! :reader))}
      :http/wrap-context (when (capabilities/enabled? st "rest") slopp.rest/validating)}
-    {:http/namespaces   ['slopp.daemon 'slopp.ui.shell 'slopp.ui.styles]
+    {:http/namespaces   ['slopp.daemon 'slopp.ui.shell 'slopp.ui.styles
+                         'slopp.api.endpoints 'slopp.api.reads]
      :http/routes       (static/mount-routes asset-mounts (asset-reader))
      :webapp/bundle     bundle-url
      :webapp/base       ""
      :webapp/routes     (cljnx/marked-pages)
+     :http/perform-ctx  {:open-reader (fn [slug] (some-> (project-by-slug slug) :dir api! :reader))}
      :http/wrap-context slopp.rest/validating}))
 
 (defn ^:export context

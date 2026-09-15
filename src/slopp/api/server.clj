@@ -47,49 +47,20 @@
   and reading this API through the mount — never from a project's context."
   ['slopp.api.reads 'slopp.api.endpoints])
 
-(defn ^:export serving-opts
-  "Everything the reviewer API's opts say about the APPLICATION, with nothing
-  about its address — which is exactly the half that was duplicated.
-
-  A listener adds host and port; [[context]] adds nothing. Splitting it here
-  is what makes the two impossible to disagree: the listener and the
-  in-process context described the same app by hand until one of them
-  stopped, and the one that stopped was the one no browser was pointed at.
-
-  Exported for the daemon, which assembles one such context PER PROJECT
-  over a reader session and delegates each project's requests into it —
-  the same app, the same validation, mounted at `/api/projects/<slug>/`
-  in place of the `/api/` declared here. The harness's telemetry sink is
-  NOT here: it is the daemon's own endpoint, one per machine, routing each
-  record to the project holding its thread."
-  [session]
-  {:http/namespaces served-namespaces
-   ;; the reviewer API publishes typed contracts; anything serving them
-   ;; unvalidated answers 200s nobody checked
-   :http/wrap-context slopp.rest/validating
-   :http/perform-ctx {:session session
-                      :served-namespaces served-namespaces}})
-
 (defn ^:export context
-  "The reviewer API's dispatch context, assembled ONE way — over `session`.
+  "The served API context over a SINGLE session, for tests and in-process
+  tools. The daemon serves this SAME surface over MANY projects — resolving
+  each request's reader from its `:slug` — so here the `:open-reader` the
+  resolve phase consults answers `session` for every slug: one project, named
+  anything. Drives the endpoints at `/api/projects/<any-slug>/<resource>`, the
+  address they declare.
 
-  **This exists because there were seventeen.** Every test that drove these
-  endpoints built its own `slopp.http/context` inline, and `serve!` built a
-  third; none of them wrapped, so the whole typed surface was served and
-  exercised with nothing honouring a single declared contract. One of those
-  tests opens by claiming *\"the response is validated against the SAME schema
-  var the generated client validates with\"*, which was false for as long as it
-  had been written.
-
-  `slopp.rest/validating` is what makes that claim true, and it is here rather
-  than at each call site for the reason a consuming store measured: an app that
-  can be stood up two ways will eventually be stood up both, and only one of
-  them will validate. Theirs was — production wrapped, the test path did not,
-  and a test that started a real server and asserted 200 passed while the
-  served endpoint was answering 500.
-
-  `slopp.http/context` now REFUSES a route that declares a contract with no
-  validator, so this cannot silently drift back; what this adds is that there
-  is one place to keep right."
+  `slopp.rest/validating` wraps it because these endpoints publish typed
+  contracts and anything serving them unvalidated answers 200s nobody checked;
+  `slopp.http/context` REFUSES a route declaring a contract with no validator,
+  so this cannot drift back."
   [session]
-  (slopp.http/context (serving-opts session)))
+  (slopp.http/context
+   {:http/namespaces served-namespaces
+    :http/wrap-context slopp.rest/validating
+    :http/perform-ctx {:open-reader (constantly session)}}))

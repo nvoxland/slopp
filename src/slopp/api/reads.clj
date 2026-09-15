@@ -78,31 +78,6 @@
   [{:keys [session]} _]
   (model/module-index session))
 
-(defn ^:export app-namespaces
-  "The namespaces of `store` that DECLARE endpoints — this application's own
-  API surface, whoever happens to be serving it.
-
-  **Serving and declaring are different questions**, and the reviewer listener
-  is where they come apart. It runs slopp's own API namespaces, so a contract
-  built from what it serves describes the MCP SERVER rather than the project
-  being reviewed. That is true on every store: the endpoints screen was 100%
-  infrastructure and 0% application, and it read as correct because on slopp's
-  own store the two answers coincide — `slopp.api.endpoints` is a form in
-  slopp's store and framework everywhere else. A feature that works on exactly
-  the store it was developed on.
-
-  It also removes a symptom rather than papering it: every handler named by a
-  document built from this list IS a form in the store the document describes,
-  so the reviewer UI's `read its source` link resolves by construction. It used
-  to 404 on every endpoint of every project, and the honest reading of that 404
-  was that those endpoints were never the application's.
-
-  Built on `web-endpoint-rows`, the single route traversal the write gates also
-  use, so what is documented is what was enforced — and TEST namespaces are
-  excluded there, which is right here too: a fixture endpoint is not surface."
-  [store]
-  (vec (distinct (map :ns (edit.http/web-endpoint-rows store)))))
-
 (defn- form-doc
   "A form's docstring, or nil — through `store/form-docstring`, which is the
   only thing that knows when index 2 is a docstring and when it is a `def`'s
@@ -224,6 +199,31 @@
   (let [limit (when (re-matches #"\d+" (str (:limit query-params)))
                 (parse-long (str (:limit query-params))))]
     (model/search (:store @session) (:q query-params) limit)))
+
+(defn ^:export app-namespaces
+  "The namespaces of `store` that DECLARE endpoints — this application's own
+  API surface, whoever happens to be serving it.
+
+  **Serving and declaring are different questions**, and the reviewer listener
+  is where they come apart. It runs slopp's own API namespaces, so a contract
+  built from what it serves describes the MCP SERVER rather than the project
+  being reviewed. That is true on every store: the endpoints screen was 100%
+  infrastructure and 0% application, and it read as correct because on slopp's
+  own store the two answers coincide — `slopp.api.endpoints` is a form in
+  slopp's store and framework everywhere else. A feature that works on exactly
+  the store it was developed on.
+
+  It also removes a symptom rather than papering it: every handler named by a
+  document built from this list IS a form in the store the document describes,
+  so the reviewer UI's `read its source` link resolves by construction. It used
+  to 404 on every endpoint of every project, and the honest reading of that 404
+  was that those endpoints were never the application's.
+
+  Built on `web-endpoint-rows`, the single route traversal the write gates also
+  use, so what is documented is what was enforced — and TEST namespaces are
+  excluded there, which is right here too: a fixture endpoint is not surface."
+  [store]
+  (vec (distinct (map :ns (edit.http/web-endpoint-rows store)))))
 
 (defn ^{:http/read :ui/rest-paths} rest-paths-read
   "The typed API surface of the project under review, for a consumer that
@@ -577,3 +577,37 @@
                   (mapv #(merge (select-keys (get shape (:commit %)) [:forms :namespaces]) %)
                         rows))))
       out)))
+
+(defn ^{:http/read :project/reader} project-reader
+  "Resolve performer: the READER session for the project a request's `:slug`
+  names. A db-scoped endpoint declares
+  `:http/resolve {:session [:project/reader [:path-params :slug]]}`, and the
+  dispatcher folds the result onto the perform-ctx as `:session` before the
+  endpoint's reads and handler run — so every read here consumes one project's
+  reader without the handler doing the slug->session lookup itself.
+
+  HOW a slug maps to a reader is not this layer's concern: the serving context
+  carries an `:open-reader` fn (slug->reader-or-nil) — the daemon's is backed
+  by its project registry, a test's is `(constantly session)` — and this
+  performer is the one place the api surface names the dependency. A slug no
+  open project answers is a 404, mapped from the :http/status the way a read
+  performer's refusal is: the resolve reduce runs inside the dispatcher's guard."
+  [{:keys [open-reader]} slug]
+  (or (when open-reader (open-reader slug))
+      (throw (ex-info (str "no open project " slug)
+                      {:http/status 404 :http/public {:slug slug}}))))
+
+(defn ^{:export "slopp"
+        :malli/schema [:=> {:throws []} [:cat :any :string [:maybe :string] :boolean] [:maybe :string]]}
+  orient-bundle!
+  "The orientation bundle TEXT for `session` and `ask` — the in-process entry
+  the daemon's prompt hook uses, the same read `/api/projects/:slug/bundle`
+  performs over the wire, so a hook and a browser get one answer. `sid` is the
+  caller's session id (nil for none) and `cli?` asks for the CLI voice; both
+  ride the query-params shape [[bundle-read!]] reads, which stays the one place
+  the bundle is actually built."
+  [session ask sid cli?]
+  (bundle-read! {:session session}
+                {:query-params (cond-> {:ask ask}
+                                 sid  (assoc :session-id sid)
+                                 cli? (assoc :cli "1"))}))

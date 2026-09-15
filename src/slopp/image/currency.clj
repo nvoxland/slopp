@@ -31,6 +31,20 @@
   In-process bookkeeping only — no store, no IO, and deliberately no analysis,
   so the write paths can stamp without taking on a dependency.")
 
+(defn ^:export hash-of
+  "The identity of a form's SOURCE, as one value.
+
+  One spelling, used by both the stamping side and the comparing side — two
+  hashes computed two ways is how a comparison quietly starts reporting drift
+  that is only a difference of method.
+
+  In-process only, which is why an ordinary content hash is enough: the
+  registry is never persisted and never compared across processes. A fresh
+  process has an empty registry and loads everything, so there is nothing for
+  a portable digest to buy."
+  [src]
+  (hash (str src)))
+
 (defn ^:export new-registry
   "A fresh, unarmed record for ONE image. `slopp.image.repl/start!` mints one
   per image and hangs it on the handle.
@@ -65,46 +79,6 @@
       (throw (ex-info (str "image has no currency record — every handle from "
                            "repl/start! carries one")
                       {:image-keys (vec (keys image))}))))
-
-(defn ^:export hash-of
-  "The identity of a form's SOURCE, as one value.
-
-  One spelling, used by both the stamping side and the comparing side — two
-  hashes computed two ways is how a comparison quietly starts reporting drift
-  that is only a difference of method.
-
-  In-process only, which is why an ordinary content hash is enough: the
-  registry is never persisted and never compared across processes. A fresh
-  process has an empty registry and loads everything, so there is nothing for
-  a portable digest to buy."
-  [src]
-  (hash (str src)))
-
-(defn ^:export note-failure!
-  "Record that BOOKKEEPING failed for `image`, and disarm its record.
-
-  Called from a catch block on the write path, so it is TOTAL: an image with
-  no record is not an error here, it is the case being reported.
-
-  Disarming is the whole design. `snapshot` answers nil for an unarmed record
-  and every currency surface already reads that as \"nobody measured this\" —
-  so a stamp that did not happen degrades to the honest unknown rather than to
-  a false green about what the image holds. The alternative, letting the
-  throw escape, is worse than either: the stamp runs on the write path, so a
-  broken one vetoes every write, including the one that would fix it."
-  [image why]
-  (when-let [r (:currency image)]
-    (swap! r assoc :armed? false :broken (str why)))
-  nil)
-
-(defn ^:export broken
-  "Why `image`'s record is unreliable, or nil.
-
-  `snapshot` answers nil both for a record nothing has filled yet and for one
-  whose stamping threw — the same honest \"not measured\", reached two ways.
-  This tells them apart, so a surface can say which without guessing."
-  [image]
-  (:broken (some-> (:currency image) deref)))
 
 (defn ^:export stamp!
   "Record that `form-id`'s source was just evaluated into `image`.
@@ -204,3 +178,29 @@
   stamp would make one hot-loaded form arm a record holding nothing else."
   [image]
   (swap! (reg image) assoc :armed? true))
+
+(defn ^:export note-failure!
+  "Record that BOOKKEEPING failed for `image`, and disarm its record.
+
+  Called from a catch block on the write path, so it is TOTAL: an image with
+  no record is not an error here, it is the case being reported.
+
+  Disarming is the whole design. `snapshot` answers nil for an unarmed record
+  and every currency surface already reads that as \"nobody measured this\" —
+  so a stamp that did not happen degrades to the honest unknown rather than to
+  a false green about what the image holds. The alternative, letting the
+  throw escape, is worse than either: the stamp runs on the write path, so a
+  broken one vetoes every write, including the one that would fix it."
+  [image why]
+  (when-let [r (:currency image)]
+    (swap! r assoc :armed? false :broken (str why)))
+  nil)
+
+(defn ^:export broken
+  "Why `image`'s record is unreliable, or nil.
+
+  `snapshot` answers nil both for a record nothing has filled yet and for one
+  whose stamping threw — the same honest \"not measured\", reached two ways.
+  This tells them apart, so a surface can say which without guessing."
+  [image]
+  (:broken (some-> (:currency image) deref)))

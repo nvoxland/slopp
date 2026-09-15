@@ -65,99 +65,6 @@
           (is (= :red (get-in r [:findings :test-status])) (pr-str (:findings r)))))
       (finally (ops/close! sess)))))
 
-(deftest a-rule-owned-by-an-app-type-is-named-for-it
-  ;; R6: no slopp.* surface may assume a project is a WEB project. Support for
-  ;; an app TYPE lives under that type's name, and the pattern must be
-  ;; replicable for type #2 without renaming type #1. The rule catalog is where
-  ;; that is READ — an agent meets a rule by its name long before it meets the
-  ;; code — so a web-only rule under a generic name tells every reader the
-  ;; wrong thing about which projects it can fire on.
-  ;;
-  ;; This is `capabilities/owners` one layer over, and the same shape
-  ;; deliberately: a key's first segment names its owner so no second field can
-  ;; drift from it. Here the owner is DERIVED from the implementing namespace
-  ;; rather than declared at all, which is stronger — moving a check is the
-  ;; only way to change who owns it.
-  (let [loaded    (set (map (comp str ns-name) (all-ns)))
-        ;; an app TYPE is a declared capability owner that slopp has store
-        ;; ANALYSIS for. `slopp` (the framework, RESERVED) and `app` (every
-        ;; project, whatever kind) have no `slopp.<module>.<owner>` namespace
-        ;; and are correctly not types. Derived, so app type #2 is picked up by
-        ;; existing here rather than by being added to a list.
-        app-types (set (for [t     (keys capabilities/owners)
-                             :when (some #(re-matches (re-pattern (str "slopp\\..+\\." t)) %) loaded)]
-                         t))
-        owner-of  (fn [ns-sym]
-                    (first (filter #(str/ends-with? (str ns-sym) (str "." %)) app-types)))
-        rules     (merge (gates/write-gate-namespaces)
-                         (into {} (for [r rules/done-advisories]
-                                    [(:key r) (ns-name (:ns (meta (:check r))))])))
-        misnamed  (sort (for [[rule ns-sym] rules
-                              :let  [o (owner-of ns-sym)]
-                              :when (and o (not (str/starts-with? (name rule) (str o "-"))))]
-                          [rule ns-sym o]))
-        misplaced (sort (for [[rule ns-sym] rules
-                              t     app-types
-                              :when (and (str/starts-with? (name rule) (str t "-"))
-                                         (not= t (owner-of ns-sym)))]
-                          [rule ns-sym t]))]
-    (testing "the derivation found a population — with no app type there is nothing to check"
-      ;; guard the guard: both assertions below are ABSENCES, and an empty
-      ;; app-types set satisfies them without looking at a single rule.
-      (is (seq app-types) (str "no app type derived from " (count loaded) " loaded namespaces"))
-      (is (seq (filter (comp owner-of val) rules))
-          "no rule resolved to an app type — the owner derivation is not reading the registries"))
-    (testing "a rule implemented under an app type's name carries that prefix"
-      (is (empty? misnamed)
-          (str "these rules are implemented by an app type and do not say so, "
-               "so an agent reading the catalog cannot tell which projects they "
-               "can fire on: " (vec misnamed))))
-    (testing "and a rule carrying the prefix is implemented there"
-      ;; the other half, and it is what stops the convention decaying into a
-      ;; naming habit: a `web-` rule living in the generic namespace means the
-      ;; generic namespace speaks web's vocabulary, which is the R6 violation
-      ;; itself rather than a spelling of it.
-      (is (empty? misplaced)
-          (str "these rules are named for an app type but implemented in a "
-               "generic namespace: " (vec misplaced))))))
-
-(deftest the-generic-rules-namespace-cannot-reach-an-app-types-analysis
-  ;; The other half of `a-rule-owned-by-an-app-type-is-named-for-it`, and the
-  ;; reason it is a separate deftest: that one grades a rule that is already in
-  ;; the right namespace, so it is blind to the failure that actually happened
-  ;; here. Five web-only checks sat in the generic `slopp.rules` — reading
-  ;; `:webapp/client-routes`, calling `edit.web/client-signature` — and no naming rule could
-  ;; see them, because a check in a generic namespace has no app type to
-  ;; disagree with. `inline-schema-dup` and `generated-ns` were missed by a
-  ;; hand audit for exactly that reason.
-  ;;
-  ;; So this guards the require, which is the moment the reach becomes
-  ;; possible: `slopp.rules` gets no route to web's store analysis, and the
-  ;; typed checks live in `slopp.rules.web` where the naming guard can grade
-  ;; them. `slopp.rules.<type>` is exempt BECAUSE it is the destination — the
-  ;; registry has to name the vars it registers.
-  ;;
-  ;; The limit, stated because a guard named without its limits reads as
-  ;; broader than it is: a check can still read `:web/…` metadata with no
-  ;; require at all, which is precisely what `client-routes-consequences-check` did. This
-  ;; catches the reach, not the vocabulary.
-  (let [loaded    (set (map (comp str ns-name) (all-ns)))
-        app-types (set (for [t     (keys capabilities/owners)
-                             :when (some #(re-matches (re-pattern (str "slopp\\..+\\." t)) %) loaded)]
-                         t))
-        reaching  (for [[_ dep] (ns-aliases (find-ns 'slopp.rules))
-                        :let    [d (str (ns-name dep))]
-                        t       app-types
-                        :when   (and (str/ends-with? d (str "." t))
-                                     (not= d (str "slopp.rules." t)))]
-                    [d t])]
-    (is (seq app-types) "no app type derived — this guard would be vacuous")
-    (is (empty? reaching)
-        (str "the generic rules namespace reaches an app type's store analysis: "
-             (vec reaching)
-             " — a rule that needs it belongs in slopp.rules.<type>, where its "
-             "name is graded against the type that owns it"))))
-
 (deftest ^{:correspondence "the two EXECUTION registries (edit.gates/write-gate-names, rules/done-advisories) vs rules.catalog/rule-catalog — a registered rule missing from the catalog refuses with no :teach and no :escape"}
   catalog-covers-every-registered-rule
   (let [cataloged   (set (map :rule catalog/rule-catalog))
@@ -679,6 +586,29 @@
           (str "every advisory claims " vs " — a dimension with one value is"
                " not carrying information")))))
 
+(deftest applies-to-actually-filters-and-never-silently-drops
+  ;; Declaring the dimension is half of ask #5; the runner acting on it is the
+  ;; half that makes it a guarantee. Without this test `:applies-to` is an
+  ;; annotation, and the earlier test would pass on a registry nobody reads.
+  (let [prod {:form 'app.core/f}
+        test {:form 'app.core-test/t-f}
+        nsf  {:ns 'app.core-test}
+        wide {:note "about the store as a whole"}
+        f    #'rules/in-scope]
+    (testing ":production keeps production and drops tests"
+      (is (= [prod] (f :production [prod test])))
+      (is (= [] (f :production [nsf]))))
+    (testing ":tests is the mirror"
+      (is (= [test] (f :tests [prod test])))
+      (is (= [nsf] (f :tests [nsf]))))
+    (testing ":both keeps everything, and is the default the runner falls back to"
+      (is (= [prod test nsf] (f :both [prod test nsf]))))
+    (testing "a finding naming NEITHER a form nor a namespace is ALWAYS kept"
+      ;; it is about the store, not about a namespace — dropping it because it
+      ;; could not be classified would be the worse error, and silent
+      (is (= [wide] (f :production [wide])))
+      (is (= [wide] (f :tests [wide]))))))
+
 (deftest every-done-advisory-declares-whether-a-whole-store-sweep-MEANS-anything
   ;; `done` is episode-scoped, so a `:grain :done` rule can only ever see forms
   ;; an episode CHANGED. A violation that predates the rule is therefore
@@ -799,7 +729,7 @@
                         "  [x]\n"
                         "  x)\n"))
       (testing "the must-NOT-flag half — same fixture, two forms earlier"
-        (let [r (external/full-check! sess)]
+        (let [r (external/run-full-check! sess)]
           (is (empty? (get-in r [:rules :findings])) (pr-str (:rules r)))
           (is (= :green (:status r)) (pr-str (select-keys r [:status :rules])))
           (testing "and it states its population even when clean"
@@ -825,7 +755,7 @@
                           "  \"Hushes.\"\n"
                           "  [x]\n"
                           "  x)\n"))
-        (let [r (external/full-check! sess)]
+        (let [r (external/run-full-check! sess)]
           (is (= '[fs.quiet] (mapv :ns (get-in r [:rules :findings :namespace-purpose])))
               (pr-str (get-in r [:rules :findings])))
           (is (= :green (:status r))
@@ -840,7 +770,7 @@
                      :prompt "the violation, written once and never touched again")
       (external/done! sess :label "the last episode that will ever see it")
       (testing "full_check names it, red"
-        (let [r (external/full-check! sess)]
+        (let [r (external/run-full-check! sess)]
           (is (= '[fs.core/fetch] (mapv :form (get-in r [:rules :findings :direct-http])))
               (pr-str (:rules r)))
           ;; discriminating: red proves nothing unless every OTHER red-maker is
@@ -858,29 +788,6 @@
                    " can scroll past is not a rule: "
                    (pr-str (select-keys r [:status :rules]))))))
       (finally (ops/close! sess)))))
-
-(deftest applies-to-actually-filters-and-never-silently-drops
-  ;; Declaring the dimension is half of ask #5; the runner acting on it is the
-  ;; half that makes it a guarantee. Without this test `:applies-to` is an
-  ;; annotation, and the earlier test would pass on a registry nobody reads.
-  (let [prod {:form 'app.core/f}
-        test {:form 'app.core-test/t-f}
-        nsf  {:ns 'app.core-test}
-        wide {:note "about the store as a whole"}
-        f    #'rules/in-scope]
-    (testing ":production keeps production and drops tests"
-      (is (= [prod] (f :production [prod test])))
-      (is (= [] (f :production [nsf]))))
-    (testing ":tests is the mirror"
-      (is (= [test] (f :tests [prod test])))
-      (is (= [nsf] (f :tests [nsf]))))
-    (testing ":both keeps everything, and is the default the runner falls back to"
-      (is (= [prod test nsf] (f :both [prod test nsf]))))
-    (testing "a finding naming NEITHER a form nor a namespace is ALWAYS kept"
-      ;; it is about the store, not about a namespace — dropping it because it
-      ;; could not be classified would be the worse error, and silent
-      (is (= [wide] (f :production [wide])))
-      (is (= [wide] (f :tests [wide]))))))
 
 (deftest a-stored-name-that-disagrees-with-its-source-is-reported
   ;; The store keeps a form's NAME on the element and its source in the node.
@@ -954,6 +861,99 @@
     (testing "and it says where the name went, derived by last segment the way
               a stranded alias's :suggest is"
       (is (= 'rp.image.testmain (:suggest (first found))) (pr-str found)))))
+
+(deftest a-rule-owned-by-an-app-type-is-named-for-it
+  ;; R6: no slopp.* surface may assume a project is a WEB project. Support for
+  ;; an app TYPE lives under that type's name, and the pattern must be
+  ;; replicable for type #2 without renaming type #1. The rule catalog is where
+  ;; that is READ — an agent meets a rule by its name long before it meets the
+  ;; code — so a web-only rule under a generic name tells every reader the
+  ;; wrong thing about which projects it can fire on.
+  ;;
+  ;; This is `capabilities/owners` one layer over, and the same shape
+  ;; deliberately: a key's first segment names its owner so no second field can
+  ;; drift from it. Here the owner is DERIVED from the implementing namespace
+  ;; rather than declared at all, which is stronger — moving a check is the
+  ;; only way to change who owns it.
+  (let [loaded    (set (map (comp str ns-name) (all-ns)))
+        ;; an app TYPE is a declared capability owner that slopp has store
+        ;; ANALYSIS for. `slopp` (the framework, RESERVED) and `app` (every
+        ;; project, whatever kind) have no `slopp.<module>.<owner>` namespace
+        ;; and are correctly not types. Derived, so app type #2 is picked up by
+        ;; existing here rather than by being added to a list.
+        app-types (set (for [t     (keys capabilities/owners)
+                             :when (some #(re-matches (re-pattern (str "slopp\\..+\\." t)) %) loaded)]
+                         t))
+        owner-of  (fn [ns-sym]
+                    (first (filter #(str/ends-with? (str ns-sym) (str "." %)) app-types)))
+        rules     (merge (gates/write-gate-namespaces)
+                         (into {} (for [r rules/done-advisories]
+                                    [(:key r) (ns-name (:ns (meta (:check r))))])))
+        misnamed  (sort (for [[rule ns-sym] rules
+                              :let  [o (owner-of ns-sym)]
+                              :when (and o (not (str/starts-with? (name rule) (str o "-"))))]
+                          [rule ns-sym o]))
+        misplaced (sort (for [[rule ns-sym] rules
+                              t     app-types
+                              :when (and (str/starts-with? (name rule) (str t "-"))
+                                         (not= t (owner-of ns-sym)))]
+                          [rule ns-sym t]))]
+    (testing "the derivation found a population — with no app type there is nothing to check"
+      ;; guard the guard: both assertions below are ABSENCES, and an empty
+      ;; app-types set satisfies them without looking at a single rule.
+      (is (seq app-types) (str "no app type derived from " (count loaded) " loaded namespaces"))
+      (is (seq (filter (comp owner-of val) rules))
+          "no rule resolved to an app type — the owner derivation is not reading the registries"))
+    (testing "a rule implemented under an app type's name carries that prefix"
+      (is (empty? misnamed)
+          (str "these rules are implemented by an app type and do not say so, "
+               "so an agent reading the catalog cannot tell which projects they "
+               "can fire on: " (vec misnamed))))
+    (testing "and a rule carrying the prefix is implemented there"
+      ;; the other half, and it is what stops the convention decaying into a
+      ;; naming habit: a `web-` rule living in the generic namespace means the
+      ;; generic namespace speaks web's vocabulary, which is the R6 violation
+      ;; itself rather than a spelling of it.
+      (is (empty? misplaced)
+          (str "these rules are named for an app type but implemented in a "
+               "generic namespace: " (vec misplaced))))))
+
+(deftest the-generic-rules-namespace-cannot-reach-an-app-types-analysis
+  ;; The other half of `a-rule-owned-by-an-app-type-is-named-for-it`, and the
+  ;; reason it is a separate deftest: that one grades a rule that is already in
+  ;; the right namespace, so it is blind to the failure that actually happened
+  ;; here. Five web-only checks sat in the generic `slopp.rules` — reading
+  ;; `:webapp/client-routes`, calling `edit.web/client-signature` — and no naming rule could
+  ;; see them, because a check in a generic namespace has no app type to
+  ;; disagree with. `inline-schema-dup` and `generated-ns` were missed by a
+  ;; hand audit for exactly that reason.
+  ;;
+  ;; So this guards the require, which is the moment the reach becomes
+  ;; possible: `slopp.rules` gets no route to web's store analysis, and the
+  ;; typed checks live in `slopp.rules.web` where the naming guard can grade
+  ;; them. `slopp.rules.<type>` is exempt BECAUSE it is the destination — the
+  ;; registry has to name the vars it registers.
+  ;;
+  ;; The limit, stated because a guard named without its limits reads as
+  ;; broader than it is: a check can still read `:web/…` metadata with no
+  ;; require at all, which is precisely what `client-routes-consequences-check` did. This
+  ;; catches the reach, not the vocabulary.
+  (let [loaded    (set (map (comp str ns-name) (all-ns)))
+        app-types (set (for [t     (keys capabilities/owners)
+                             :when (some #(re-matches (re-pattern (str "slopp\\..+\\." t)) %) loaded)]
+                         t))
+        reaching  (for [[_ dep] (ns-aliases (find-ns 'slopp.rules))
+                        :let    [d (str (ns-name dep))]
+                        t       app-types
+                        :when   (and (str/ends-with? d (str "." t))
+                                     (not= d (str "slopp.rules." t)))]
+                    [d t])]
+    (is (seq app-types) "no app type derived — this guard would be vacuous")
+    (is (empty? reaching)
+        (str "the generic rules namespace reaches an app type's store analysis: "
+             (vec reaching)
+             " — a rule that needs it belongs in slopp.rules.<type>, where its "
+             "name is graded against the type that owns it"))))
 
 (deftest an-observation-clears-assertions-never-red-for-an-external-test
   ;; `:assertions-never-red` is the vacuity guarantee — a deftest that GAINED

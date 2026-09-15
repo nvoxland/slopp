@@ -39,12 +39,12 @@
         ;; the form ACTUALLY has, checked against the store rather than against
         ;; a number that merely happened to be stable.
         fid (fn [ns-sym nm] (:id (store/form-named st ns-sym nm)))]
-    (testing "GET /api/namespaces — every namespace, sorted, as JSON data"
+    (testing "GET /api/projects/:slug/namespaces — every namespace, sorted, as JSON data"
       ;; 2, not 1: the `ns` form is a top-level form in the store like any
       ;; other, which is slopp's model rather than an off-by-one. /store has
       ;; always counted it that way, and the API reusing the same read means
       ;; the two CANNOT disagree — which is the property being pinned here.
-      (let [r (GET "/api/namespaces")]
+      (let [r (GET "/api/projects/demo/namespaces")]
         (is (= 200 (:status r)))
         (is (= [{:ns "demo.core" :forms 2} {:ns "demo.util" :forms 2}]
                (:body r)))
@@ -53,8 +53,8 @@
         (is (not (:http/raw r))
             "a JSON endpoint leaves encoding to the adapter — :http/raw is for
              bytes that must arrive untouched, like the compiled bundle")))
-    (testing "GET /api/ns/:ns — one namespace's outline, in store order"
-      (let [r (GET "/api/ns/demo.core")]
+    (testing "GET /api/projects/:slug/ns/:ns — one namespace's outline, in store order"
+      (let [r (GET "/api/projects/demo/ns/demo.core")]
         (is (= 200 (:status r)))
         (is (= {:ns "demo.core"
                 ;; nobody declared one, and undeclared IS external — so the
@@ -98,7 +98,7 @@
       ;; and random names cannot show it. Stated directly instead: no id is
       ;; reused across namespaces, which is what makes an id a permalink and
       ;; is the fact that was guessed wrong before anything asserted it.
-      (let [ids (fn [ns-nm] (->> (:body (GET (str "/api/ns/" ns-nm)))
+      (let [ids (fn [ns-nm] (->> (:body (GET (str "/api/projects/demo/ns/" ns-nm)))
                                  :forms (map :form-id) set))
             a   (ids "demo.core")
             b   (ids "demo.util")]
@@ -108,7 +108,7 @@
             "two namespaces ingested into one store share no form id")))
     (testing "a form with no docstring carries an explicit nil, not a missing key"
       ;; :maybe in the contract is the promise; this is the promise being kept
-      (let [r (GET "/api/ns/demo.util")]
+      (let [r (GET "/api/projects/demo/ns/demo.util")]
         (is (= {:ns "demo.util"
                 :tier "external"
                 ;; ids continue across the second ingest rather than restarting per
@@ -132,7 +132,7 @@
     (testing "an unknown namespace is a 404, not an empty outline"
       ;; an empty :forms would say the namespace exists and is empty, which is
       ;; a different and false statement
-      (let [r (GET "/api/ns/no.such.ns")]
+      (let [r (GET "/api/projects/demo/ns/no.such.ns")]
         (is (= 404 (:status r)))
         (is (not (m/validate contracts/ns-outline (:body r))))))))
 
@@ -161,8 +161,8 @@
           ctx (server/context (atom {:store st}))
           get* (fn [uri] (:status (slopp.http/handle! ctx {:request-method :get
                                                     :uri uri})))]
-      (is (= 200 (get* "/api/namespaces")))
-      (is (= 200 (get* "/api/rest/paths")))
+      (is (= 200 (get* "/api/projects/demo/namespaces")))
+      (is (= 200 (get* "/api/projects/demo/rest/paths")))
       ;; the pages are the DAEMON's, served beside its registry. Asserting
       ;; their ABSENCE here is the half worth keeping: a page reappearing on a
       ;; project's own context would mean slopp had quietly grown a second
@@ -212,37 +212,37 @@
                       (assoc :body (json/parse-string
                                     (json/generate-string (:body r)) true)))))
             fid (:id (store/form-named (:store @sess) 'demo.core 'hello))]
-        (testing "/api/timeline — the landing screen"
-          (let [r (GET "/api/timeline")]
+        (testing "/api/projects/:slug/timeline — the landing screen"
+          (let [r (GET "/api/projects/demo/timeline")]
             (is (= 200 (:status r)))
             (is (m/validate contracts/timeline (:body r))
                 (pr-str (m/explain contracts/timeline (:body r))))
             (is (some #{"demo.core"} (:namespaces (:working (:body r))))
                 "the working set has to see the form just written")))
-        (testing "/api/form/:id — the permalink screen"
-          (let [r (GET (str "/api/form/" fid))]
+        (testing "/api/projects/:slug/form/:id — the permalink screen"
+          (let [r (GET (str "/api/projects/demo/form/" fid))]
             (is (= 200 (:status r)))
             (is (m/validate contracts/form-view (:body r))
                 (pr-str (m/explain contracts/form-view (:body r))))
             (testing "tokens reproduce the source exactly — the client needs no lexer"
               (is (= (:source (:body r))
                      (apply str (map second (:tokens (:body r)))))))))
-        (testing "/api/source/:ns/:name — source by the name the outline links"
-          (let [r (GET "/api/source/demo.core/hello")]
+        (testing "/api/projects/:slug/source/:ns/:name — source by the name the outline links"
+          (let [r (GET "/api/projects/demo/source/demo.core/hello")]
             (is (= 200 (:status r)))
             (is (m/validate contracts/form-source (:body r)))))
         (testing "every not-found is a 404, never a blank screen"
           ;; in an SPA a wrong 200 renders as an empty pane, which reads as
           ;; "nothing here" rather than "you are lost"
-          (is (= 404 (:status (GET "/api/form/nosuchid"))))
+          (is (= 404 (:status (GET "/api/projects/demo/form/nosuchid"))))
           ;; an unknown FIDELITY is the same answer as an unknown id, never a
           ;; quiet downgrade to the one that happens to exist — every
           ;; permalink already in the wild would otherwise silently come to
           ;; mean "whatever the default became"
-          (is (= 404 (:status (GET (str "/api/form/" fid "?view=nosuchview")))))
-          (is (= 200 (:status (GET (str "/api/form/" fid "?view=clojure")))))
-          (is (= 404 (:status (GET "/api/source/demo.core/nope"))))
-          (is (= 404 (:status (GET "/api/change/d1..d2"))))))
+          (is (= 404 (:status (GET (str "/api/projects/demo/form/" fid "?view=nosuchview")))))
+          (is (= 200 (:status (GET (str "/api/projects/demo/form/" fid "?view=clojure")))))
+          (is (= 404 (:status (GET "/api/projects/demo/source/demo.core/nope"))))
+          (is (= 404 (:status (GET "/api/projects/demo/change/d1..d2"))))))
       (finally (ops/close! sess)))))
 
 (deftest the-modules-endpoint-serves-a-contract-shaped-architecture
@@ -255,7 +255,7 @@
                               (str "(ns demo.b.util (:require [demo.a.core :as c]))\n\n"
                                    "(defn helper [] (c/hello))\n")))
         ctx (server/context (atom {:store st}))
-        res (slopp.http/handle! ctx {:request-method :get :uri "/api/modules"})]
+        res (slopp.http/handle! ctx {:request-method :get :uri "/api/projects/demo/modules"})]
     (testing "the route is served and its response satisfies the declared contract"
       ;; a violation fails HERE, at the boundary, rather than rendering wrong
       (is (= 200 (:status res))))
@@ -297,17 +297,20 @@
       ;; hand-kept ON PURPOSE: this is the control. Derived from the same
       ;; metadata the endpoint list comes from, it would compare a derivation
       ;; to itself and pass however wrong both were.
-      (is (= #{"/api/change/:range" "/api/namespaces" "/api/source/:ns/:name" "/api/ns/:ns"
-               "/api/timeline" "/api/modules" "/api/module/:m" "/api/form/:id"
-               "/api/search" "/api/bundle" "/api/cost"
-               "/api/rest/paths" "/api/http/paths" "/api/webapp/paths"
-                 "/api/config"}
+      (is (= #{"/api/projects/:slug/change/:range" "/api/projects/:slug/namespaces"
+               "/api/projects/:slug/source/:ns/:name" "/api/projects/:slug/ns/:ns"
+               "/api/projects/:slug/timeline" "/api/projects/:slug/modules"
+               "/api/projects/:slug/module/:m" "/api/projects/:slug/form/:id"
+               "/api/projects/:slug/search" "/api/projects/:slug/bundle" "/api/projects/:slug/cost"
+               "/api/projects/:slug/rest/paths" "/api/projects/:slug/http/paths"
+               "/api/projects/:slug/webapp/paths" "/api/projects/:slug/config"}
              (set (keys by-path)))))
 
     (testing "every capability's publisher is IN the typed document, so a
               consumer generates its request builder rather than hand-writing
               one for the endpoint that describes the endpoints"
-      (doseq [p ["/api/rest/paths" "/api/http/paths" "/api/webapp/paths"]]
+      (doseq [p ["/api/projects/:slug/rest/paths" "/api/projects/:slug/http/paths"
+                 "/api/projects/:slug/webapp/paths"]]
         (is (= "application/edn" (:media-type (by-path p)))
             (str p " must say what it answers, or a generated wrapper calls"
                  " .json on EDN and fails on the first character"))
@@ -315,12 +318,12 @@
             (str p " is a GET that reads a store and changes nothing"))))
 
     (testing "the published schema IS the var the endpoint declares"
-      (is (= contracts/timeline (:response (by-path "/api/timeline"))))
-      (is (= contracts/module-index (:response (by-path "/api/modules")))))
+      (is (= contracts/timeline (:response (by-path "/api/projects/:slug/timeline"))))
+      (is (= contracts/module-index (:response (by-path "/api/projects/:slug/modules")))))
 
     (testing "a GET publishes an explicit nil request, not a missing key"
-      (is (contains? (by-path "/api/timeline") :request))
-      (is (nil? (:request (by-path "/api/timeline")))))
+      (is (contains? (by-path "/api/projects/:slug/timeline") :request))
+      (is (nil? (:request (by-path "/api/projects/:slug/timeline")))))
 
     (testing "CONTENT is not part of a typed contract — pages and the bundle"
       ;; and they are absent by KIND now, not by a flag. `/` and the bundle are
@@ -330,7 +333,7 @@
       (is (not (contains? by-path "/js/main.js"))))
 
     (testing "and an ordinary endpoint says JSON rather than leaving it unsaid"
-      (is (= "application/json" (:media-type (by-path "/api/timeline"))))))
+      (is (= "application/json" (:media-type (by-path "/api/projects/:slug/timeline"))))))
 
   (testing "each publisher serves EDN verbatim, whatever it documents"
     ;; JSON would flatten a keyword schema into a string, so the wire format is
@@ -344,7 +347,8 @@
       ;; replaces it is that a document changes by RENAMING a key, never by
       ;; redefining one in place, which is the only change a version could
       ;; have caught.
-      (doseq [uri ["/api/rest/paths" "/api/http/paths" "/api/webapp/paths"]]
+      (doseq [uri ["/api/projects/demo/rest/paths" "/api/projects/demo/http/paths"
+                   "/api/projects/demo/webapp/paths"]]
         (let [r (slopp.http/handle! ctx {:request-method :get :uri uri})]
           (is (= 200 (:status r)) uri)
           (is (:http/raw r) "the body must arrive untouched by the adapter's encoder")
@@ -364,8 +368,9 @@
   ;; and nothing downstream is worth building.
   ;;
   ;; Two processes' worth of separation in one JVM: the producer serves over a
-  ;; real socket — the daemon's route table for one project, bound here on an
-  ;; ephemeral port exactly as the daemon mounts it — and the consumer is a
+  ;; real socket — the daemon's ONE route table bound here on an ephemeral
+  ;; port, resolving every slug to the producer session via :open-reader,
+  ;; exactly as the daemon resolves a project — and the consumer is a
   ;; genuinely separate session and store.
   (let [;; the producer DECLARES its API, because the published document now
         ;; follows the store rather than the listener's own served list — a
@@ -378,18 +383,23 @@
                                      "(defn ^{:http/path \"/api/timeline\" :http/method :get"
                                      " :http/auth :public}\n  timeline \"T.\" [_] {:status 200})\n"))})
         consumer (external/open!)
-        srv      (slopp.http/serve! (assoc (server/serving-opts producer)
-                                           :http/host "127.0.0.1" :http/port 0))]
+        ;; the daemon's one surface, single-session: every slug resolves to the
+        ;; producer, the way server/context does for a test and the daemon does
+        ;; from its registry
+        srv      (slopp.http/serve! {:http/namespaces server/served-namespaces
+                                     :http/wrap-context slopp.rest/validating
+                                     :http/perform-ctx {:open-reader (constantly producer)}
+                                     :http/host "127.0.0.1" :http/port 0})]
     (try
       (let [out (cljs/generate-client-from!
-                 consumer (str "http://127.0.0.1:" (:port srv) "/api/rest/paths")
+                 consumer (str "http://127.0.0.1:" (:port srv) "/api/projects/demo/rest/paths")
                  :ns 'demo.client.api)
             st  (:store @consumer)
             src (fn [ns- n] (str (store/form-named st ns- n)))]
 
         (testing "the same wrappers local generation produces, by name"
           ;; the three publishers are in here: each carried `:rest/client
-          ;; false` reasoning once — "describing the describer is circular" —
+          ;; false` reasoning once — \"describing the describer is circular\" —
           ;; which was never the fact. They answer EDN, say so with
           ;; :rest/media-type, and are generated like anything else, which is
           ;; what deletes the request paths a consumer hand-writes for exactly
@@ -450,7 +460,7 @@
                                "(defn ^{:malli/schema [:=> [:cat :int] :int]} inc-it\n"
                                "  [x] (inc x))\n"))
         ctx (server/context (atom {:store st}))
-        r    (slopp.http/handle! ctx {:request-method :get :uri "/api/ns/demo.shape"})
+        r    (slopp.http/handle! ctx {:request-method :get :uri "/api/projects/demo/ns/demo.shape"})
         rows (into {} (map (juxt :name identity)) (:forms (:body r)))]
     (is (= 200 (:status r)))
     (is (m/validate contracts/ns-outline (:body r))
@@ -503,7 +513,7 @@
                                    "            [demo.rank :as rank]))\n\n"
                                    "(deftest pluralises (is (= \"rows\" (rank/plural 2 \"row\"))))\n")))
         ctx (server/context (atom {:store st}))
-        r    (slopp.http/handle! ctx {:request-method :get :uri "/api/ns/demo.rank"})
+        r    (slopp.http/handle! ctx {:request-method :get :uri "/api/projects/demo/ns/demo.rank"})
         rows (into {} (map (juxt :name identity)) (:forms (:body r)))]
     (is (= 200 (:status r)))
     (is (m/validate contracts/ns-outline (:body r))
@@ -552,7 +562,7 @@
                 first)
         ask (fn [nsx]
               (slopp.http/handle! (server/context (atom {:store st}))
-                           {:request-method :get :uri (str "/api/ns/" nsx)}))]
+                           {:request-method :get :uri (str "/api/projects/demo/ns/" nsx)}))]
     (testing "a declared tier rides at the top level, as a string like :ns"
       (let [r (ask "demo.core")]
         (is (= 200 (:status r)))
@@ -583,7 +593,7 @@
                                    "(defn one [x] x)\n\n"
                                    "(defn two [x] (one x))\n")))
         ctx (server/context (atom {:store st}))
-        r    (slopp.http/handle! ctx {:request-method :get :uri "/api/ns/demo.addr"})
+        r    (slopp.http/handle! ctx {:request-method :get :uri "/api/projects/demo/ns/demo.addr"})
         rows (into {} (map (juxt :name identity)) (:forms (:body r)))]
     (is (= 200 (:status r)))
     (is (m/validate contracts/ns-outline (:body r))
@@ -630,7 +640,7 @@
                                    "            [sh.mod.core :as core]))\n"
                                    "(deftest base-t (is (= 1 (core/base 1))))\n")))
         ctx (server/context (atom {:store st}))
-        r   (slopp.http/handle! ctx {:request-method :get :uri "/api/module/sh.mod"})
+        r   (slopp.http/handle! ctx {:request-method :get :uri "/api/projects/demo/module/sh.mod"})
         b   (:body r)
         nss (into {} (map (juxt :ns identity)) (:namespaces b))]
     (is (= 200 (:status r)) (pr-str r))
@@ -657,7 +667,7 @@
       (is (= [{:from "out.app" :from-module "out.app" :to "sh.mod.door"}]
              (:in (:boundary b)))))
     (testing "a module with no production namespaces is a 404, not an empty frame"
-      (let [r (slopp.http/handle! ctx {:request-method :get :uri "/api/module/no.such"})]
+      (let [r (slopp.http/handle! ctx {:request-method :get :uri "/api/projects/demo/module/no.such"})]
         (is (= 404 (:status r)))
         (is (not (m/validate contracts/module-detail (:body r))))))))
 
@@ -678,7 +688,7 @@
                                    "(defn ^{:why \"drives base\"} go \"Goes.\" [x] (core/base x))\n")))
         ctx (server/context (atom {:store st}))
         fid (:id (store/form-named st 'sym.core 'base))
-        r   (slopp.http/handle! ctx {:request-method :get :uri (str "/api/form/" fid)})
+        r   (slopp.http/handle! ctx {:request-method :get :uri (str "/api/projects/demo/form/" fid)})
         b   (:body r)
         clr (first (:forms (first (:callers b))))]
     (is (= 200 (:status r)) (pr-str r))
@@ -732,7 +742,7 @@
         ctx (server/context (atom {:store st}))
         fid (:id (store/form-named st 'wd.top 'go))
         GET (fn [q] (slopp.http/handle! ctx {:request-method :get
-                                      :uri (str "/api/form/" fid)
+                                      :uri (str "/api/projects/demo/form/" fid)
                                       :query-string q}))]
     (testing "no depth — unchanged, and that is the compatibility promise"
       (let [b (:body (GET nil))]
@@ -779,9 +789,9 @@
                                    "                            [gp.mod.a :as a]))\n"
                                    "(deftest f-t (is (= 1 (a/f 1))))\n")))
         ctx (server/context (atom {:store st}))
-        mods (:body (slopp.http/handle! ctx {:request-method :get :uri "/api/modules"}))
+        mods (:body (slopp.http/handle! ctx {:request-method :get :uri "/api/projects/demo/modules"}))
         row  (first (filter #(= "gp.mod" (:module %)) (:modules mods)))
-        det  (:body (slopp.http/handle! ctx {:request-method :get :uri "/api/module/gp.mod"}))]
+        det  (:body (slopp.http/handle! ctx {:request-method :get :uri "/api/projects/demo/module/gp.mod"}))]
     (is (some? row) (pr-str (map :module (:modules mods))))
     (testing "the row's counts are the sum over the namespaces it lists"
       ;; a  → ns documented, f documented        → 2 forms, 0 no-doc
@@ -829,7 +839,7 @@
                                    "(defn total \"Sums an invoice.\" [xs] xs)\n")))
         ctx (server/context (atom {:store st}))
         GET (fn [q] (slopp.http/handle! ctx {:request-method :get
-                                      :uri "/api/search"
+                                      :uri "/api/projects/demo/search"
                                       :query-string q}))
         ok? (fn [b] (is (m/validate contracts/search-results b)
                         (pr-str (m/explain contracts/search-results b))))]
@@ -905,7 +915,7 @@
   (let [st  (store/ingest (store/empty-store) 'src.demo
                           "(ns src.demo)\n\n(defn rate [kg] (* kg 2))\n")
         ctx (server/context (atom {:store st}))
-        r   (slopp.http/handle! ctx {:request-method :get :uri "/api/source/src.demo/rate"})
+        r   (slopp.http/handle! ctx {:request-method :get :uri "/api/projects/demo/source/src.demo/rate"})
         b   (:body r)]
     (testing "the form's own id comes back with its source"
       (is (= 200 (:status r)) (pr-str r))
@@ -920,7 +930,7 @@
       (is (m/validate contracts/form-source b) (pr-str b)))
     (testing "an unknown form is still a 404, not a body with a nil id"
       (is (= 404 (:status (slopp.http/handle! ctx {:request-method :get
-                                            :uri "/api/source/src.demo/nope"})))))))
+                                            :uri "/api/projects/demo/source/src.demo/nope"})))))))
 
 (deftest every-key-a-response-SENDS-is-a-key-its-contract-DECLARES
   ;; The half `rest-unconstrained-contract` cannot see. That rule finds a schema
@@ -958,11 +968,11 @@
         gaps (fn [uri schema] (vec (distinct (undeclared schema (get* uri) []))))]
 
     (testing "the endpoints this namespace can drive send exactly what they declare"
-      (is (= [] (gaps "/api/timeline" contracts/timeline)))
-      (is (= [] (gaps "/api/modules" contracts/module-index)))
-      (is (= [] (gaps "/api/ns/ek.core" contracts/ns-outline)))
-      (is (= [] (gaps "/api/namespaces" contracts/namespace-list)))
-      (is (= [] (gaps "/api/source/ek.core/rate" contracts/form-source))))
+      (is (= [] (gaps "/api/projects/demo/timeline" contracts/timeline)))
+      (is (= [] (gaps "/api/projects/demo/modules" contracts/module-index)))
+      (is (= [] (gaps "/api/projects/demo/ns/ek.core" contracts/ns-outline)))
+      (is (= [] (gaps "/api/projects/demo/namespaces" contracts/namespace-list)))
+      (is (= [] (gaps "/api/projects/demo/source/ek.core/rate" contracts/form-source))))
 
     (testing "and the walker can SEE an undeclared key — without this the five
               assertions above are five empty lists agreeing with each other"
@@ -994,8 +1004,13 @@
                                    (first %))
                                 (rest schema)))))
         missing  (for [{:keys [path request]} (:paths doc)
-                       :let [params (map #(keyword (subs % 1))
-                                         (re-seq #":[a-zA-Z][a-zA-Z0-9-]*" path))
+                       ;; :slug is a RESOLVE parameter — the :http/resolve phase
+                       ;; turns it into the project's reader before the handler
+                       ;; runs — not something the caller sends as a request
+                       ;; field, so it is not the :request contract's to declare
+                       :let [params (remove #{:slug}
+                                            (map #(keyword (subs % 1))
+                                                 (re-seq #":[a-zA-Z][a-zA-Z0-9-]*" path)))
                              have   (declared request)
                              gap    (remove (or have #{}) params)]
                        :when (seq gap)]
@@ -1037,23 +1052,23 @@
       ;; what is reachable without fixture data, because an endpoint left out is
       ;; one whose contract nothing here checks — and this is the API the live
       ;; reviewer UI serves.
-      (doseq [path ["/api/namespaces"
-                    "/api/ns/demo.core"
-                    "/api/rest/paths"
-                    "/api/http/paths"
-                    "/api/webapp/paths"
-                    "/api/config"
-                    "/api/modules"
-                    "/api/timeline"
-                    "/api/cost"
+      (doseq [path ["/api/projects/demo/namespaces"
+                    "/api/projects/demo/ns/demo.core"
+                    "/api/projects/demo/rest/paths"
+                    "/api/projects/demo/http/paths"
+                    "/api/projects/demo/webapp/paths"
+                    "/api/projects/demo/config"
+                    "/api/projects/demo/modules"
+                    "/api/projects/demo/timeline"
+                    "/api/projects/demo/cost"
                     ;; a second split as well: the default proves nothing about
                     ;; the model rows, whose keys are entirely different ones
-                    "/api/cost?by=model"
-                    "/api/search?q=hello"
-                    "/api/bundle?ask=hello"
-                    (str "/api/form/" hello-id)
-                    "/api/source/demo.core/hello"
-                    "/api/module/demo.core"]]
+                    "/api/projects/demo/cost?by=model"
+                    "/api/projects/demo/search?q=hello"
+                    "/api/projects/demo/bundle?ask=hello"
+                    (str "/api/projects/demo/form/" hello-id)
+                    "/api/projects/demo/source/demo.core/hello"
+                    "/api/projects/demo/module/demo.core"]]
         (let [r (GET path)]
           (is (= 200 (:status r))
               (str path " did not honour its declared :rest/response once "
@@ -1068,23 +1083,27 @@
       ;; list. A green that proves nothing about a new endpoint is worse than
       ;; a red, because it is read as coverage.
       ;;
-      ;; So the claim is checked. Every route with no path CAPTURE needs no
-      ;; fixture data and must be tested above; the parameterised ones stay
-      ;; hand-written because they need an id or a name this store has to
-      ;; build. Adding an endpoint now fails HERE, naming it, instead of
-      ;; failing in a browser.
-      (let [tested (set (map #(first (str/split % #"\?"))
-                            ["/api/namespaces" "/api/ns/demo.core" "/api/rest/paths"
-                             "/api/http/paths" "/api/webapp/paths" "/api/config"
-                             "/api/modules" "/api/timeline" "/api/cost"
-                             "/api/search"
-                             "/api/bundle"
-                             "/api/form" "/api/source" "/api/module"]))
+      ;; So the claim is checked. Every route that carries no param BEYOND the
+      ;; project :slug needs no fixture data and must be tested above; the
+      ;; parameterised ones stay hand-written because they need an id or a name
+      ;; this store has to build. Adding an endpoint now fails HERE, naming it,
+      ;; instead of failing in a browser.
+      (let [prefix "/api/projects/:slug/"
+            tested (set (map #(first (str/split % #"\?"))
+                            ["/api/projects/:slug/namespaces" "/api/projects/:slug/ns/demo.core"
+                             "/api/projects/:slug/rest/paths" "/api/projects/:slug/http/paths"
+                             "/api/projects/:slug/webapp/paths" "/api/projects/:slug/config"
+                             "/api/projects/:slug/modules" "/api/projects/:slug/timeline"
+                             "/api/projects/:slug/cost" "/api/projects/:slug/search"
+                             "/api/projects/:slug/bundle"
+                             "/api/projects/:slug/form" "/api/projects/:slug/source"
+                             "/api/projects/:slug/module"]))
             plain  (for [row (:http/routes ctx)
                          :let [p (str (:path row))]
-                         :when (and (str/starts-with? p "/api/")
-                                    (not (str/includes? p ":"))
-                                    (not (str/includes? p "*")))]
+                         :when (and (str/starts-with? p prefix)
+                                    (let [rest (subs p (count prefix))]
+                                      (and (not (str/includes? rest ":"))
+                                           (not (str/includes? rest "*")))))]
                      p)]
         (is (seq plain) "no routes found — this check would be vacuous")
         (is (empty? (remove tested plain))
@@ -1102,24 +1121,24 @@
       ;; Two covered halves and an uncovered joint. The joint is where a
       ;; consumer enters, so it is asked here, over the real pipeline.
       (let [rows #(mapv :key (:config (edn/read-string (:body (GET %)))))]
-        (is (seq (rows "/api/config")) "no settings at all — this would be vacuous")
-        (is (< (count (rows "/api/config?prefix=http"))
-               (count (rows "/api/config")))
+        (is (seq (rows "/api/projects/demo/config")) "no settings at all — this would be vacuous")
+        (is (< (count (rows "/api/projects/demo/config?prefix=http"))
+               (count (rows "/api/projects/demo/config")))
             "?prefix did not narrow — the filter is documented and inert")
-        (is (= [] (rows "/api/config?prefix=nosuch"))
+        (is (= [] (rows "/api/projects/demo/config?prefix=nosuch"))
             "a prefix nothing matches answered rows, so the filter stopped applying")))
 
     (testing "and the client's view is what a consumer would actually parse"
       ;; guard the guard: if `call` handed back the pre-wire value these
       ;; assertions would pass while proving nothing about the wire
-      (let [r (GET "/api/namespaces")]
+      (let [r (GET "/api/projects/demo/namespaces")]
         (is (= [{:ns "demo.core" :forms 2} {:ns "demo.util" :forms 2}] (:body r))
             "the same rows the pre-wire test asserts, having survived JSON")))
 
     (testing "a 404 is not judged against the success contract"
       ;; the deliberate-error path, which must not become a 500 for failing to
       ;; match a schema describing the 200
-      (is (= 404 (:status (GET "/api/ns/no.such.ns")))))))
+      (is (= 404 (:status (GET "/api/projects/demo/ns/no.such.ns")))))))
 
 (deftest the-contract-documents-the-APPLICATION-not-the-listener-serving-it
   ;; Nathan's framing, via slopp-ui, and it supersedes the bug they first
@@ -1168,7 +1187,7 @@
     ;; and specifically not the reviewer API, which this very listener is
     ;; serving in order to answer the request. Serving is not declaring
     (let [ctx (server/context (atom {:store (store/empty-store)}))
-          r   (slopp.http/handle! ctx {:request-method :get :uri "/api/rest/paths"})
+          r   (slopp.http/handle! ctx {:request-method :get :uri "/api/projects/demo/rest/paths"})
           doc (edn/read-string (:body r))
           paths (set (map :path (:paths doc)))]
       (is (= 200 (:status r)))
@@ -1204,7 +1223,7 @@
                  "  [_a _p] [:main \"things\"])\n")
         ctx (server/context
              (atom {:store (store/ingest (store/empty-store) 'shop.ui src)}))
-        r   (slopp.http/handle! ctx {:request-method :get :uri "/api/webapp/paths"})
+        r   (slopp.http/handle! ctx {:request-method :get :uri "/api/projects/demo/webapp/paths"})
         doc (edn/read-string (:body r))]
     (is (= 200 (:status r)))
     (is (= "application/edn" (get-in r [:headers "Content-Type"])))
@@ -1228,7 +1247,7 @@
         (is (= {:paths []}
                (edn/read-string
                 (:body (slopp.http/handle! none {:request-method :get
-                                                 :uri "/api/webapp/paths"})))))))))
+                                                 :uri "/api/projects/demo/webapp/paths"})))))))))
 
 (deftest a-document-ships-NOTHING-its-contract-does-not-DECLARE
   ;; Every check on this surface asks whether the DECLARED things are honoured
@@ -1279,10 +1298,12 @@
                               :let [p (str (:path row))]
                               :when (and (= "application/edn"
                                             (:rest/media-type (meta (:handler row))))
-                                         (not (str/includes? p ":")))]
+                                         (str/starts-with? p "/api/projects/:slug/")
+                                         (not (str/includes?
+                                               (subs p (count "/api/projects/:slug/")) ":")))]
                           p))
-            listed #{"/api/config" "/api/webapp/paths" "/api/http/paths"
-                     "/api/rest/paths"}]
+            listed #{"/api/projects/:slug/config" "/api/projects/:slug/webapp/paths"
+                     "/api/projects/:slug/http/paths" "/api/projects/:slug/rest/paths"}]
         (is (seq served) "no EDN documents found — this check would be vacuous")
         (is (empty? (remove listed served))
             (str "these documents are served as EDN and nothing below closes"
@@ -1290,10 +1311,10 @@
                  (pr-str (vec (remove listed served)))))))
 
     (doseq [[path schema exercised]
-            [["/api/config"        contracts/config-document       :bundle]
-             ["/api/webapp/paths"  contracts/webapp-paths-document :paths]
-             ["/api/http/paths"    contracts/http-paths-document   :paths]
-             ["/api/rest/paths"    contracts/rest-paths-document   :paths]]]
+            [["/api/projects/demo/config"        contracts/config-document       :bundle]
+             ["/api/projects/demo/webapp/paths"  contracts/webapp-paths-document :paths]
+             ["/api/projects/demo/http/paths"    contracts/http-paths-document   :paths]
+             ["/api/projects/demo/rest/paths"    contracts/rest-paths-document   :paths]]]
       (let [doc (GET path)]
 
         (testing (str path " — the fixture reaches the keys being checked")
@@ -1332,7 +1353,7 @@
         mk  (fn [] (atom {:store st :test-map {}}))
         GET (fn [sess q] (slopp.http/handle! (server/context sess)
                                              {:request-method :get
-                                              :uri "/api/bundle"
+                                              :uri "/api/projects/demo/bundle"
                                               :query-string q}))]
     (testing "an ask naming a form gets its source and neighbourhood back"
       (let [sess (mk)
@@ -1390,7 +1411,7 @@
                 (store/ingest 'ab.quoting "(ns ab.quoting (:require [ab.fuel :as fuel]))\n(defn q \"Q.\" [x] (fuel/f x))\n"))
         GET (fn [sess q] (slopp.http/handle! (server/context sess)
                                              {:request-method :get
-                                              :uri "/api/bundle"
+                                              :uri "/api/projects/demo/bundle"
                                               :query-string q}))
         full  (:bundle (:body (GET (atom {:store st :test-map {}}) "ask=quote%20eco&session-id=s1")))
         delta (:bundle (:body (GET (atom {:store st :test-map {} :intent-sid "s2"}) "ask=quote%20eco&session-id=s2")))]
@@ -1414,21 +1435,21 @@
               (slopp.http/handle! ctx (cond-> {:request-method :get :uri uri}
                                         qs (assoc :query-string qs))))]
     (testing "the default split is the commit-point series — the one with a time axis"
-      (let [res (GET "/api/cost")]
+      (let [res (GET "/api/projects/demo/cost")]
         (is (= 200 (:status res)))
         (is (= "commit-point" (:by (:body res))))
         (is (vector? (:rows (:body res))))))
     (testing "?by= selects the split, and the three the tool has are the three published"
-      (is (= "model" (:by (:body (GET "/api/cost" "by=model")))))
-      (is (= "ask" (:by (:body (GET "/api/cost" "by=ask"))))))
+      (is (= "model" (:by (:body (GET "/api/projects/demo/cost" "by=model")))))
+      (is (= "ask" (:by (:body (GET "/api/projects/demo/cost" "by=ask"))))))
     (testing "no telemetry is NO ROWS rather than a zeroed one"
       ;; the distinction a dashboard needs in order to say \"not recorded\"
       ;; instead of drawing a zero, which is a different and false claim
-      (is (= [] (:rows (:body (GET "/api/cost" "by=model"))))))
+      (is (= [] (:rows (:body (GET "/api/projects/demo/cost" "by=model"))))))
     (testing "a split the tool does not have is REFUSED, not silently defaulted"
       ;; defaulting would answer a question nobody asked and label it as the
       ;; one they did ask
-      (is (= 400 (:status (GET "/api/cost" "by=phase")))))))
+      (is (= 400 (:status (GET "/api/projects/demo/cost" "by=phase")))))))
 
 (deftest the-cost-contract-accepts-the-shape-cost-by-ask-documents
   ;; `/api/cost` publishes three splits through ONE contract, and the splits do
@@ -1480,7 +1501,7 @@
       (ops/ingest! sess 'shc.a "(ns shc.a)\n\n(defn ^:unused-ok one [] 1)\n")
       (external/commit-point! sess "a commit point to plot" :agent "a")
       (let [ctx (server/context sess)
-            res (slopp.rest/call ctx {:method :get :path "/api/cost?by=commit-point"})
+            res (slopp.rest/call ctx {:method :get :path "/api/projects/demo/cost?by=commit-point"})
             row (first (:rows (:body res)))]
         (testing "the response still honours its declared contract once serialized"
           (is (= 200 (:status res)) (pr-str (:body res))))

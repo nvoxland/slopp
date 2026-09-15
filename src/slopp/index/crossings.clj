@@ -121,12 +121,16 @@
                  SKIPPED rather than failing loudly"}
 
    {:kind       :http/vocabulary
-    :leaves     "a declared read/effect KIND, resolved by name"
+    :leaves     "a declared read/effect/resolve KIND, resolved by name"
     :to         "a performer found by scanning namespaces the caller lists
                  by hand"
-    :markers    #{:http/reads :http/effects :http/read :http/effect}
-    :checked-by "web/context refuses at assembly when a declared kind has no
-                 performer among its namespaces"
+    ;; :http/resolve rides here because it is resolved through the SAME
+    ;; read-performer vocabulary as :http/reads — a route declares
+    ;; {dep [kind & path]} and the dispatcher folds the performer's answer
+    ;; onto the request-scoped perform-ctx before the reads and handler run.
+    :markers    #{:http/reads :http/effects :http/read :http/effect :http/resolve}
+    :checked-by "web/context refuses at assembly when a declared read, effect
+                 or resolve kind has no performer among its namespaces"
     :blind      nil}
 
    {:kind       :webapp/client-routing
@@ -310,107 +314,6 @@
                    marker on the form. Read only by edit.gates/gate-capability
                    deciding whether to run a gate, so nothing crosses"})
 
-(def ^:export owned-marker-namespaces
-  "The keyword namespaces slopp gives meaning to — the scope of every question
-  of the form \"is this marker OURS?\".
-
-  Includes the capability catalog's two OWNER rows: `app`, which every project
-  has and which `:app/entry` belongs to precisely because that marker spans
-  both app types, and `slopp`, which is reserved. `web` stays after the family
-  was retired, and that is the point of keeping it: a consumer still spelling
-  `:web/anything` is exactly who these checks are for.
-
-  **ONE producer, because two copies drifted and the drift was silent.** The
-  boundary inventory scoped itself to `#{web malli rule}` while the unknown
-  marker rule used the full set. After the marker waves moved slopp's
-  vocabulary to `:http/*`, `:rest/*` and `:webapp/*`, the inventory was
-  policing a family that owns no live markers and ignoring every family that
-  does — so the check whose whole job is to notice the registry rotting had
-  rotted, in the direction where it reports nothing and looks fine.
-
-  It survived the rename because it is a set of bare family-NAME strings, not
-  markers: no sweep of `:web/x` can see the string `\"web\"`."
-  #{"web" "webapp" "cli" "rest" "rule" "malli" "http" "app" "slopp"})
-
-(defn ^:export store-crossings
-  "The store's boundary exits: which crossing kinds it actually has, which of
-  those nothing checks, and any marker no kind claims.
-
-  Returns `{:crossings [...] :unchecked [...] :unclassified [...]}` — always
-  all three keys, empty vectors when there is nothing to say, because an
-  absent key would read as unexamined.
-
-  - **`:crossings`** — the registered kinds this store reaches, each with the
-    forms that reach it. A kind nothing here uses is simply absent; the
-    registry is the vocabulary, not the finding.
-  - **`:unchecked`** — of those, the ones with no `:checked-by`. This is the
-    output that matters: `slopp.index.refs` makes every edge INSIDE the store
-    answerable, and there was no equivalent question for an edge leaving it,
-    so each exit grew an ad-hoc check or none and nobody could tell which.
-  - **`:unclassified`** — a marker in use, in one of the namespaces slopp owns
-    ([[owned-marker-namespaces]]), that no kind claims. This is what stops the registry rotting: an
-    inventory that cannot notice a new exit describes the system it was
-    written against, not the one you have.
-
-  Scoped to slopp's OWN marker vocabulary on purpose. A user's namespaced
-  metadata is theirs and means nothing to slopp, so treating it as an
-  unclassified exit would bury the real finding in a store slopp knows
-  nothing about."
-  [st]
-  (let [ours?  (fn [k] (and (qualified-keyword? k)
-                            (contains? owned-marker-namespaces (namespace k))))
-        owned  (into (set (keys internal-markers)) (mapcat :markers) kinds)
-        marked (for [nsx  (keys (:namespaces st))
-                     e    (store/forms st nsx)
-                     :let [s (store/form-sexpr (:node e))]
-                     :when (and s (symbol? (second s)))
-                     k    (keys (meta (second s)))]
-                 {:marker k :at (symbol (str nsx) (str (second s)))})
-        hits   (group-by :marker marked)
-        rows   (vec (for [{:keys [markers] :as k} kinds
-                          :let [at (vec (sort (distinct (mapcat #(map :at (hits %))
-                                                                markers))))]
-                          :when (seq at)]
-                      (assoc (dissoc k :markers) :at at)))]
-    {:crossings    rows
-     :unchecked    (vec (remove :checked-by rows))
-     :unclassified (vec (sort-by (juxt :marker :at)
-                                 (distinct (filter #(and (ours? (:marker %))
-                                                         (not (owned (:marker %))))
-                                                   marked))))}))
-
-(defn ^:export finding
-  "The `full_check` section for this store's boundary exits, or NIL when it
-  has none worth saying.
-
-  ADVISORY, and deliberately so. Every entry here is a hole someone already
-  identified and wrote down — flipping the verdict on a standing documented
-  gap would make `full_check` red forever, and a check that is always red is
-  a check people stop running. What it buys instead is placement: the holes
-  are named at the exact moment a whole-store green is about to be believed,
-  which is the slot `:host-stale` occupies and works for the same reason.
-
-  Nil rather than an empty section when there is nothing to report. The usual
-  rule here runs the other way — an absent key reads as unmeasured — but this
-  section is ABOUT holes, so 'no holes' and 'nothing to say' are the same
-  statement, and printing it on every check of every store would be noise
-  forever."
-  [st]
-  (let [{:keys [unchecked unclassified]} (store-crossings st)]
-    (when (or (seq unchecked) (seq unclassified))
-      (cond-> {:note (str "verification stops at the store's edge: "
-                          (count unchecked) " exit kind(s) here have no checker"
-                          (when (seq unclassified)
-                            (str ", and " (count unclassified)
-                                 " marker(s) belong to no exit kind at all"))
-                          ". Nothing is wrong with the code — this names where"
-                          " a mistake would not be caught, because an exit with"
-                          " no check and an exit that does not exist look"
-                          " identical otherwise")}
-        (seq unchecked)    (assoc :unchecked (mapv #(select-keys % [:kind :to :blind :at])
-                                                   unchecked))
-        (seq unclassified) (assoc :unclassified unclassified)))))
-
 (defn ^:export known-markers
   "Every namespaced marker slopp gives meaning to — the union of what [[kinds]]
   reports as crossing and what [[internal-markers]] declares stays inside.
@@ -473,54 +376,6 @@
                         :webapp/client-routes :webapp/shell :http/external-path
                         :malli/schema :rule/applies-to :rule/severity
                         :rule/capability])))))
-
-(def ^:export deleted-markers
-  "Markers slopp USED to read and has RETIRED outright, as
-  `{\"old/name\" \"what to do instead\"}`.
-
-  **The sibling [[retired-markers]] cannot hold these, and that is the bug this
-  exists for.** That table maps old→new, so every row can say *the current
-  spelling is X*. A marker with no successor produces no row — and no row reads
-  as an all-clear. Reported by a consuming store at the boot after
-  `:rest/client` went: at ONE boot it carried a RENAMED marker (reported,
-  correctly) and nine forms declaring a DELETED one (silent), and a stylesheet
-  still carried the dead flag with a docstring explaining why it was necessary.
-
-  **The deleted case is the worse half.** A renamed marker usually breaks
-  something visible; a deleted one quietly stops meaning anything, and every
-  reader afterwards reasons from a declaration nothing reads.
-
-  **And it can carry MORE than a rename can**, because the reason it went is
-  known. \"Drop it\" plus why is a complete instruction, the way *re-run
-  whatever writes them* is for a generated form — where a rename can only ever
-  hand over a new spelling.
-
-  The key is a STRING for [[retired-markers]]'s reason, and it is sharper here:
-  a sweep rewrites every occurrence of the keyword it is renaming, and a ledger
-  is nothing but occurrences. Written without the leading colon nothing can
-  match it.
-
-  **A partition is exactly the kind of change that deletes vocabulary rather
-  than moving it**, so expect this table to grow when a concept splits."
-  {"rest/client"
-   (str "content is excluded from a client and from the published contract by"
-        " KIND now — an `:http/path` form is not part of a typed API — so a"
-        " page needs no flag. And an API can no longer opt out at all: whether"
-        " to generate a client is the generating CONSUMER's question, asked"
-        " against the document, and an endpoint does not know who will call it."
-        " Drop the marker. If the endpoint answers something other than JSON,"
-        " that fact is `:rest/media-type`")
-
-   "webapp/from-origin"
-   (str "a request now names the base it is measured from:"
-        " `:webapp/base \"\"` says exactly what this flag said, as a VALUE."
-        " Replace it. The boolean existed because `:webapp/base` was one"
-        " scalar per APP and an app calling two APIs needed one of them to be"
-        " an exception — so it was never about origins, it was a per-call"
-        " escape from a field that could not hold two values. The field holds"
-        " one per REQUEST now, so the escape has no cause and is gone rather"
-        " than deprecated: nothing reads it, and a request still carrying it"
-        " is addressed under the app's base like any other")})
 
 (def ^:export retired-markers
   "The marker renames of the `:web/*` → owning-capability wave, as
@@ -638,3 +493,152 @@
     "web/missing-performers" :http/missing-performers
     "web/keys"              :http/keys
     "web/vocabulary"        :http/vocabulary})
+
+(def ^:export owned-marker-namespaces
+  "The keyword namespaces slopp gives meaning to — the scope of every question
+  of the form \"is this marker OURS?\".
+
+  Includes the capability catalog's two OWNER rows: `app`, which every project
+  has and which `:app/entry` belongs to precisely because that marker spans
+  both app types, and `slopp`, which is reserved. `web` stays after the family
+  was retired, and that is the point of keeping it: a consumer still spelling
+  `:web/anything` is exactly who these checks are for.
+
+  **ONE producer, because two copies drifted and the drift was silent.** The
+  boundary inventory scoped itself to `#{web malli rule}` while the unknown
+  marker rule used the full set. After the marker waves moved slopp's
+  vocabulary to `:http/*`, `:rest/*` and `:webapp/*`, the inventory was
+  policing a family that owns no live markers and ignoring every family that
+  does — so the check whose whole job is to notice the registry rotting had
+  rotted, in the direction where it reports nothing and looks fine.
+
+  It survived the rename because it is a set of bare family-NAME strings, not
+  markers: no sweep of `:web/x` can see the string `\"web\"`."
+  #{"web" "webapp" "cli" "rest" "rule" "malli" "http" "app" "slopp"})
+
+(defn ^:export store-crossings
+  "The store's boundary exits: which crossing kinds it actually has, which of
+  those nothing checks, and any marker no kind claims.
+
+  Returns `{:crossings [...] :unchecked [...] :unclassified [...]}` — always
+  all three keys, empty vectors when there is nothing to say, because an
+  absent key would read as unexamined.
+
+  - **`:crossings`** — the registered kinds this store reaches, each with the
+    forms that reach it. A kind nothing here uses is simply absent; the
+    registry is the vocabulary, not the finding.
+  - **`:unchecked`** — of those, the ones with no `:checked-by`. This is the
+    output that matters: `slopp.index.refs` makes every edge INSIDE the store
+    answerable, and there was no equivalent question for an edge leaving it,
+    so each exit grew an ad-hoc check or none and nobody could tell which.
+  - **`:unclassified`** — a marker in use, in one of the namespaces slopp owns
+    ([[owned-marker-namespaces]]), that no kind claims. This is what stops the registry rotting: an
+    inventory that cannot notice a new exit describes the system it was
+    written against, not the one you have.
+
+  Scoped to slopp's OWN marker vocabulary on purpose. A user's namespaced
+  metadata is theirs and means nothing to slopp, so treating it as an
+  unclassified exit would bury the real finding in a store slopp knows
+  nothing about."
+  [st]
+  (let [ours?  (fn [k] (and (qualified-keyword? k)
+                            (contains? owned-marker-namespaces (namespace k))))
+        owned  (into (set (keys internal-markers)) (mapcat :markers) kinds)
+        marked (for [nsx  (keys (:namespaces st))
+                     e    (store/forms st nsx)
+                     :let [s (store/form-sexpr (:node e))]
+                     :when (and s (symbol? (second s)))
+                     k    (keys (meta (second s)))]
+                 {:marker k :at (symbol (str nsx) (str (second s)))})
+        hits   (group-by :marker marked)
+        rows   (vec (for [{:keys [markers] :as k} kinds
+                          :let [at (vec (sort (distinct (mapcat #(map :at (hits %))
+                                                                markers))))]
+                          :when (seq at)]
+                      (assoc (dissoc k :markers) :at at)))]
+    {:crossings    rows
+     :unchecked    (vec (remove :checked-by rows))
+     :unclassified (vec (sort-by (juxt :marker :at)
+                                 (distinct (filter #(and (ours? (:marker %))
+                                                         (not (owned (:marker %))))
+                                                   marked))))}))
+
+(defn ^:export finding
+  "The `full_check` section for this store's boundary exits, or NIL when it
+  has none worth saying.
+
+  ADVISORY, and deliberately so. Every entry here is a hole someone already
+  identified and wrote down — flipping the verdict on a standing documented
+  gap would make `full_check` red forever, and a check that is always red is
+  a check people stop running. What it buys instead is placement: the holes
+  are named at the exact moment a whole-store green is about to be believed,
+  which is the slot `:host-stale` occupies and works for the same reason.
+
+  Nil rather than an empty section when there is nothing to report. The usual
+  rule here runs the other way — an absent key reads as unmeasured — but this
+  section is ABOUT holes, so 'no holes' and 'nothing to say' are the same
+  statement, and printing it on every check of every store would be noise
+  forever."
+  [st]
+  (let [{:keys [unchecked unclassified]} (store-crossings st)]
+    (when (or (seq unchecked) (seq unclassified))
+      (cond-> {:note (str "verification stops at the store's edge: "
+                          (count unchecked) " exit kind(s) here have no checker"
+                          (when (seq unclassified)
+                            (str ", and " (count unclassified)
+                                 " marker(s) belong to no exit kind at all"))
+                          ". Nothing is wrong with the code — this names where"
+                          " a mistake would not be caught, because an exit with"
+                          " no check and an exit that does not exist look"
+                          " identical otherwise")}
+        (seq unchecked)    (assoc :unchecked (mapv #(select-keys % [:kind :to :blind :at])
+                                                   unchecked))
+        (seq unclassified) (assoc :unclassified unclassified)))))
+
+(def ^:export deleted-markers
+  "Markers slopp USED to read and has RETIRED outright, as
+  `{\"old/name\" \"what to do instead\"}`.
+
+  **The sibling [[retired-markers]] cannot hold these, and that is the bug this
+  exists for.** That table maps old→new, so every row can say *the current
+  spelling is X*. A marker with no successor produces no row — and no row reads
+  as an all-clear. Reported by a consuming store at the boot after
+  `:rest/client` went: at ONE boot it carried a RENAMED marker (reported,
+  correctly) and nine forms declaring a DELETED one (silent), and a stylesheet
+  still carried the dead flag with a docstring explaining why it was necessary.
+
+  **The deleted case is the worse half.** A renamed marker usually breaks
+  something visible; a deleted one quietly stops meaning anything, and every
+  reader afterwards reasons from a declaration nothing reads.
+
+  **And it can carry MORE than a rename can**, because the reason it went is
+  known. \"Drop it\" plus why is a complete instruction, the way *re-run
+  whatever writes them* is for a generated form — where a rename can only ever
+  hand over a new spelling.
+
+  The key is a STRING for [[retired-markers]]'s reason, and it is sharper here:
+  a sweep rewrites every occurrence of the keyword it is renaming, and a ledger
+  is nothing but occurrences. Written without the leading colon nothing can
+  match it.
+
+  **A partition is exactly the kind of change that deletes vocabulary rather
+  than moving it**, so expect this table to grow when a concept splits."
+  {"rest/client"
+   (str "content is excluded from a client and from the published contract by"
+        " KIND now — an `:http/path` form is not part of a typed API — so a"
+        " page needs no flag. And an API can no longer opt out at all: whether"
+        " to generate a client is the generating CONSUMER's question, asked"
+        " against the document, and an endpoint does not know who will call it."
+        " Drop the marker. If the endpoint answers something other than JSON,"
+        " that fact is `:rest/media-type`")
+
+   "webapp/from-origin"
+   (str "a request now names the base it is measured from:"
+        " `:webapp/base \"\"` says exactly what this flag said, as a VALUE."
+        " Replace it. The boolean existed because `:webapp/base` was one"
+        " scalar per APP and an app calling two APIs needed one of them to be"
+        " an exception — so it was never about origins, it was a per-call"
+        " escape from a field that could not hold two values. The field holds"
+        " one per REQUEST now, so the escape has no cause and is gone rather"
+        " than deprecated: nothing reads it, and a request still carrying it"
+        " is addressed under the app's base like any other")})

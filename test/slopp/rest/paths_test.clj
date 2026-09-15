@@ -30,20 +30,6 @@
   [req]
   {:status 201 :body {:id (count (str (:name (:body req))))}})
 
-(defn ^{:http/method :post :rest/path "/c/quiet" :http/auth :public
-        :rest/request [:map [:q :string]]
-        :rest/response [:map [:hits :int]]}
-  c-quiet
-  "Fixture: a body verb that declares NO `:http/effectful`.
-
-  It exists to separate the two arms of the published `:effectful?`. This one
-  is answered by the METHOD alone, which is what makes the field useful in a
-  store where nobody writes the marker — slopp's own ten endpoints declare it
-  zero times, so publishing the marker verbatim would have shipped `false`
-  everywhere and read like an answer."
-  [req]
-  {:status 200 :body {:hits (count (str (:q (:body req))))}})
-
 (defn ^{:http/method :get :http/path "/c/page" :http/auth :public}
   c-page
   "Fixture: an HTML page — CONTENT, not an api.
@@ -55,38 +41,6 @@
   so it is asked for neither."
   [_req]
   {:status 200 :body "<h1>c</h1>"})
-
-(defn ^{:http/method :get :rest/path "/c/bare" :http/auth :public
-        :rest/response [:map [:ok :boolean]]}
-  c-bare
-  [_req]
-  {:status 200 :body {:ok true}})
-
-(defn ^{:http/method :get :rest/path "/c/admin" :http/auth [:group "admin"]
-        :rest/response [:map [:secret :string]]}
-  c-admin
-  "Fixture: an endpoint only a group may call — the case `:public` cannot show."
-  [_req]
-  {:status 200 :body {:secret "s"}})
-
-(defn ^{:http/method :get :rest/path "/c/no-client" :http/auth :public
-        :rest/response [:map [:ok :boolean]]}
-  c-no-client
-  "Fixture: a REAL typed api that one consumer generates no wrapper for.
-
-  It carried `:rest/client false` for one afternoon — added to pin what the
-  flag was \"left doing\" once content became its own kind. It turned out to be
-  doing nothing legitimate. The three real instances resolved as: a base
-  problem in one client namespace serving two APIs; \"our browser does not call
-  it\", which is not the producer's business; and an endpoint answering EDN,
-  which is `:rest/media-type`.
-
-  Kept, without the flag, because the property worth pinning is the opposite
-  one: **this is published whatever any consumer wants from it.** An endpoint
-  does not know who will call it, and a document that omits one takes the
-  decision away from the consumer whose decision it is."
-  [_req]
-  {:status 200 :body {:ok true}})
 
 (deftest a-contract-publishes-the-typed-surface-and-nothing-else
   (let [doc     (rest.paths/paths-document ['slopp.rest.paths-test])
@@ -138,6 +92,12 @@
       (is (contains? (set (map :path (:paths doc))) "/c/no-client")
           "an endpoint does not know who will call it"))))
 
+(defn ^{:http/method :get :rest/path "/c/bare" :http/auth :public
+        :rest/response [:map [:ok :boolean]]}
+  c-bare
+  [_req]
+  {:status 200 :body {:ok true}})
+
 (deftest an-endpoint-says-what-it-IS-and-WHERE-it-lives
   ;; Two keys, both asked for by slopp-ui after measuring what the document
   ;; could not answer, and both derived from var METADATA — which is the whole
@@ -188,6 +148,13 @@
         (is (contains? bare :doc))
         (is (nil? (:doc bare)))))))
 
+(defn ^{:http/method :get :rest/path "/c/admin" :http/auth [:group "admin"]
+        :rest/response [:map [:secret :string]]}
+  c-admin
+  "Fixture: an endpoint only a group may call — the case `:public` cannot show."
+  [_req]
+  {:status 200 :body {:secret "s"}})
+
 (deftest an-endpoint-says-who-may-CALL-it
   ;; slopp-ui's ask, and their argument for it: `:auth` and `:effectful?` are
   ;; the two facts a reader wants BEFORE calling anything. One of them arrived
@@ -208,6 +175,39 @@
     (testing "every endpoint carries it, because the gate refuses one without"
       (is (every? #(contains? % :auth) (:paths doc))
           (pr-str (remove #(contains? % :auth) (:paths doc)))))))
+
+(defn ^{:http/method :get :rest/path "/c/no-client" :http/auth :public
+        :rest/response [:map [:ok :boolean]]}
+  c-no-client
+  "Fixture: a REAL typed api that one consumer generates no wrapper for.
+
+  It carried `:rest/client false` for one afternoon — added to pin what the
+  flag was \"left doing\" once content became its own kind. It turned out to be
+  doing nothing legitimate. The three real instances resolved as: a base
+  problem in one client namespace serving two APIs; \"our browser does not call
+  it\", which is not the producer's business; and an endpoint answering EDN,
+  which is `:rest/media-type`.
+
+  Kept, without the flag, because the property worth pinning is the opposite
+  one: **this is published whatever any consumer wants from it.** An endpoint
+  does not know who will call it, and a document that omits one takes the
+  decision away from the consumer whose decision it is."
+  [_req]
+  {:status 200 :body {:ok true}})
+
+(defn ^{:http/method :post :rest/path "/c/quiet" :http/auth :public
+        :rest/request [:map [:q :string]]
+        :rest/response [:map [:hits :int]]}
+  c-quiet
+  "Fixture: a body verb that declares NO `:http/effectful`.
+
+  It exists to separate the two arms of the published `:effectful?`. This one
+  is answered by the METHOD alone, which is what makes the field useful in a
+  store where nobody writes the marker — slopp's own ten endpoints declare it
+  zero times, so publishing the marker verbatim would have shipped `false`
+  everywhere and read like an answer."
+  [req]
+  {:status 200 :body {:hits (count (str (:q (:body req))))}})
 
 (deftest every-endpoint-carries-the-keys-a-CONSUMER-cannot-do-without
   ;; This used to be a statement about a VERSION: the field existed so a

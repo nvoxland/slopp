@@ -579,11 +579,6 @@
   (is (contains? @#'tools/read-only-tools "query_store")
       "plan mode may call it without prompts"))
 
-(use-fixtures :once
-  (fn [run]
-    (reset! @#'mcp/strict-boundary? true)
-    (try (run) (finally (reset! @#'mcp/strict-boundary? false)))))
-
 (deftest the-boundary-refuses-file-line-coordinates
   ;; agents NEVER think in files: no agent-facing response may carry a
   ;; source file:line coordinate or a :row/:col key. The strict-boundary
@@ -606,6 +601,11 @@
       (is (map? (#'mcp/text! {:form 'a.b/c :at "(defn c [])"})) "clean passes")
       (finally (reset! @#'mcp/strict-boundary? false)))))
 
+(use-fixtures :once
+  (fn [run]
+    (reset! @#'mcp/strict-boundary? true)
+    (try (run) (finally (reset! @#'mcp/strict-boundary? false)))))
+
 (deftest ^:external a-compile-failure-crosses-the-wire-anchored
   ;; drives a real compile error THROUGH the wire under the boundary audit:
   ;; the response must anchor (form + snippet) and carry NO coordinate —
@@ -619,22 +619,6 @@
         (is (re-find #"wce\.core/f" r) "the owning form is named")
         (is (re-find #"noSuchStaticThing" r) "a match-ready snippet rides")
         (is (not (re-find #"\.clj:\d" r)) "no file:line in the wire text"))
-      (finally (ops/close! sess)))))
-
-(deftest ^:external ns-create-platform-rides-the-wire
-  (let [sess (external/open!)]
-    (try
-      (testing "ns_create carries a platform on the wire — born :cljs"
-        (let [r (call! sess "ns_create"
-                       {:ns "wcw.client" :source "(ns wcw.client)\n"
-                        :platform "cljs" :prompt "browser code"})]
-          (is (not (re-find #":error" r)) r)))
-      (testing "a js/* form then lands unverified, deferred to the cljs compiler"
-        (let [r (call! sess "edit_add_form"
-                       {:ns "wcw.client" :source "(defn boom [] (js/alert \"hi\"))"
-                        :prompt "client handler"})]
-          (is (re-find #":cljs-deferred-to-compile" r) r)
-          (is (not (re-find #"form failed to compile" r)) r)))
       (finally (ops/close! sess)))))
 
 (deftest ^:external module-purity-rides-the-wire
@@ -926,34 +910,6 @@
         (is (re-find #":status :unverified" r) r)
         (is (re-find #":reason :no-covering-tests" r)
             (str "an :unverified must name its cause: " r)))
-      (finally (ops/close! sess)))))
-
-(deftest ^:external unknown-argument-is-refused
-  ;; The MCP dispatch used to DROP an unrecognised argument — a typo'd flag
-  ;; silently ran a real sweep (dry-run-is-honored-over-the-wire is the
-  ;; incident). Strict validation REFUSES an unknown key, naming it, so a flag
-  ;; cannot evaporate into the opposite of what was asked. The accepted set is
-  ;; exactly the schema: there is no alias table behind it.
-  (let [sess (external/open!)]
-    (try
-      (ops/ingest! sess 'uk.core "(ns uk.core)\n(defn f [] {:uk/target 1})\n")
-      (testing "an unknown key is refused, names itself and the accepted keys, and NOTHING runs"
-        (let [before (count (ops/journal sess))
-              r      (call! sess "rename_sweep" {:from ":uk/target"
-                                                 :to ":uk/renamed"
-                                                 :bogus true})]
-          (is (re-find #"unknown argument" r) r)
-          (is (re-find #":bogus" r) r)
-          (is (re-find #":dry_run" r) "the refusal lists the accepted keys")
-          (is (= before (count (ops/journal sess)))
-              "a refused call appends NO delta — the sweep must not run")
-          (is (re-find #":uk/target" (query/query-source sess 'uk.core))
-              "and rewrites nothing")))
-      (testing "a spelling the schema does not carry is unknown, even a once-accepted one"
-        (call! sess "ns_create" {:ns "uk2" :source "(ns uk2)\n(defn f [x] (+ x x 1))\n"})
-        (let [r (call! sess "edit_extract" {:ns "uk2" :from "f" :name "doubled"
-                                            :subform "(+ x x 1)"})]
-          (is (re-find #"unknown argument :subform" r) r)))
       (finally (ops/close! sess)))))
 
 (deftest ^:external dry-run-is-honored-over-the-wire
@@ -1385,6 +1341,22 @@
           (is (= 1 (count (re-seq #"\[a 1\]" (str src)))) src)))
       (finally (ops/close! sess)))))
 
+(deftest ^:external ns-create-platform-rides-the-wire
+  (let [sess (external/open!)]
+    (try
+      (testing "ns_create carries a platform on the wire — born :cljs"
+        (let [r (call! sess "ns_create"
+                       {:ns "wcw.client" :source "(ns wcw.client)\n"
+                        :platform "cljs" :prompt "browser code"})]
+          (is (not (re-find #":error" r)) r)))
+      (testing "a js/* form then lands unverified, deferred to the cljs compiler"
+        (let [r (call! sess "edit_add_form"
+                       {:ns "wcw.client" :source "(defn boom [] (js/alert \"hi\"))"
+                        :prompt "client handler"})]
+          (is (re-find #":cljs-deferred-to-compile" r) r)
+          (is (not (re-find #"form failed to compile" r)) r)))
+      (finally (ops/close! sess)))))
+
 (deftest a-hint-fires-only-on-the-call-that-earned-it
   (testing "a stale streak does not attach to a call that could not have earned it"
     (let [sess (atom {:slopp.mcp.smells/stats {:searches 5}})]
@@ -1401,6 +1373,34 @@
   (testing "the rename streak likewise stays on rename calls"
     (let [sess (atom {:slopp.mcp.smells/stats {:renames 4}})]
       (is (nil? (smells/track-hint! sess "query_slice" {}))))))
+
+(deftest ^:external unknown-argument-is-refused
+  ;; The MCP dispatch used to DROP an unrecognised argument — a typo'd flag
+  ;; silently ran a real sweep (dry-run-is-honored-over-the-wire is the
+  ;; incident). Strict validation REFUSES an unknown key, naming it, so a flag
+  ;; cannot evaporate into the opposite of what was asked. The accepted set is
+  ;; exactly the schema: there is no alias table behind it.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'uk.core "(ns uk.core)\n(defn f [] {:uk/target 1})\n")
+      (testing "an unknown key is refused, names itself and the accepted keys, and NOTHING runs"
+        (let [before (count (ops/journal sess))
+              r      (call! sess "rename_sweep" {:from ":uk/target"
+                                                 :to ":uk/renamed"
+                                                 :bogus true})]
+          (is (re-find #"unknown argument" r) r)
+          (is (re-find #":bogus" r) r)
+          (is (re-find #":dry_run" r) "the refusal lists the accepted keys")
+          (is (= before (count (ops/journal sess)))
+              "a refused call appends NO delta — the sweep must not run")
+          (is (re-find #":uk/target" (query/query-source sess 'uk.core))
+              "and rewrites nothing")))
+      (testing "a spelling the schema does not carry is unknown, even a once-accepted one"
+        (call! sess "ns_create" {:ns "uk2" :source "(ns uk2)\n(defn f [x] (+ x x 1))\n"})
+        (let [r (call! sess "edit_extract" {:ns "uk2" :from "f" :name "doubled"
+                                            :subform "(+ x x 1)"})]
+          (is (re-find #"unknown argument :subform" r) r)))
+      (finally (ops/close! sess)))))
 
 (deftest ^:external module-extract-dry-run-rides-the-wire
   ;; The dry-run IS the safety story: an agent reads the plan before a rename
@@ -3228,7 +3228,7 @@
         sess (external/open! {:slopp.ops/dir dir})
         GET  (fn [q] (http/handle! (server/context sess)
                                    {:request-method :get
-                                    :uri "/api/bundle"
+                                    :uri "/api/projects/demo/bundle"
                                     :query-string q}))]
     (try
       ;; ask 1 claims the session for sid-bl…
@@ -3440,8 +3440,8 @@
                                :prompt "the feature the handoff will describe"})
       (let [ctx  (server/context sess)
             ask! (fn [ask]
-                   (:body (slopp.http/handle!
-                           ctx {:request-method :get :uri "/api/bundle"
+                   (:body (http/handle!
+                           ctx {:request-method :get :uri "/api/projects/demo/bundle"
                                 :query-string (str "ask=" (java.net.URLEncoder/encode (str ask) "UTF-8"))})))]
         (testing "a handoff-shaped ask carries the composed report, marked"
           (let [txt (str (ask! "summarize what changed since the last handoff"))]
@@ -3570,8 +3570,8 @@
     (try
       (call! sess "ns_create" {:ns "cv.core" :source "(ns cv.core)\n(defn f \"F.\" [x] x)\n"})
       (let [ctx (server/context sess)
-            get! (fn [qs] (str (:body (slopp.http/handle!
-                                       ctx {:request-method :get :uri "/api/bundle"
+            get! (fn [qs] (str (:body (http/handle!
+                                       ctx {:request-method :get :uri "/api/projects/demo/bundle"
                                             :query-string qs}))))]
         (testing "cli voice: the preamble teaches the CLI verbs"
           (let [t (get! "ask=extend+f&cli=1")]
@@ -3692,8 +3692,8 @@
       (testing "the bundle carries the cards when the hook asks with diet=1"
         (swap! sess assoc :op-cards tools/op-cards)
         (let [ctx (server/context sess)
-              txt (str (:body (slopp.http/handle!
-                               ctx {:request-method :get :uri "/api/bundle"
+              txt (str (:body (http/handle!
+                               ctx {:request-method :get :uri "/api/projects/demo/bundle"
                                     :query-string "ask=extend+the+quote"})))]
           (is (re-find #"op cards" txt) txt)
           (is (re-find #"change \{prompt, \[accept\], \[commit\], \[done\], \[impl\]" txt))))
@@ -3994,8 +3994,8 @@
       (ask! "Regional fees per destination" 'ho.core "(defn ^:unused-ok region-fee \"R.\" [z] (* 100 z))")
       (ask! "Multi-parcel shipments" 'ho.core "(defn ^:unused-ok shipment \"S.\" [ps] (count ps))")
       (let [ctx (server/context sess)
-            txt (str (:body (slopp.http/handle!
-                             ctx {:request-method :get :uri "/api/bundle"
+            txt (str (:body (http/handle!
+                             ctx {:request-method :get :uri "/api/projects/demo/bundle"
                                   :query-string (str "ask=" (java.net.URLEncoder/encode
                                                                "I'm handing this project to a teammate tomorrow. Give me a factual rundown of everything that has changed here and why, from the records"
                                                                "UTF-8"))})))
@@ -4586,7 +4586,7 @@
                      " are accepted. Tests for the new behavior; every existing test stays green.")
             ctx (server/context sess)
             txt (str (:body (http/handle!
-                             ctx {:request-method :get :uri "/api/bundle"
+                             ctx {:request-method :get :uri "/api/projects/demo/bundle"
                                   :query-string (str "ask=" (java.net.URLEncoder/encode ask "UTF-8"))})))
             i   (str/index-of txt "--- the records")]
         (is i txt)

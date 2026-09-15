@@ -67,6 +67,27 @@
           (apply (get performers kind) perform-ctx args))
         nil)))
 
+(defn bounded-body-string
+  "Read up to `max-bytes` from InputStream `in` as a UTF-8 string. Returns
+  {:body s-or-nil} within the cap, or {:too-large true} the moment the
+  stream exceeds it — the request-body DoS guard both adapters share
+  (review W8: an unbounded slurp is bounded only by heap). A nil stream is
+  an empty body."
+  [in max-bytes]
+  (if (nil? in)
+    {:body nil}
+    (let [buf (java.io.ByteArrayOutputStream.)
+          arr (byte-array 8192)
+          lim (long max-bytes)]
+      (with-open [^java.io.InputStream in in]
+        (loop []
+          (let [n (.read in arr)]
+            (cond
+              (neg? n) {:body (when (pos? (.size buf))
+                                (String. (.toByteArray buf) "UTF-8"))}
+              (> (+ (.size buf) n) lim) {:too-large true}
+              :else (do (.write buf arr 0 n) (recur)))))))))
+
 (defn- decoded-input
   "Everything the caller SENT, as the handler should receive it —
   `{:value {:path-params … :query-params … :body …}}` with each carrier decoded
@@ -144,7 +165,9 @@
   Every failure is response DATA — an ex-info carrying :http/status maps to
   it and surfaces its message plus ONLY a :http/public allowlist; any other
   exception is a GENERIC 500 with the detail logged server-side, never in
-  the body (review W3)."
+  the body (review W3). The :http/resolve reduce runs INSIDE that same
+  guard, so a resolver refusing an unknown tenant with :http/status answers
+  that status exactly as a read performer would."
   [ctx req]
   ;; An UNASSEMBLED context — the input map `context` takes, handed straight
   ;; here — has no derived route table, so every path misses and every path
@@ -206,34 +229,6 @@
       (let [base (assoc req :path-params (:path-params (:value sent))
                         :query-params (:query-params (:value sent))
                         :body (:body (:value sent)))
-            ;; REQUEST-SCOPED RESOLVE. A route may declare dependencies
-            ;; resolved FROM the request into the perform-ctx before its reads
-            ;; or handler run — `{dep [kind & path]}`, a per-tenant session
-            ;; keyed on a path param, say. Resolved through the same read
-            ;; performers, folded onto the base perform-ctx for THIS request
-            ;; only: the value varies per request while the context is
-            ;; assembled once. Each resolves against the ctx the earlier ones
-            ;; produced, so one dependency can build on another; and a route
-            ;; declaring none leaves the perform-ctx exactly as it was, so no
-            ;; existing endpoint changes.
-            pctx (reduce (fn [pc [dep [kind path]]]
-                           (if-let [f (get (:http/read-performers ctx) kind)]
-                             (assoc pc dep (f pc (get-in base path)))
-                             (throw (ex-info (str "no performer for resolve kind " kind)
-                                             {:http/resolve kind}))))
-                         (:http/perform-ctx ctx)
-                         (:http/resolve row))
-            ;; DECODED IN PLACE: a handler reads :path-params, :query-params and
-            ;; :body where it always did and finds them typed — a path segment
-            ;; declared :int arrives an int. :http/deps is the REQUEST-SCOPED
-            ;; perform-ctx, so a handler receives whatever the resolve phase
-            ;; put there.
-            req' (assoc base :http/deps pctx)
-            fetch (fn [[alias [kind path]]]
-                    (if-let [f (get (:http/read-performers ctx) kind)]
-                      [alias (f pctx (get-in req' path))]
-                      (throw (ex-info (str "no performer for read kind " kind)
-                                      {:http/read kind}))))
             declared (set (:http/effects row))
             check (fn [r] (if-let [err (response-violation ctx row r)]
                             (do (.println System/err
@@ -242,7 +237,42 @@
                                 {:status 500 :body {:error "internal server error"}})
                             r))
             resp (try
-                   (let [reads (when-let [decl (:http/reads row)]
+                   (let [;; REQUEST-SCOPED RESOLVE. A route may declare
+                         ;; dependencies resolved FROM the request into the
+                         ;; perform-ctx before its reads or handler run —
+                         ;; `{dep [kind & path]}`, a per-tenant session keyed
+                         ;; on a path param, say. Resolved through the same
+                         ;; read performers, folded onto the base perform-ctx
+                         ;; for THIS request only: the value varies per request
+                         ;; while the context is assembled once. Each resolves
+                         ;; against the ctx the earlier ones produced, so one
+                         ;; dependency can build on another; and a route
+                         ;; declaring none leaves the perform-ctx exactly as it
+                         ;; was, so no existing endpoint changes. INSIDE the
+                         ;; try, so a resolver refusing with :http/status maps
+                         ;; to that status the way a read performer's throw
+                         ;; does — an unknown tenant is a clean 404, not an
+                         ;; escaped exception the adapter turns into a 500.
+                         pctx (reduce (fn [pc [dep [kind path]]]
+                                        (if-let [f (get (:http/read-performers ctx) kind)]
+                                          (assoc pc dep (f pc (get-in base path)))
+                                          (throw (ex-info (str "no performer for resolve kind " kind)
+                                                          {:http/resolve kind}))))
+                                      (:http/perform-ctx ctx)
+                                      (:http/resolve row))
+                         ;; DECODED IN PLACE: a handler reads :path-params,
+                         ;; :query-params and :body where it always did and
+                         ;; finds them typed — a path segment declared :int
+                         ;; arrives an int. :http/deps is the REQUEST-SCOPED
+                         ;; perform-ctx, so a handler receives whatever the
+                         ;; resolve phase put there.
+                         req' (assoc base :http/deps pctx)
+                         fetch (fn [[alias [kind path]]]
+                                 (if-let [f (get (:http/read-performers ctx) kind)]
+                                   [alias (f pctx (get-in req' path))]
+                                   (throw (ex-info (str "no performer for read kind " kind)
+                                                   {:http/read kind}))))
+                         reads (when-let [decl (:http/reads row)]
                                  (into {} (map fetch) decl))
                          resp  ((:handler row)
                                 (cond-> req' reads (assoc :http/reads reads)))
@@ -277,24 +307,3 @@
                                             (ex-message e)))
                              {:status 500 :body {:error "internal server error"}})))))]
         resp))))
-
-(defn bounded-body-string
-  "Read up to `max-bytes` from InputStream `in` as a UTF-8 string. Returns
-  {:body s-or-nil} within the cap, or {:too-large true} the moment the
-  stream exceeds it — the request-body DoS guard both adapters share
-  (review W8: an unbounded slurp is bounded only by heap). A nil stream is
-  an empty body."
-  [in max-bytes]
-  (if (nil? in)
-    {:body nil}
-    (let [buf (java.io.ByteArrayOutputStream.)
-          arr (byte-array 8192)
-          lim (long max-bytes)]
-      (with-open [^java.io.InputStream in in]
-        (loop []
-          (let [n (.read in arr)]
-            (cond
-              (neg? n) {:body (when (pos? (.size buf))
-                                (String. (.toByteArray buf) "UTF-8"))}
-              (> (+ (.size buf) n) lim) {:too-large true}
-              :else (do (.write buf arr 0 n) (recur)))))))))

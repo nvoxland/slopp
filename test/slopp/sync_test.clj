@@ -27,14 +27,6 @@
     (when (.isDirectory f) (run! rm-rf! (.listFiles f)))
     (.delete f)))
 
-(defn- work-repo!
-  "A NON-bare repo at `dir` — publish-local! mirrors into the checkout itself,
-   so alignment cannot be exercised against `bare-repo!`."
-  [dir]
-  (-> (Git/init) (.setInitialBranch "main")
-      (.setDirectory (io/file dir)) (.call) (.close))
-  dir)
-
 (defn- bare-repo! [dir]
   (-> (Git/init) (.setBare true) (.setInitialBranch "main")
       (.setDirectory (io/file dir)) (.call) (.close))
@@ -767,6 +759,14 @@
         (rm-rf! dir-a)
         (rm-rf! (.getParentFile (io/file dir-b)))
         (rm-rf! (.getParentFile (io/file bare)))))))
+
+(defn- work-repo!
+  "A NON-bare repo at `dir` — publish-local! mirrors into the checkout itself,
+   so alignment cannot be exercised against `bare-repo!`."
+  [dir]
+  (-> (Git/init) (.setInitialBranch "main")
+      (.setDirectory (io/file dir)) (.call) (.close))
+  dir)
 
 (deftest ^:external alignment-reads-the-branch-heads-stamp-not-a-recorded-sha
   ;; OBSERVED 2026-08-14. A commit_point minted a chain that diverged, the push

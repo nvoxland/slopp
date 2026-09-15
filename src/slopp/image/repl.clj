@@ -24,135 +24,6 @@
             ["/opt/homebrew/bin" "/usr/local/bin" "/usr/bin"])
       "clojure"))
 
-(def ^:export inherent-deps
-  "Dependencies slopp-the-tool provides to EVERY owned image for its OWN
-  features — nREPL (the image's REPL server) and malli (image-side schema
-  generative-check). NOT the project manifest (`deps_add`): never in
-  `deps_list`, never removable, versioned centrally HERE so an upgrade reaches
-  existing installs with no per-store migration, and merged into every image's
-  `-Sdeps` AFTER the manifest so slopp controls their versions. Image-tier ONLY
-  — the server/boot JVM runs on the kernel deps (root deps.edn); slopp code that
-  uses these must run in the image (feature-detected, like `slopp.kernel.rt`)."
-  '{nrepl/nrepl   {:mvn/version "1.3.1"}
-    metosin/malli {:mvn/version "0.20.1"}})
-
-(def ^:private watchdog-src
-  "Source for the parent-death watchdog thread, evaluated INSIDE the child.
-  The child's stdin is a pipe from the parent, so a daemon thread blocked on
-  System/in sees EOF the moment the parent's fds close — no shutdown hook
-  catches an abnormal parent death, but the OS closing the pipe does. The
-  install is guarded by thread NAME so it lands exactly once however many
-  surfaces run it (the launch command boards it at birth; inject-rt! re-runs
-  it as the safety net for images started with a custom :cmd)."
-  (str "(do (when-not (some #(= \"slopp-parent-watchdog\" (.getName %))"
-       " (keys (Thread/getAllStackTraces)))"
-       " (doto (Thread. (fn [] (try (while (not (neg? (.read System/in))))"
-       " (catch Throwable _)) (System/exit 0)) \"slopp-parent-watchdog\")"
-       " (.setDaemon true) (.start))) nil)"))
-
-(def ^:export default-image-jvm-opts
-  "The JVM budget every owned image launches under. Host property, never store
-  config: a store is shared by every writer and by CI, and how much memory this
-  BOX will spend on child JVMs is not a property of the code being written.
-  `SLOPP_IMAGE_JVM_OPTS` overrides it; an explicitly EMPTY value means none,
-  which is the off-arm any re-measurement needs.
-
-  **These two flags are a PAIR, and each alone is worse than neither.** That is
-  the whole reason the budget is a list with a guard rather than two settings:
-
-  | arm | committed, loaded image |
-  |---|---|
-  | neither | 722,040 / 724,763 KB |
-  | `-Xms32m` alone | +2.3% — WORSE |
-  | `-XX:+UseSerialGC` alone | ~2x — far worse still |
-  | **both** | **538,189 / 538,544 KB, −25.6%** |
-
-  Measured against a 279-namespace store, arms alternated, a full GC forced
-  before each sample, reproducible to 0.07%. The saving is not the heap alone:
-  the serial collector drops GC bookkeeping from 62 MB to 0.6 MB and takes
-  ~35 MB of collector worker stacks with it, and it sizes the heap SMALLER
-  (278 -> 192 MB) rather than larger.
-
-  Why neither works alone. `-Xms` sets the INITIAL heap, and an image that
-  loads a real store allocates past 32m before it is ready — so on its own it
-  changes nothing except to make the JVM grow into place, overshooting. And
-  Serial commits its ergonomic initial heap at startup (576 MB on the measuring
-  box) and, unlike G1, never uncommits — so on its own it holds far more than
-  G1 ever would. Told what heap to start with, it holds far less.
-
-  **Throughput was the gate and it came back clear.** Serial is
-  single-threaded, and a memory win that costs suite wall clock is not a win.
-  Twelve samples per arm of the whole in-image suite, run repeatedly inside one
-  settled image so process startup could not swamp it: median 2738 ms without,
-  2639 ms with. The difference is not significant (t~0.77) and bounds a
-  regression at about +5% at worst, with the point estimate slightly in the
-  budget's FAVOUR — and serial's spread was half G1's. Correctness was never
-  the question: every assertion passes identically, and the store holds no
-  soft or weak references for a collector change to perturb.
-
-  One honest limit: this is one store's workload. A far more allocation-heavy
-  project could find single-threaded collection costs it more, and the symptom
-  would be slower tests rather than wrong ones. That is what the override is
-  for, and it is documented where a user will meet it.
-
-  Refused, so nobody re-derives them. `-Xss1m` is noise here (one arm landed
-  ABOVE the base) and buys 2% while risking StackOverflow inside a test, which
-  is a FALSE RED. `-Xmx` appears in no winning arm at all and manufactures
-  OutOfMemoryError, the same failure. `-XX:TieredStopAtLevel=1` trades ~35 MB
-  for 2-5x on suite wall clock. `-Xshare:on` refuses to START the VM on a stale
-  archive, and a dead image is a false verdict where a slow one is not."
-  ["-XX:+UseSerialGC" "-Xms32m"])
-
-(defn ^:export image-jvm-opts
-  "The JVM budget for an owned image: `SLOPP_IMAGE_JVM_OPTS` when the host set
-  one (whitespace-separated), else `default-image-jvm-opts`.
-
-  **An explicitly EMPTY value means no budget at all**, and that is the point
-  rather than an edge case: it is the off-arm. A memory change is only worth
-  what a controlled A/B on a quiet box says it is worth, and an off-arm you
-  reach by editing code is one nobody runs. Unset and empty must therefore
-  differ — unset is the shipped budget, empty is as-shipped-before-the-budget.
-
-  `getenv` is a parameter rather than a read, because the process environment
-  is state a test cannot set, and a precedence rule nobody can exercise is one
-  that drifts."
-  [getenv]
-  (if-let [override (getenv "SLOPP_IMAGE_JVM_OPTS")]
-    (vec (re-seq #"\S+" override))
-    default-image-jvm-opts))
-
-(defn- default-cmd
-  "The target image launch command: Clojure + nREPL, plus the store's external
-  dependency manifest (`deps`, lib→coord) merged into `-Sdeps` so store code
-  that requires those libs compiles (trust Tier 1). `inherent-deps` (nREPL,
-  malli) are merged LAST so slopp-the-tool's own image deps are always present
-  at slopp's versions — regardless of the project manifest.
-
-  The parent-death watchdog rides `-e` (a clojure.main INIT opt, so it runs
-  before `-m` starts nREPL): the child can never exist without its reaper,
-  closing the boot-window orphan class — a parent killed between spawn and
-  nREPL connect used to leave a JVM nothing would ever reap.
-
-  The memory budget rides `-J` opts, and their PLACEMENT is load-bearing:
-  `-J` is a clj-opt, collected by the launcher only from the part of the
-  command line before `-M`. The same strings after `-M` are handed to the
-  program as arguments and never reach the JVM — a budget that silently does
-  nothing, which is worse than none because it MEASURES as no effect. They go
-  first, ahead of everything.
-
-  `opts` is an argument in the third arity because the shipped budget is empty
-  (see [[default-image-jvm-opts]]): the placement rule above still has to be
-  provable, and a rule that can only be exercised when someone happens to have
-  configured a budget is one that breaks the day someone does."
-  ([] (default-cmd nil))
-  ([deps] (default-cmd deps (image-jvm-opts #(System/getenv %))))
-  ([deps opts]
-   (-> [clojure-bin]
-       (into (map #(str "-J" %)) opts)
-       (into ["-Sdeps"
-              (pr-str {:deps (merge deps inherent-deps)})
-              "-M" "-e" watchdog-src "-m" "nrepl.cmdline"]))))
-
 (defn- temp-dir []
   (str (Files/createTempDirectory "slopp-image" (make-array FileAttribute 0))))
 
@@ -240,6 +111,86 @@
                   (str " nREPL status: " (str/join ", " st) "."))
                 " `restart` builds a fresh image.")])))))
 
+(defn ^:export stop!
+  "Destroy the image subprocess and release its connection. `image` is the
+  opaque handle from `start!` — see `eval!` for why it is not destructured.
+  Tolerates a partially-built or foreign-shaped handle: each resource is
+  released only if present, which is what lets `restart!` rebuild from a
+  broken one.
+
+  The PROCESS goes first: closing a broken transport can throw, and a throw
+  must never save the child. destroyForcibly backs the 5s graceful window."
+  [image]
+  (when-let [^Process process (:process image)]
+    (.destroy process)
+    (when-not (.waitFor process 5 TimeUnit/SECONDS)
+      (.destroyForcibly process)))
+  (when-let [^java.io.Closeable conn (:conn image)]
+    (try (.close conn) (catch Exception _)))
+  nil)
+
+(def ^:export inherent-deps
+  "Dependencies slopp-the-tool provides to EVERY owned image for its OWN
+  features — nREPL (the image's REPL server) and malli (image-side schema
+  generative-check). NOT the project manifest (`deps_add`): never in
+  `deps_list`, never removable, versioned centrally HERE so an upgrade reaches
+  existing installs with no per-store migration, and merged into every image's
+  `-Sdeps` AFTER the manifest so slopp controls their versions. Image-tier ONLY
+  — the server/boot JVM runs on the kernel deps (root deps.edn); slopp code that
+  uses these must run in the image (feature-detected, like `slopp.kernel.rt`)."
+  '{nrepl/nrepl   {:mvn/version "1.3.1"}
+    metosin/malli {:mvn/version "0.20.1"}})
+
+(def ^:private watchdog-src
+  "Source for the parent-death watchdog thread, evaluated INSIDE the child.
+  The child's stdin is a pipe from the parent, so a daemon thread blocked on
+  System/in sees EOF the moment the parent's fds close — no shutdown hook
+  catches an abnormal parent death, but the OS closing the pipe does. The
+  install is guarded by thread NAME so it lands exactly once however many
+  surfaces run it (the launch command boards it at birth; inject-rt! re-runs
+  it as the safety net for images started with a custom :cmd)."
+  (str "(do (when-not (some #(= \"slopp-parent-watchdog\" (.getName %))"
+       " (keys (Thread/getAllStackTraces)))"
+       " (doto (Thread. (fn [] (try (while (not (neg? (.read System/in))))"
+       " (catch Throwable _)) (System/exit 0)) \"slopp-parent-watchdog\")"
+       " (.setDaemon true) (.start))) nil)"))
+
+(defn- benign-load-noise?
+  "True when a `load-file` stderr chunk carries ONLY compiler noise — var-shadow
+  `WARNING:`s (e.g. garden.color's `abs` re-refer) or reflection warnings — and
+  no genuine failure. nREPL reports a real load failure via an `eval-error`
+  STATUS (which load-checked! collects separately), so warning-only stderr must
+  not be counted as an error (friction #9: garden's benign warning surfaced as a
+  restart-load ERROR that obscured every red diagnosis)."
+  [chunk]
+  (let [lines (remove str/blank? (str/split-lines (str chunk)))]
+    (boolean
+     (and (seq lines)
+          (every? #(or (str/starts-with? % "WARNING:")
+                       (str/starts-with? % "Reflection warning"))
+                  lines)))))
+
+^:unsafe (defn ^:export load-checked!
+  "Like `load!` but surfaces evaluation failures instead of silently dropping
+  them (T4 — a failed load must never leave the store and image out of step).
+  Returns {:values [...]} or {:err msg}. `image` is the opaque handle — see
+  `eval!` for why it is not destructured."
+  [image src path]
+  (let [msgs (doall (nrepl/message
+                     (:client image)
+                     {:op "load-file" :file src :file-path path
+                      :file-name (subs path (inc (or (str/last-index-of path "/") -1)))
+                      :session (:session image)}))
+        errs (concat (remove benign-load-noise? (keep :err msgs))
+                     (mapcat (fn [m]
+                               (when (some #{"eval-error"} (:status m))
+                                 [(or (:ex m) "eval-error")]))
+                             msgs))]
+    (if (seq errs)
+      {:err (str/trim (str/join " " (distinct errs)))}
+      {:values (->> msgs (keep :value)
+                    (mapv (fn [v] (try (read-string v) (catch Exception _ v)))))})))
+
 ^:unsafe (defn- eval-outcome
   "Classify a completed nREPL eval's messages: `{:values [...]}` (plus
    `:stderr` when the eval WROTE to stderr without failing) or `{:err msg}`.
@@ -278,103 +229,75 @@
    (doall (nrepl/message (:client image) {:op "eval" :code code
                                           :session (:session image)}))))
 
-(defn- add-libs-code
-  "The form the IMAGE evaluates to hot-add `deps-map` — a value, so what it
-  does is checkable without spawning a JVM.
+(defonce ^{:ambient-ok "process-global by necessity: an image is an OS
+  subprocess, so the pool of reusable ones is a property of this JVM and not
+  of any session. Bounded, and every path that cannot prove an image clean
+  destroys it instead of adding it here."}
+  parked
+  (atom []))
 
-  It seeds repositories first, and only when there are none. `add-libs` builds
-  its Maven procurer from the basis, and with none it has nowhere to look —
-  Maven then refuses even artifacts already in `~/.m2` that it cannot
-  attribute to a configured repository.
+(def ^:export recycle-limits
+  "The two bounds on image reuse, and why each exists.
 
-  CORRECTED: this used to say the image has no basis, just like a `java -jar`
-  host. It does have one. The default image is `clojure -Sdeps … -M`, which
-  the CLI starts with a real basis — measured through a live oracle: both
-  standard repos, and every resolved lib of the store's manifest. So the seed
-  is a no-op on the path that actually runs. What earns it a place is the
-  other one: `start!` accepts a custom `:cmd`, and an image launched as a bare
-  `java -cp … clojure.main` has no basis at all. Guarded, it costs nothing and
-  covers that case; the reason first given for it was simply not true.
+  `:parked` — how many reset images may idle at once. TWO, and the reasoning
+  for one was wrong. Parking does trade a reaped JVM for a held one, and that
+  memory is spent against every concurrent shard at the same time — four
+  shards holding two apiece is eight extra JVMs. But sessions inside a shard
+  OVERLAP more than the sequential picture suggests: a test that opens a
+  second session, a branch line. At depth one every overlap becomes a
+  destroyed image and a fresh boot, and it measured slower. The dead shard
+  that prompted the experiment did not recur at either depth, so it was load
+  rather than pressure.
 
-  This bites a USER's store harder than slopp's own, where the host uberjar
-  happens to carry every declared lib and the failures were therefore
-  invisible. Nothing of a user's manifest comes from slopp's jar.
+  `:reuses` — how many tenants one image may serve. `reset-to-baseline!`
+  verifies the NAMESPACE SET and nothing beyond it, so anything outside that
+  view — a thread a tenant started, a system property it set, a shutdown hook
+  it registered — accumulates unseen. The cap turns an unbounded slow leak
+  into a bounded one, which is the difference between a wrong answer someday
+  and a slightly slower suite.
 
-  `slopp.kernel.boot/ensure-repos!` is CALLED, not restated, so the host and the
-  image cannot come to disagree about where artifacts live."
-  [deps-map]
-  (str "(do (require 'clojure.repl.deps 'clojure.java.basis"
-       " 'clojure.java.basis.impl)"
-       " (when-not (seq (:mvn/repos (clojure.java.basis/current-basis)))"
-       " (clojure.java.basis.impl/update-basis! merge {:mvn/repos "
-       (pr-str boot/default-repos) "}))"
-       " (intern 'user 'slopp-image-dirty true)"
-       " (clojure.repl.deps/add-libs '" (pr-str deps-map) ")"
-       " (ns-unmap 'user 'slopp-image-dirty))"))
+  Both numbers are chosen against a NOISY signal: this box is shared, and
+  Full runs have measured 172–287s under other
+  load. Re-measure before retuning either, and take a single A/B pair as
+  suggestive rather than settled."
+  {:parked 2 :reuses 50})
 
-(defn ^:export add-libs!
-  "Hot-add dependency coords (`deps-map`, lib→coord) to the RUNNING image via
-  Clojure 1.12 `clojure.repl.deps/add-libs` — no restart. Idempotent for
-  already-present coords (so it also reconciles an adopted bare spare).
-  Returns nil on success, or {:err msg} so the caller can fall back to a
-  fresh image (a jar can't be unloaded, so removes/downgrades never hot-apply).
+^:unsafe (defn ^:export unpark!
+  "Take a reset image whose classpath is `deps`, or NIL when the pool holds
+  none — in which case the caller boots for real, exactly as it always did.
 
-  Marks the image dirty BEFORE adding and clears it on clean success, so
-  `dirty` means exactly one thing: **this image's classpath is UNKNOWN.** An
-  add that threw halfway leaves the mark, and an image whose classpath cannot
-  be named can never be pooled — there is no honest key for it.
+  The key must MATCH, not merely be compatible: a jar cannot be removed from a
+  running image, so an image carrying more than the caller asked for is not
+  the environment the caller requested. Equality is the only safe comparison,
+  and a miss costs nothing but the boot that would have happened anyway.
 
-  A SUCCESSFUL add is not dirty, because the classpath is then precisely the
-  caller's `deps-map` and `park!` keys the pool by it. Treating any dependency
-  as permanently un-recyclable was the first design, and it meant reuse only
-  ever helped stores with no deps at all.
+  Every parked image was verified back to its boot baseline BEFORE it was
+  parked, so this hands over something already proven rather than something
+  about to be checked."
+  ([] (unpark! {}))
+  ([deps]
+   (when (nil? (System/getenv "SLOPP_NO_RECYCLE"))
+     (let [want (or deps {})
+           [old] (swap-vals! parked
+                             (fn [v]
+                               (if-let [i (first (keep-indexed
+                                                  #(when (= want (:deps %2)) %1) v))]
+                                 (into (subvec v 0 i) (subvec v (inc i)))
+                                 v)))]
+       (some #(when (= want (:deps %)) (:image %)) old)))))
 
-  The mark lives in `user`, which is part of every baseline and so survives
-  the namespace sweep — it outlives the thing that would otherwise erase it.
-  An earlier attempt inferred this from the classloader instead and silently
-  MISSED, because nREPL does not mutate the loader `.getURLs` reads."
-  [handle deps-map]
-  (when (seq deps-map)
-    (let [r (eval-checked!
-             handle
-             (add-libs-code deps-map))]
-      (when (:err r) r))))
+^:unsafe (defn ^:export drain-parked!
+  "Stop every parked image and empty the pool. For shutdown, and for any test
+  that needs to reason about a cold pool — a parked image is still a JVM
+  subprocess, and an unreaped one is a leaked JVM.
 
-(defn- benign-load-noise?
-  "True when a `load-file` stderr chunk carries ONLY compiler noise — var-shadow
-  `WARNING:`s (e.g. garden.color's `abs` re-refer) or reflection warnings — and
-  no genuine failure. nREPL reports a real load failure via an `eval-error`
-  STATUS (which load-checked! collects separately), so warning-only stderr must
-  not be counted as an error (friction #9: garden's benign warning surfaced as a
-  restart-load ERROR that obscured every red diagnosis)."
-  [chunk]
-  (let [lines (remove str/blank? (str/split-lines (str chunk)))]
-    (boolean
-     (and (seq lines)
-          (every? #(or (str/starts-with? % "WARNING:")
-                       (str/starts-with? % "Reflection warning"))
-                  lines)))))
-
-^:unsafe (defn ^:export load-checked!
-  "Like `load!` but surfaces evaluation failures instead of silently dropping
-  them (T4 — a failed load must never leave the store and image out of step).
-  Returns {:values [...]} or {:err msg}. `image` is the opaque handle — see
-  `eval!` for why it is not destructured."
-  [image src path]
-  (let [msgs (doall (nrepl/message
-                     (:client image)
-                     {:op "load-file" :file src :file-path path
-                      :file-name (subs path (inc (or (str/last-index-of path "/") -1)))
-                      :session (:session image)}))
-        errs (concat (remove benign-load-noise? (keep :err msgs))
-                     (mapcat (fn [m]
-                               (when (some #{"eval-error"} (:status m))
-                                 [(or (:ex m) "eval-error")]))
-                             msgs))]
-    (if (seq errs)
-      {:err (str/trim (str/join " " (distinct errs)))}
-      {:values (->> msgs (keep :value)
-                    (mapv (fn [v] (try (read-string v) (catch Exception _ v)))))})))
+  Not required for correctness on abnormal death: every image carries the
+  parent-death watchdog, so a parked one dies with this process even on
+  SIGKILL. This is the tidy path, not the safety net."
+  []
+  (doseq [img (first (swap-vals! parked (constantly [])))]
+    (try (stop! img) (catch Throwable _ nil)))
+  nil)
 
 (def ^:export dirty-probe
   "The expression that asks an image whether it can still be recycled —
@@ -439,60 +362,6 @@
                            (catch Throwable _ nil)))]
     (eval! handle "(in-ns 'user)")
     handle))
-
-(defn ^:export ^{:live-handle true
-        :malli/schema
-        [:=> {:throws [[:map [:pid {:optional true} [:maybe :int]]]]}
-              [:cat [:? [:map
-                        [:slopp.image.repl/cmd {:optional true} [:maybe [:sequential :string]]]
-                        [:slopp.image.repl/dir {:optional true} [:maybe :some]]
-                        [:slopp.image.repl/timeout-ms {:optional true} :int]
-                        [:slopp.image.repl/deps {:optional true} [:maybe :map]]]]]
-         :map]}
-  start!
-  "Launch a fresh owned image (with slopp.kernel.rt support loaded); returns a handle
-  for eval!/restart!/stop!.
-
-  The OPTION map is a caller-built contract, so its keys are qualified —
-  unlike the handle this returns, whose keys are internal and read in the
-  body by `eval!`/`stop!` rather than destructured at any boundary.
-
-  `:currency` is the image's own record of what it has loaded, minted HERE so
-  every handle carries one from birth. It used to be a process-global atom,
-  which meant the question \"does the image hold this form's current source\"
-  had an implied subject and a second image had to be kept out by every
-  caller choosing a non-stamping loader.
-
-  Any throw after the spawn (port timeout, connect failure, rt load) DESTROYS
-  the child before rethrowing — with a custom :cmd the watchdog may not be
-  aboard yet, and an abandoned nrepl JVM outlives even parent death. The
-  ex-info carries the child :pid so the cleanup is verifiable.
-
-  The `:=>` schema is DOCUMENTATION here, not a verified claim: this fn
-  spawns a JVM, so `analyzer-pure?` excludes it from the generative
-  oracle-check. Nothing will catch it drifting from the impl — keep it
-  honest by hand."
-  ([] (start! {}))
-  ([{:slopp.image.repl/keys [cmd dir timeout-ms deps] :or {timeout-ms 60000}}]
-   (let [cmd (or cmd (default-cmd deps))
-         dir (or dir (temp-dir))
-         pb  (doto (ProcessBuilder. ^java.util.List cmd)
-               (.redirectErrorStream true)
-               (.directory (io/file dir)))
-         proc (.start pb)]
-     (try
-       (let [rdr  (io/reader (.getInputStream proc))
-             port (read-port rdr timeout-ms)
-             conn (nrepl/connect :port port)
-             client (nrepl/client conn 30000)
-             session (nrepl/new-session client)]
-         (inject-rt! {:process proc :port port :conn conn :client client
-                      :session session :reader rdr :dir dir
-                      :currency (image.currency/new-registry)}))
-       (catch Throwable t
-         (.destroyForcibly proc)
-         (throw (ex-info (str "image boot failed: " (ex-message t))
-                         {:pid (.pid proc)} t)))))))
 
 ^:unsafe (defn ^:export reset-to-baseline!
   "Return `image` to the state it recorded at boot, so the next tenant gets it
@@ -597,94 +466,6 @@
               image))))
       (catch Throwable _ nil))))
 
-(defonce ^{:ambient-ok "process-global by necessity: an image is an OS
-  subprocess, so the pool of reusable ones is a property of this JVM and not
-  of any session. Bounded, and every path that cannot prove an image clean
-  destroys it instead of adding it here."}
-  parked
-  (atom []))
-
-(def ^:export recycle-limits
-  "The two bounds on image reuse, and why each exists.
-
-  `:parked` — how many reset images may idle at once. TWO, and the reasoning
-  for one was wrong. Parking does trade a reaped JVM for a held one, and that
-  memory is spent against every concurrent shard at the same time — four
-  shards holding two apiece is eight extra JVMs. But sessions inside a shard
-  OVERLAP more than the sequential picture suggests: a test that opens a
-  second session, a branch line. At depth one every overlap becomes a
-  destroyed image and a fresh boot, and it measured slower. The dead shard
-  that prompted the experiment did not recur at either depth, so it was load
-  rather than pressure.
-
-  `:reuses` — how many tenants one image may serve. `reset-to-baseline!`
-  verifies the NAMESPACE SET and nothing beyond it, so anything outside that
-  view — a thread a tenant started, a system property it set, a shutdown hook
-  it registered — accumulates unseen. The cap turns an unbounded slow leak
-  into a bounded one, which is the difference between a wrong answer someday
-  and a slightly slower suite.
-
-  Both numbers are chosen against a NOISY signal: this box is shared, and
-  Full runs have measured 172–287s under other
-  load. Re-measure before retuning either, and take a single A/B pair as
-  suggestive rather than settled."
-  {:parked 2 :reuses 50})
-
-^:unsafe (defn ^:export unpark!
-  "Take a reset image whose classpath is `deps`, or NIL when the pool holds
-  none — in which case the caller boots for real, exactly as it always did.
-
-  The key must MATCH, not merely be compatible: a jar cannot be removed from a
-  running image, so an image carrying more than the caller asked for is not
-  the environment the caller requested. Equality is the only safe comparison,
-  and a miss costs nothing but the boot that would have happened anyway.
-
-  Every parked image was verified back to its boot baseline BEFORE it was
-  parked, so this hands over something already proven rather than something
-  about to be checked."
-  ([] (unpark! {}))
-  ([deps]
-   (when (nil? (System/getenv "SLOPP_NO_RECYCLE"))
-     (let [want (or deps {})
-           [old] (swap-vals! parked
-                             (fn [v]
-                               (if-let [i (first (keep-indexed
-                                                  #(when (= want (:deps %2)) %1) v))]
-                                 (into (subvec v 0 i) (subvec v (inc i)))
-                                 v)))]
-       (some #(when (= want (:deps %)) (:image %)) old)))))
-
-(defn ^:export stop!
-  "Destroy the image subprocess and release its connection. `image` is the
-  opaque handle from `start!` — see `eval!` for why it is not destructured.
-  Tolerates a partially-built or foreign-shaped handle: each resource is
-  released only if present, which is what lets `restart!` rebuild from a
-  broken one.
-
-  The PROCESS goes first: closing a broken transport can throw, and a throw
-  must never save the child. destroyForcibly backs the 5s graceful window."
-  [image]
-  (when-let [^Process process (:process image)]
-    (.destroy process)
-    (when-not (.waitFor process 5 TimeUnit/SECONDS)
-      (.destroyForcibly process)))
-  (when-let [^java.io.Closeable conn (:conn image)]
-    (try (.close conn) (catch Exception _)))
-  nil)
-
-^:unsafe (defn ^:export drain-parked!
-  "Stop every parked image and empty the pool. For shutdown, and for any test
-  that needs to reason about a cold pool — a parked image is still a JVM
-  subprocess, and an unreaped one is a leaked JVM.
-
-  Not required for correctness on abnormal death: every image carries the
-  parent-death watchdog, so a parked one dies with this process even on
-  SIGKILL. This is the tidy path, not the safety net."
-  []
-  (doseq [img (first (swap-vals! parked (constantly [])))]
-    (try (stop! img) (catch Throwable _ nil)))
-  nil)
-
 ^:unsafe (defn ^:export park!
   "Offer `image` for reuse under `deps` — the classpath it carries — instead of
   destroying it. Returns true when it was parked, false when it was stopped,
@@ -720,6 +501,225 @@
                              :image (update image :reuses (fnil inc 0))})
          true)
      (do (stop! image) false))))
+
+(defn- add-libs-code
+  "The form the IMAGE evaluates to hot-add `deps-map` — a value, so what it
+  does is checkable without spawning a JVM.
+
+  It seeds repositories first, and only when there are none. `add-libs` builds
+  its Maven procurer from the basis, and with none it has nowhere to look —
+  Maven then refuses even artifacts already in `~/.m2` that it cannot
+  attribute to a configured repository.
+
+  CORRECTED: this used to say the image has no basis, just like a `java -jar`
+  host. It does have one. The default image is `clojure -Sdeps … -M`, which
+  the CLI starts with a real basis — measured through a live oracle: both
+  standard repos, and every resolved lib of the store's manifest. So the seed
+  is a no-op on the path that actually runs. What earns it a place is the
+  other one: `start!` accepts a custom `:cmd`, and an image launched as a bare
+  `java -cp … clojure.main` has no basis at all. Guarded, it costs nothing and
+  covers that case; the reason first given for it was simply not true.
+
+  This bites a USER's store harder than slopp's own, where the host uberjar
+  happens to carry every declared lib and the failures were therefore
+  invisible. Nothing of a user's manifest comes from slopp's jar.
+
+  `slopp.kernel.boot/ensure-repos!` is CALLED, not restated, so the host and the
+  image cannot come to disagree about where artifacts live."
+  [deps-map]
+  (str "(do (require 'clojure.repl.deps 'clojure.java.basis"
+       " 'clojure.java.basis.impl)"
+       " (when-not (seq (:mvn/repos (clojure.java.basis/current-basis)))"
+       " (clojure.java.basis.impl/update-basis! merge {:mvn/repos "
+       (pr-str boot/default-repos) "}))"
+       " (intern 'user 'slopp-image-dirty true)"
+       " (clojure.repl.deps/add-libs '" (pr-str deps-map) ")"
+       " (ns-unmap 'user 'slopp-image-dirty))"))
+
+(defn ^:export add-libs!
+  "Hot-add dependency coords (`deps-map`, lib→coord) to the RUNNING image via
+  Clojure 1.12 `clojure.repl.deps/add-libs` — no restart. Idempotent for
+  already-present coords (so it also reconciles an adopted bare spare).
+  Returns nil on success, or {:err msg} so the caller can fall back to a
+  fresh image (a jar can't be unloaded, so removes/downgrades never hot-apply).
+
+  Marks the image dirty BEFORE adding and clears it on clean success, so
+  `dirty` means exactly one thing: **this image's classpath is UNKNOWN.** An
+  add that threw halfway leaves the mark, and an image whose classpath cannot
+  be named can never be pooled — there is no honest key for it.
+
+  A SUCCESSFUL add is not dirty, because the classpath is then precisely the
+  caller's `deps-map` and `park!` keys the pool by it. Treating any dependency
+  as permanently un-recyclable was the first design, and it meant reuse only
+  ever helped stores with no deps at all.
+
+  The mark lives in `user`, which is part of every baseline and so survives
+  the namespace sweep — it outlives the thing that would otherwise erase it.
+  An earlier attempt inferred this from the classloader instead and silently
+  MISSED, because nREPL does not mutate the loader `.getURLs` reads."
+  [handle deps-map]
+  (when (seq deps-map)
+    (let [r (eval-checked!
+             handle
+             (add-libs-code deps-map))]
+      (when (:err r) r))))
+
+(def ^:export default-image-jvm-opts
+  "The JVM budget every owned image launches under. Host property, never store
+  config: a store is shared by every writer and by CI, and how much memory this
+  BOX will spend on child JVMs is not a property of the code being written.
+  `SLOPP_IMAGE_JVM_OPTS` overrides it; an explicitly EMPTY value means none,
+  which is the off-arm any re-measurement needs.
+
+  **These two flags are a PAIR, and each alone is worse than neither.** That is
+  the whole reason the budget is a list with a guard rather than two settings:
+
+  | arm | committed, loaded image |
+  |---|---|
+  | neither | 722,040 / 724,763 KB |
+  | `-Xms32m` alone | +2.3% — WORSE |
+  | `-XX:+UseSerialGC` alone | ~2x — far worse still |
+  | **both** | **538,189 / 538,544 KB, −25.6%** |
+
+  Measured against a 279-namespace store, arms alternated, a full GC forced
+  before each sample, reproducible to 0.07%. The saving is not the heap alone:
+  the serial collector drops GC bookkeeping from 62 MB to 0.6 MB and takes
+  ~35 MB of collector worker stacks with it, and it sizes the heap SMALLER
+  (278 -> 192 MB) rather than larger.
+
+  Why neither works alone. `-Xms` sets the INITIAL heap, and an image that
+  loads a real store allocates past 32m before it is ready — so on its own it
+  changes nothing except to make the JVM grow into place, overshooting. And
+  Serial commits its ergonomic initial heap at startup (576 MB on the measuring
+  box) and, unlike G1, never uncommits — so on its own it holds far more than
+  G1 ever would. Told what heap to start with, it holds far less.
+
+  **Throughput was the gate and it came back clear.** Serial is
+  single-threaded, and a memory win that costs suite wall clock is not a win.
+  Twelve samples per arm of the whole in-image suite, run repeatedly inside one
+  settled image so process startup could not swamp it: median 2738 ms without,
+  2639 ms with. The difference is not significant (t~0.77) and bounds a
+  regression at about +5% at worst, with the point estimate slightly in the
+  budget's FAVOUR — and serial's spread was half G1's. Correctness was never
+  the question: every assertion passes identically, and the store holds no
+  soft or weak references for a collector change to perturb.
+
+  One honest limit: this is one store's workload. A far more allocation-heavy
+  project could find single-threaded collection costs it more, and the symptom
+  would be slower tests rather than wrong ones. That is what the override is
+  for, and it is documented where a user will meet it.
+
+  Refused, so nobody re-derives them. `-Xss1m` is noise here (one arm landed
+  ABOVE the base) and buys 2% while risking StackOverflow inside a test, which
+  is a FALSE RED. `-Xmx` appears in no winning arm at all and manufactures
+  OutOfMemoryError, the same failure. `-XX:TieredStopAtLevel=1` trades ~35 MB
+  for 2-5x on suite wall clock. `-Xshare:on` refuses to START the VM on a stale
+  archive, and a dead image is a false verdict where a slow one is not."
+  ["-XX:+UseSerialGC" "-Xms32m"])
+
+(defn ^:export image-jvm-opts
+  "The JVM budget for an owned image: `SLOPP_IMAGE_JVM_OPTS` when the host set
+  one (whitespace-separated), else `default-image-jvm-opts`.
+
+  **An explicitly EMPTY value means no budget at all**, and that is the point
+  rather than an edge case: it is the off-arm. A memory change is only worth
+  what a controlled A/B on a quiet box says it is worth, and an off-arm you
+  reach by editing code is one nobody runs. Unset and empty must therefore
+  differ — unset is the shipped budget, empty is as-shipped-before-the-budget.
+
+  `getenv` is a parameter rather than a read, because the process environment
+  is state a test cannot set, and a precedence rule nobody can exercise is one
+  that drifts."
+  [getenv]
+  (if-let [override (getenv "SLOPP_IMAGE_JVM_OPTS")]
+    (vec (re-seq #"\S+" override))
+    default-image-jvm-opts))
+
+(defn- default-cmd
+  "The target image launch command: Clojure + nREPL, plus the store's external
+  dependency manifest (`deps`, lib→coord) merged into `-Sdeps` so store code
+  that requires those libs compiles (trust Tier 1). `inherent-deps` (nREPL,
+  malli) are merged LAST so slopp-the-tool's own image deps are always present
+  at slopp's versions — regardless of the project manifest.
+
+  The parent-death watchdog rides `-e` (a clojure.main INIT opt, so it runs
+  before `-m` starts nREPL): the child can never exist without its reaper,
+  closing the boot-window orphan class — a parent killed between spawn and
+  nREPL connect used to leave a JVM nothing would ever reap.
+
+  The memory budget rides `-J` opts, and their PLACEMENT is load-bearing:
+  `-J` is a clj-opt, collected by the launcher only from the part of the
+  command line before `-M`. The same strings after `-M` are handed to the
+  program as arguments and never reach the JVM — a budget that silently does
+  nothing, which is worse than none because it MEASURES as no effect. They go
+  first, ahead of everything.
+
+  `opts` is an argument in the third arity because the shipped budget is empty
+  (see [[default-image-jvm-opts]]): the placement rule above still has to be
+  provable, and a rule that can only be exercised when someone happens to have
+  configured a budget is one that breaks the day someone does."
+  ([] (default-cmd nil))
+  ([deps] (default-cmd deps (image-jvm-opts #(System/getenv %))))
+  ([deps opts]
+   (-> [clojure-bin]
+       (into (map #(str "-J" %)) opts)
+       (into ["-Sdeps"
+              (pr-str {:deps (merge deps inherent-deps)})
+              "-M" "-e" watchdog-src "-m" "nrepl.cmdline"]))))
+
+(defn ^:export ^{:live-handle true
+        :malli/schema
+        [:=> {:throws [[:map [:pid {:optional true} [:maybe :int]]]]}
+              [:cat [:? [:map
+                        [:slopp.image.repl/cmd {:optional true} [:maybe [:sequential :string]]]
+                        [:slopp.image.repl/dir {:optional true} [:maybe :some]]
+                        [:slopp.image.repl/timeout-ms {:optional true} :int]
+                        [:slopp.image.repl/deps {:optional true} [:maybe :map]]]]]
+         :map]}
+  start!
+  "Launch a fresh owned image (with slopp.kernel.rt support loaded); returns a handle
+  for eval!/restart!/stop!.
+
+  The OPTION map is a caller-built contract, so its keys are qualified —
+  unlike the handle this returns, whose keys are internal and read in the
+  body by `eval!`/`stop!` rather than destructured at any boundary.
+
+  `:currency` is the image's own record of what it has loaded, minted HERE so
+  every handle carries one from birth. It used to be a process-global atom,
+  which meant the question \"does the image hold this form's current source\"
+  had an implied subject and a second image had to be kept out by every
+  caller choosing a non-stamping loader.
+
+  Any throw after the spawn (port timeout, connect failure, rt load) DESTROYS
+  the child before rethrowing — with a custom :cmd the watchdog may not be
+  aboard yet, and an abandoned nrepl JVM outlives even parent death. The
+  ex-info carries the child :pid so the cleanup is verifiable.
+
+  The `:=>` schema is DOCUMENTATION here, not a verified claim: this fn
+  spawns a JVM, so `analyzer-pure?` excludes it from the generative
+  oracle-check. Nothing will catch it drifting from the impl — keep it
+  honest by hand."
+  ([] (start! {}))
+  ([{:slopp.image.repl/keys [cmd dir timeout-ms deps] :or {timeout-ms 60000}}]
+   (let [cmd (or cmd (default-cmd deps))
+         dir (or dir (temp-dir))
+         pb  (doto (ProcessBuilder. ^java.util.List cmd)
+               (.redirectErrorStream true)
+               (.directory (io/file dir)))
+         proc (.start pb)]
+     (try
+       (let [rdr  (io/reader (.getInputStream proc))
+             port (read-port rdr timeout-ms)
+             conn (nrepl/connect :port port)
+             client (nrepl/client conn 30000)
+             session (nrepl/new-session client)]
+         (inject-rt! {:process proc :port port :conn conn :client client
+                      :session session :reader rdr :dir dir
+                      :currency (image.currency/new-registry)}))
+       (catch Throwable t
+         (.destroyForcibly proc)
+         (throw (ex-info (str "image boot failed: " (ex-message t))
+                         {:pid (.pid proc)} t)))))))
 
 (defn restart!
   "Stop the image and start a fresh one (the D5 correctness backstop). Returns a

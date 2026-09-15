@@ -557,13 +557,27 @@
   ;; validator. The one hand-written thing is the static mount, which is what
   ;; a mount is — a tree of files, not a declaration — and it is the same
   ;; `mount-routes` every project's app server uses.
-  (let [declared (routes/from-namespaces ['slopp.daemon 'slopp.ui.shell 'slopp.ui.styles])
+  ;;
+  ;; Since the one-surface collapse the project read API is FIRST-CLASS here:
+  ;; the 15 `/api/projects/:slug/<resource>` routes are declared by
+  ;; `slopp.api.endpoints` and served from this one context, not delegated
+  ;; into a per-project mount. So `declared` covers those namespaces too.
+  (let [declared (routes/from-namespaces ['slopp.daemon 'slopp.ui.shell 'slopp.ui.styles
+                                          'slopp.api.endpoints 'slopp.api.reads])
         served   (:http/routes (daemon/context))
         mounted  (filter #(str/starts-with? (:path %) "/assets/") served)]
     (is (= #{"/api/projects" "/api/status"
              "/api/projects/:slug/mcp" "/api/projects/:slug/call"
              "/api/projects/:slug/cli" "/api/projects/:slug/hook"
-             "/api/projects/:slug/**" "/api/otel/v1/logs"
+             "/api/otel/v1/logs"
+             "/api/projects/:slug/namespaces" "/api/projects/:slug/ns/:ns"
+             "/api/projects/:slug/timeline" "/api/projects/:slug/change/:range"
+             "/api/projects/:slug/form/:id" "/api/projects/:slug/source/:ns/:name"
+             "/api/projects/:slug/modules" "/api/projects/:slug/module/:m"
+             "/api/projects/:slug/search" "/api/projects/:slug/bundle"
+             "/api/projects/:slug/cost" "/api/projects/:slug/rest/paths"
+             "/api/projects/:slug/http/paths" "/api/projects/:slug/webapp/paths"
+             "/api/projects/:slug/config"
              "/**" "/css/style.css"}
            (set (map :path declared)))
         (pr-str (map (juxt :method :path) declared)))
@@ -571,8 +585,8 @@
     (is (= (set (map (juxt :method :path) declared))
            (set (map (juxt :method :path) (remove (set mounted) served))))
         "what the daemon serves is exactly what it declares, plus the mount")
-    (testing "the project mount is a GET: the reader behind it is read-only"
-      (is (= [:get] (mapv :method (filter #(= "/api/projects/:slug/**" (:path %)) declared)))))
+    (testing "a project read endpoint is a GET: the reader behind it is read-only"
+      (is (= [:get] (mapv :method (filter #(= "/api/projects/:slug/namespaces" (:path %)) declared)))))
     (testing "the shell derives its status from the declared pages, which the daemon hands the context"
       (is (seq (:webapp/routes (daemon/context))))
       (is (some #(= "/p/:slug" (first %)) (:webapp/routes (daemon/context)))))))
@@ -972,30 +986,3 @@
     (is (= :touch (daemon/reserve-decision 5 "h1" 6 nil))))
   (testing "first sight (nothing served yet): a head present is an advance"
     (is (= :reserve (daemon/reserve-decision nil nil 1 "h1")))))
-
-(deftest the-daemons-own-served-namespaces-are-derived-not-hand-listed
-  ;; The daemon serves slopp's OWN surface — its management endpoints and the
-  ;; UI — at its root; the project API (`slopp.api.*`) is served per-project
-  ;; through the mount by `delegate!`, never here. Both apps live in one store,
-  ;; so the daemon's own namespaces are what the store serves MINUS the project
-  ;; API: derived, so a UI namespace added later is served without editing a
-  ;; list, and a project-API namespace is not double-served here.
-  (let [proj-api (str "(ns slopp.api.endpoints)\n\n"
-                      "(defn ^{:http/method :get :http/path \"/api/x\"\n"
-                      "        :rest/response :map} x \"X.\" [req] req)\n")
-        ui       (str "(ns my.ui)\n\n"
-                      "(defn ^{:http/method :get :http/path \"/css/s.css\"\n"
-                      "        :rest/response :string} sheet \"S.\" [req] \"body{}\")\n")
-        mgmt     (str "(ns my.daemon)\n\n"
-                      "(defn ^{:http/method :get :http/path \"/api/status\"\n"
-                      "        :rest/response :map} status \"St.\" [req] req)\n")
-        s   (-> (store/empty-store)
-                (store/ingest 'slopp.api.endpoints proj-api)
-                (store/ingest 'my.ui ui)
-                (store/ingest 'my.daemon mgmt))
-        own (daemon/own-namespaces s)]
-    (testing "the project API namespace is NOT served at the daemon's own root"
-      (is (not (some #{'slopp.api.endpoints} own)) (pr-str own)))
-    (testing "the daemon's own management and UI namespaces ARE — read from the store"
-      (is (some #{'my.ui} own) (pr-str own))
-      (is (some #{'my.daemon} own) (pr-str own)))))

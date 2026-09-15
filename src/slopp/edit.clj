@@ -54,19 +54,6 @@
     alter-meta!       "metadata is SOURCE-only truth in slopp: markers (^:export, ^:unsafe, ^:reads, :malli/schema) are read straight off the stored form, so write the metadata ON the form itself; runtime metadata mutation is invisible to analysis. with-meta/vary-meta return new values; mark the form ^:unsafe only if you truly own the obligation"
     reset-meta!       "metadata is SOURCE-only truth in slopp: markers (^:export, ^:unsafe, ^:reads, :malli/schema) are read straight off the stored form, so write the metadata ON the form itself; runtime metadata mutation is invisible to analysis. with-meta/vary-meta return new values; mark the form ^:unsafe only if you truly own the obligation"})
 
-(defn- banned-sym?
-  "Is `sym` a D3-denylisted core operator? Matched by NAME against a bare or
-  `clojure.core/`-qualified symbol — the qualified form of `eval` is as much
-  an analysis-defeater as the bare one, while a same-named var in another
-  namespace (`clojure.edn/read-string`, `my.app/resolve`) is a different var
-  and clean. The refusal text promises exactly this behavior; the whole-symbol
-  set lookup it replaced delivered only the bare case."
-  [sym]
-  (and (symbol? sym)
-       (contains? banned-syms (symbol (name sym)))
-       (let [ns (namespace sym)]
-         (or (nil? ns) (= "clojure.core" ns)))))
-
 (defn- all-symbols
   "Every symbol reachable in the form's sexpr, INCLUDING those inside literal
    metadata maps: `^{:h eval} x` compile-time-evaluates its metadata, so a
@@ -106,192 +93,12 @@
   [node]
   (boolean (:reads (meta (n/sexpr node)))))
 
-(def ^:private local-binder-heads
-  "Heads that introduce LOCAL names. Built partly from strings: `binding` is
-  D3-denylisted, so writing it as a symbol here would trip the dialect gate in
-  this very namespace. `with-redefs`/`with-local-vars` are NOT denylisted
-  (tests rely on `with-redefs` for mocking); they ride the string list only
-  for consistency with `binding`."
-  (into '#{defn defn- fn fn* let let* loop loop* doseq for if-let when-let
-           if-some when-some with-open}
-        (map symbol)
-        ["binding" "with-redefs" "with-local-vars"]))
-
-(defn local-name?
-  "Is `sym` bound as a LOCAL name anywhere in sexpr `s` — a parameter vector or
-  a let-style binding vector, destructuring included?
-
-  DELIBERATELY imprecise, and that bounds what it may be used for. There is no
-  scope tracking: it finds the name in ANY binding vector under a binder head,
-  not only one that covers the reference. So it may REPORT a shadow and must
-  never be the thing that REFUSES one. Both callers pay the over-match the
-  same way:
-
-  - `dialect-check` explains a D3 refusal it does not permit. A local named
-    `binding` cannot invoke `clojure.core/binding` (locals shadow it), so the
-    refusal IS a false positive — but permitting on that basis needs real
-    scope tracking to be sound, and a denylist with a hole is worse than one
-    with a confusing message. So: still refuse, and say why.
-  - `slopp.edit.refactor/move-plan` reports `:shadowed` when dequalifying a
-    moved call would land it on a local of the same name. Over-matching costs
-    a spurious warning; refusing on it would block a legitimate move with no
-    way through.
-
-  Over-matching here costs a slightly wrong hint and nothing else."
-  [s sym]
-  (boolean
-   (some (fn [node]
-           (and (seq? node)
-                (contains? local-binder-heads (first node))
-                (some (fn [v]
-                        (and (vector? v)
-                             (some #{sym} (filter symbol? (tree-seq coll? seq v)))))
-                      (tree-seq coll? seq node))))
-         (tree-seq coll? seq s))))
-
-(defn dialect-check
-  "nil if the form is admissible; an error string otherwise (D3/D4). An
-  `^:unsafe` form is admissible by assertion — the author takes on the
-  obligation the analyzer can't discharge (it stays greppable via `unsafe?`).
-  Shared by the single-form edit gate (`parse-form`) and the whole-namespace
-  import gate (`dialect-scan`) so both paths reject identically."
-  [node]
-  (when-not (unsafe? node)
-    (let [s    (n/sexpr node)
-          head (when (seq? s) (first s))
-          ;; ANY tagged literal sexprs as `(read-string "#<tag> …")`, so it is
-          ;; recognised by SHAPE and by its TAG — never by mentioning the
-          ;; banned symbol, which is the one thing this gate must not do.
-          ;;
-          ;; This arm previously matched the single tag it was written for
-          ;; (`#?`), so every OTHER tagged literal fell through to the denylist
-          ;; below and was blamed on `read-string`: the synthetic head of its
-          ;; own expansion, and a symbol the author's source does not contain.
-          ;; Measured: `#inst` and `#uuid` — ordinary data literals the store
-          ;; round-trips perfectly — were refused outright.
-          tag-of (fn [x]
-                   (when (and (seq? x) (symbol? (first x))
-                              (= "read-string" (name (first x)))
-                              (= 2 (count x)) (string? (second x)))
-                     (let [t (str/triml (second x))]
-                       (when (str/starts-with? t "#")
-                         (apply str (take-while
-                                     (complement #{\space \tab \newline \return
-                                                   \( \[ \{ \" \^})
-                                     (subs t 1)))))))
-          tagged? (fn [x] (some? (tag-of x)))
-          tags    (into #{} (keep tag-of) (tree-seq coll? seq s))
-          ;; a tagged literal is DATA: the gate reads no more inside one than
-          ;; inside a string. `#?`/`#?@` are the exception, and the reason is
-          ;; that they change what code is READ.
-          ;;
-          ;; QUOTED forms are data by the identical argument, and leaving them
-          ;; out cost more than the tagged case: `slopp.store/def-heads` is a
-          ;; quoted SET naming the head symbols this analyzer recognises —
-          ;; `defmacro` among them — so the vocabulary a gate reads was refused
-          ;; BY that gate, and slopp could not import its own projection. To
-          ;; execute a banned symbol you have to call it unquoted, which the
-          ;; walk still sees; a quoted mention is a name, not a call.
-          quoted? (fn [x] (and (seq? x) (= 'quote (first x))))
-          data?   (fn [x] (or (tagged? x) (quoted? x)))
-          hits    (filter banned-sym? (all-symbols node data?))]
-      (cond
-        (some #{"?" "?@"} tags)
-        (str "dialect (D3): reader conditionals (#?/#?@) are not allowed in"
-             " stored code — slopp is single-dialect, so a form must read the"
-             " same everywhere. Write the one branch this store targets.")
-
-        (contains? banned-heads head)
-        (str "dialect (D4): user macros are banned — " head)
-
-        (seq hits)
-        (let [hit (first hits)]
-          (str "dialect (D3): denylisted symbol used — " hit
-               " — "
-               (if (and (local-name? s hit) (not= "defmacro" (name hit)))
-                 ;; positional, so it cannot live on the denylist entry: the
-                 ;; symbol is fine, its USE as a binding name is not
-                 (str "you are using it as a LOCAL name, which cannot invoke"
-                      " clojure.core/" (name hit) " at all (locals shadow); the"
-                      " gate matches symbol NAMES regardless of position, so"
-                      " RENAME the local (binding → bnd, eval → ev) — ^:unsafe"
-                      " is the wrong tool here")
-                 (get banned-syms (symbol (name hit))))))
-        :else nil))))
-
 ^:unsafe (def ^:private observe-banned
   "query-eval may observe anything (including calling effectful fns) but never
   (re)define code — that would bypass the delta/provenance pipeline (T5)."
   '#{def defn defn- defmacro defonce deftype defrecord defprotocol defmulti
      defmethod in-ns ns ns-unmap ns-unalias alter-var-root intern remove-ns
      create-ns load-file load-string})
-
-(defn pure-eval-refusal
-  "nil when sexpr `x` looks READ-ONLY, else a teaching error string — the
-  gate for the store-value oracle (query_store), which must never write.
-  Conservative, quote-pruned symbol walk (refs/walk-pruned) refusing:
-  `!`-enders (the effect convention), def-family and redefinition forms,
-  java interop (method calls, constructors, AND static calls on a class-like
-  namespace — arbitrary IO hides in all of them), and an explicit denylist of
-  IO/eval/binding entry points. Pure analysis needs none of those.
-
-  This list is SELF-SUFFICIENT on purpose. The RESOLVERS
-  (requiring-resolve/resolve/ns-resolve/find-var) are the subtle ones: they
-  are an arbitrary-code escape — `((requiring-resolve 'clojure.java.shell/sh)
-  \"rm\" \"-rf\" \"/\")` is not an effect name, and the dangerous target is a
-  QUOTED symbol, which `walk-pruned` prunes, so nothing else here would ever
-  see it. They were historically blocked only as a side effect of query_store
-  parsing through `parse-form` (the D3 DIALECT gate), whose list exists for a
-  different reason entirely — keeping STORED code statically analyzable. A
-  security property must not rest on a coincidence in someone else's list, so
-  the sandbox now names them itself; see orientation-test/
-  sandbox-refuses-resolver-escapes, which fails if that stops being true.
-
-  Static interop is the same shape of hole: `(java.nio.file.Files/delete …)`
-  and `(clojure.lang.RT/loadResourceScript …)` are symbols whose NAMESPACE is
-  a class, not one of the exact strings a denylist can enumerate — so the gate
-  refuses ANY symbol whose namespace segment names a class (a segment starting
-  uppercase, Java convention). Pure math on `Math/*` is caught by the same
-  rule; query_store is for store analysis, and the docstring promises no
-  interop."
-  [x]
-  (let [deny (set (str/split (str "spit slurp eval read-string load-string"
-                                  " load-file load require use import intern"
-                                  ;; resolvers = arbitrary-code escape (above)
-                                  " requiring-resolve resolve ns-resolve find-var"
-                                  " in-ns remove-ns ns-unmap alter-var-root"
-                                  " set! with-redefs with-redefs-fn"
-                                  " push-thread-bindings future future-call"
-                                  " agent send send-off pmap pcalls promise"
-                                  " proxy reify deftype defrecord definterface"
-                                  " gen-class definline new def defn defn- defmacro"
-                                  " defmethod defmulti defonce defprotocol"
-                                  " extend extend-type extend-protocol binding"
-                                  " shutdown-agents add-watch remove-watch")
-                             #" "))
-        deny-ns #{"System" "java.lang.System" "clojure.java.io"
-                  "clojure.java.shell" "java.io" "java.nio.file"}
-        class-like-ns? (fn [nsp]
-                         (when nsp
-                           (let [seg (peek (str/split nsp #"\."))]
-                             (boolean (and (seq seg)
-                                           (Character/isUpperCase ^char (first seg)))))))
-        bad? (fn [f]
-               (when (symbol? f)
-                 (let [nm (name f)]
-                   (when (or (str/ends-with? nm "!")
-                             (str/starts-with? nm ".")
-                             (str/ends-with? nm ".")
-                             (contains? deny nm)
-                             (contains? deny-ns (namespace f))
-                             (class-like-ns? (namespace f)))
-                     [f]))))]
-    (when-let [f (first (refs/walk-pruned bad? x))]
-      (str "query_store is READ-ONLY analysis over the immutable store value — "
-           f " is refused (no effects, no defs, no interop, no IO/eval). "
-           "Pure clojure.core plus slopp's pure fns (slopp.store/forms, "
-           "slopp.store.render/render-ns, slopp.index.analyze/analyze ...) cover the "
-           "analysis space"))))
 
 (defn strip-image-reload
   "Remove `:reload`/`:reload-all` flags from every `require`/`use`/`require-macros`
@@ -418,72 +225,36 @@
             (derive/effect-violations (analyze/analyze (store.render/render-ns store ns-sym))
                                      dep-nses (:dep-pure store)))))
 
-(defn dialect-scan
-  "Run the D3/D4 dialect gate (the SAME check `parse-form` applies per form) over
-  every form of `ns-sym` already in `store`. The import path parses a whole
-  namespace at once, so it can't gate through `parse-form` — this closes the
-  hole. Returns an error string naming EVERY offending form (a whole-ns import
-  otherwise has to be re-sent once per host form, discovering them one rejection
-  at a time), or nil if all are admissible. `^:unsafe` forms pass exactly as on
-  the edit path: a host form can only ENTER the store already marked, so it is
-  never frozen (un-editable) against a later edit of its own body."
-  [store ns-sym]
-  (let [violations (keep (fn [e]
-                           (when-let [err (dialect-check (:node e))]
-                             (str "  " (or (:name e) "?") ": " err)))
-                         (store/forms store ns-sym))]
-    (when (seq violations)
-      (str (if (= 1 (count violations))
-             "1 form uses a denylisted symbol — mark it ^:unsafe"
-             (str (count violations) " forms use denylisted symbols — mark each ^:unsafe"))
-           " if the boundary code is intentional:\n"
-           (str/join "\n" violations)))))
-
-(def reentrant-vars
-  "Vars that run the WHOLE suite, or a server that never returns. A deftest
-  touching one CANNOT run in-image and the reason really is recursion: the
-  in-image run would invoke the suite, which contains this test, which invokes
-  the suite again — unbounded — or it would block forever on a server that
-  does not return.
-
-  Kept apart from `image-spawning-vars` because the two are excluded for
-  DIFFERENT reasons and saying so matters. Telling an agent that `api/open!`
-  \"would recurse\" is false, and reasoning from it makes the process boundary
-  look more fundamental than it is."
-  '#{slopp.ops/external-test-run!
-     slopp.daemon/-main slopp.daemon/start!
-     slopp.kernel.boot/-main slopp.lab.benchmark/-main})
-
-(def image-spawning-vars
-  "Vars that spawn ONE image and return. A deftest touching one is still kept
-  out of the in-image tier, but NOT because it would recurse — it terminates
-  at depth two. Two other reasons hold:
-
-  - **Cost.** The in-image tier runs inside a child JVM already, so each such
-    test would boot another JVM one level deeper. Measured: ~830ms of class
-    loading per boot, and the external tier carries ~400 of them.
-  - **Trace pollution.** The runner instruments `src` vars to attribute
-    test→form coverage. A fixture store loading into the same runtime muddies
-    the attribution the warranty numbers are built on.
-
-  Neither is recursion, and conflating them with `reentrant-vars` is what made
-  the process boundary look load-bearing in ways it is not — the isolation a
-  session needs is a clean NAMESPACE SPACE, which is why an image can be
-  recycled (`repl/reset-to-baseline!`) rather than respawned."
-  '#{slopp.ops/open! slopp.ops/restart! slopp.image.repl/start!
-     slopp.sync/clone! slopp.sync/import! slopp.sync/pull!
-     slopp.sync/maybe-auto-import!})
-
-(def spawning-vars
-  "Every var whose call keeps a deftest out of the in-image tier — the union
-  of `reentrant-vars` (would run the whole suite again, or never return) and
-  `image-spawning-vars` (spawns one image and terminates, excluded for cost
-  and trace pollution). Membership is the question every caller asks; WHICH
-  half decides what the refusal should say.
-
-  Resolution is alias-based (see `require-aliases`); fully-qualified calls hit
-  directly."
-  (into reentrant-vars image-spawning-vars))
+(defn remove-require-source
+  "Symmetric counterpart of add-require-source: structurally remove the
+  require spec for `lib` from an ns form's source. Returns {:src new-src} or
+  {:error msg}."
+  [ns-source lib]
+  (try
+    (let [zloc (z/of-string ns-source)
+          rq   (z/find-value zloc z/next :require)]
+      (if-not rq
+        {:error "no :require clause"}
+        (let [spec (->> (z/right rq)
+                        (iterate z/right)
+                        (take-while some?)
+                        (filter #(let [s (z/sexpr %)]
+                                   (or (= lib s)
+                                       (and (vector? s) (= lib (first s))))))
+                        first)]
+          (if-not spec
+            {:error (str lib " is not required")}
+            (let [root   (z/root-string (z/remove spec))
+                  zloc2  (z/of-string root)
+                  clause (z/up (z/find-value zloc2 z/next :require))
+                  vals*  (remove #(or (n/whitespace? %) (n/comment? %))
+                                 (n/children (z/node clause)))]
+              ;; drop the whole clause if only `:require` itself remains
+              {:src (if (= 1 (count vals*))
+                      (z/root-string (z/remove clause))
+                      root)})))))
+    (catch Exception e
+      {:error (str "remove-require failed: " (ex-message e))})))
 
 (defn require-aliases
   "{alias full-ns} (plus identity entries for the full names) from `ns-sym`'s
@@ -506,96 +277,149 @@
                 entry  (cond-> [[lib lib]] alias (conj [alias lib]))]
             entry))))
 
-(defn isolation-refusal
-  "Q7 gate — nil when `node` may run in-image; the refusal string (naming the
-  fix) when it's an untagged deftest that calls a spawning var and would
-  recurse under in-image verification. `aliases` = require-aliases of the
-  target ns; fully-qualified calls resolve through the identity entries."
-  [aliases node]
-  (let [s (try (n/sexpr node) (catch Exception _ nil))]
-    (when (and (seq? s)
-               (contains? '#{deftest clojure.test/deftest} (first s))
-               (symbol? (second s))
-               ;; ONE spelling. Tolerating the old `^:isolated` too would be WORSE
-               ;; than rejecting it: the runner (`test-var-tiers`) reads
-               ;; `:external`, so a tolerated old marker would pass this gate
-               ;; and then run in-image and recurse — the two checks
-               ;; disagreeing, which is this codebase's recurring failure.
-               ;;
-               ;; Renaming the marker needed a two-phase migration precisely
-               ;; because this gate enforces it: a live gate runs from the OLD
-               ;; compiled code while a sweep rewrites it, so it must accept
-               ;; both for one step, then tighten. The sweep also rewrote the
-               ;; comment that said so — prose describing a rename is not
-               ;; exempt from the rename.
-               (not (:external (meta (second s)))))
-      (when-let [hit (some (fn [sym]
-                             (let [q (when-let [a (some-> (namespace sym) symbol)]
-                                       (when-let [full (aliases a)]
-                                         (symbol (str full) (name sym))))]
-                               (when (contains? spawning-vars (or q sym)) sym)))
-                           (all-symbols node))]
-        ;; the reason has to be the one that is TRUE of this var. Telling an
-        ;; agent that api/open! "would recurse" is false — it spawns one image
-        ;; and terminates — and reasoning from it makes the process boundary
-        ;; look more fundamental than it is.
-        (let [q (or (when-let [a (some-> (namespace hit) symbol)]
-                      (when-let [full (aliases a)] (symbol (str full) (name hit))))
-                    hit)]
-          (str "this test calls " hit " — "
-               (if (contains? reentrant-vars q)
-                 (str "it runs the whole suite (or a server that never"
-                      " returns), so in-image it would re-enter itself without"
-                      " bound")
-                 (str "it spawns a slopp image, which costs a JVM per test one"
-                      " level deeper than the in-image tier already runs, and"
-                      " loading a fixture store into that runtime pollutes the"
-                      " test→form trace the warranty numbers come from"))
-               ". Tag it ^:external:"
-               " (deftest ^:external " (second s) " …) — external tests run in"
-               " the external suite (test_run {:external true})"))))))
-
-(defn live-callers-error
-  "Refuse deleting `ns-sym/nm` while something still CALLS it — nil when
-  nothing does.
-
-  The delete was accepted and the damage arrived later, somewhere else: the
-  form goes, the reload of its namespace fails to compile, and the store then
-  boots NOWHERE. Three times in one wave that left a store its own tools could
-  not open. `delete-form!`'s docstring claimed the failure would show up as
-  tests going red, \"the honest signal if it was still referenced\" — but the
-  reload fails before any test runs, so the verification reported zero tests
-  and nothing wrong.
-
-  Only `:static` references count: those are the ones that must resolve at
-  compile time and so are the ones that break the load. A quoted symbol
-  (`:carrier`) or a `^{:covers}` marker names the form without needing it to
-  exist. A form calling ITSELF is not a caller — recursion would otherwise
-  make every recursive function undeletable.
-
-  Same-namespace callers count, and they are the common case: the delete that
-  bricked the store was used by three performers in its OWN namespace, and a
-  cross-namespace-only check would have waved it through."
+(defn missing-form-error
+  "Q9: a 'no form named X' that TEACHES — names near-miss forms in the ns (or
+  points at query_project) so the next call succeeds instead of guessing.
+  Returns the whole {:error msg} map; every no-such-form site shares it."
   [store ns-sym nm]
-  (let [qsym    (symbol (str ns-sym) (str nm))
-        callers (->> (refs/refs-to store qsym)
-                     (filter #(= :static (:via %)))
-                     (remove #(and (= ns-sym (:from-ns %)) (= nm (:from-var %))))
-                     (map #(symbol (str (:from-ns %)) (str (:from-var %))))
-                     distinct sort vec)]
-    (when (seq callers)
-      {:error (str qsym " is still called by "
-                   (str/join ", " (take 8 callers))
-                   (when (> (count callers) 8)
-                     (str " (+" (- (count callers) 8) " more)"))
-                   " — delete or update them first."
-                   " query_depends {on \"" qsym "\"} lists every caller."
-                   " Deleting it now would be accepted and the RELOAD would"
-                   " fail, leaving the store unable to boot. Delete the"
-                   " CALLERS and this together in one edit_group (delete steps, any"
-                   " order — a caller inside the group is fine), or one"
-                   " edit_delete_form each, callers first. If two forms call"
-                   " EACH OTHER, a group deleting both is the valid order.")})))
+  (let [names (keep :name (store/forms store ns-sym))
+        q     (str/lower-case (str nm))
+        near  (->> names
+                   (filter #(let [s (str/lower-case (str %))]
+                              (or (str/includes? s q) (str/includes? q s))))
+                   (take 5)
+                   seq)]
+    {:error (str "no form named " nm " in " ns-sym
+                 (if near
+                   (str " — nearest: " (str/join ", " near))
+                   (str " — query_source {ns " ns-sym "} lists what exists")))}))
+
+(defn pure-eval-refusal
+  "nil when sexpr `x` looks READ-ONLY, else a teaching error string — the
+  gate for the store-value oracle (query_store), which must never write.
+  Conservative, quote-pruned symbol walk (refs/walk-pruned) refusing:
+  `!`-enders (the effect convention), def-family and redefinition forms,
+  java interop (method calls, constructors, AND static calls on a class-like
+  namespace — arbitrary IO hides in all of them), and an explicit denylist of
+  IO/eval/binding entry points. Pure analysis needs none of those.
+
+  This list is SELF-SUFFICIENT on purpose. The RESOLVERS
+  (requiring-resolve/resolve/ns-resolve/find-var) are the subtle ones: they
+  are an arbitrary-code escape — `((requiring-resolve 'clojure.java.shell/sh)
+  \"rm\" \"-rf\" \"/\")` is not an effect name, and the dangerous target is a
+  QUOTED symbol, which `walk-pruned` prunes, so nothing else here would ever
+  see it. They were historically blocked only as a side effect of query_store
+  parsing through `parse-form` (the D3 DIALECT gate), whose list exists for a
+  different reason entirely — keeping STORED code statically analyzable. A
+  security property must not rest on a coincidence in someone else's list, so
+  the sandbox now names them itself; see orientation-test/
+  sandbox-refuses-resolver-escapes, which fails if that stops being true.
+
+  Static interop is the same shape of hole: `(java.nio.file.Files/delete …)`
+  and `(clojure.lang.RT/loadResourceScript …)` are symbols whose NAMESPACE is
+  a class, not one of the exact strings a denylist can enumerate — so the gate
+  refuses ANY symbol whose namespace segment names a class (a segment starting
+  uppercase, Java convention). Pure math on `Math/*` is caught by the same
+  rule; query_store is for store analysis, and the docstring promises no
+  interop."
+  [x]
+  (let [deny (set (str/split (str "spit slurp eval read-string load-string"
+                                  " load-file load require use import intern"
+                                  ;; resolvers = arbitrary-code escape (above)
+                                  " requiring-resolve resolve ns-resolve find-var"
+                                  " in-ns remove-ns ns-unmap alter-var-root"
+                                  " set! with-redefs with-redefs-fn"
+                                  " push-thread-bindings future future-call"
+                                  " agent send send-off pmap pcalls promise"
+                                  " proxy reify deftype defrecord definterface"
+                                  " gen-class definline new def defn defn- defmacro"
+                                  " defmethod defmulti defonce defprotocol"
+                                  " extend extend-type extend-protocol binding"
+                                  " shutdown-agents add-watch remove-watch")
+                             #" "))
+        deny-ns #{"System" "java.lang.System" "clojure.java.io"
+                  "clojure.java.shell" "java.io" "java.nio.file"}
+        class-like-ns? (fn [nsp]
+                         (when nsp
+                           (let [seg (peek (str/split nsp #"\."))]
+                             (boolean (and (seq seg)
+                                           (Character/isUpperCase ^char (first seg)))))))
+        bad? (fn [f]
+               (when (symbol? f)
+                 (let [nm (name f)]
+                   (when (or (str/ends-with? nm "!")
+                             (str/starts-with? nm ".")
+                             (str/ends-with? nm ".")
+                             (contains? deny nm)
+                             (contains? deny-ns (namespace f))
+                             (class-like-ns? (namespace f)))
+                     [f]))))]
+    (when-let [f (first (refs/walk-pruned bad? x))]
+      (str "query_store is READ-ONLY analysis over the immutable store value — "
+           f " is refused (no effects, no defs, no interop, no IO/eval). "
+           "Pure clojure.core plus slopp's pure fns (slopp.store/forms, "
+           "slopp.store.render/render-ns, slopp.index.analyze/analyze ...) cover the "
+           "analysis space"))))
+
+(defn anchor-error
+  "Compile/exception text with VFS coordinates → the anchor agents can act
+  on: {:form qsym :at \"snippet\"} — the owning form plus the trimmed
+  offending line, paste-ready for edit_subform/query_slice match. nil when
+  the text carries no resolvable location (the caller keeps the raw
+  message). Agents never consume file:line — reads are name-addressed and
+  edits are anchor-addressed; this is the translation, applied once at the
+  boundary."
+  [store err]
+  (when err
+    (when-let [[_ path line] (re-find #"\(([\w/._-]+\.clj):(\d+)(?::\d+)?\)"
+                                      (str err))]
+      (let [nsx (symbol (-> path
+                            (str/replace #"\.clj$" "")
+                            (str/replace "/" ".")
+                            (str/replace "_" "-")))]
+        (when (contains? (:namespaces store) nsx)
+          (let [row (parse-long line)
+                e   (store.render/owner-form store nsx row 1)
+                at  (nth (str/split-lines (store.render/render-ns store nsx))
+                         (dec row) nil)]
+            (when (or e at)
+              (cond-> {}
+                e  (assoc :form (symbol (str nsx) (str (or (:name e) (:id e)))))
+                at (assoc :at (str/trim at))))))))))
+
+(defn declare-node
+  "Build a `(declare …)` form NODE for `names`, optionally carrying the
+  `^{:auto-declare \"<why>\"}` marker (a pipeline-owned declare says why it
+  exists — markers-carry-their-why). Built with the RAW parser on purpose:
+  `parse-form` BANS hand-written declares (D5), and the pipeline's own
+  inserts/rewrites must not trip the gate they enforce on agents."
+  [names & {:keys [why]}]
+  (first (filter n/sexpr-able?
+                 (n/children
+                  (p/parse-string-all
+                   (str (when why (str "^{:auto-declare \"" why "\"}\n"))
+                        "(declare " (str/join " " (map str names)) ")"))))))
+
+(defn parse-one
+  "Parse `source` as exactly ONE top-level form — the RAW parse, NO gate.
+  Returns {:node node} or {:error msg}; never throws (F3).
+
+  `parse-form` layers the dialect gate (D3/D4 + D7's declare ban) on top of
+  this, for the WRITE paths. Read-only callers that carry their OWN gate use
+  this directly — notably `query_store`, whose sandbox is
+  `pure-eval-refusal`. The dialect denylist exists to keep STORED code
+  statically analyzable; a throwaway analysis query is not stored and nothing
+  analyzes it, so borrowing that list there refused the right things for the
+  wrong reason (and with nonsense teaching about carriers), and would refuse
+  MORE for no reason as D3 grows."
+  [source]
+  (try
+    (let [forms (filter n/sexpr-able? (n/children (p/parse-string-all source)))]
+      (if (not= 1 (count forms))
+        {:error (str "expected exactly one top-level form, got " (count forms))}
+        {:node (first forms)}))
+    (catch Exception e
+      {:error (str "unparseable source (unbalanced?): " (ex-message e))})))
 
 (defn ambiguous-form-error
   "nil when exactly one element of `ns-sym` bears on `nm`; otherwise the
@@ -640,79 +464,155 @@
                              (nil? (:name f)) (assoc :kind :declare)))
                          cands)})))
 
-(defn missing-form-error
-  "Q9: a 'no form named X' that TEACHES — names near-miss forms in the ns (or
-  points at query_project) so the next call succeeds instead of guessing.
-  Returns the whole {:error msg} map; every no-such-form site shares it."
-  [store ns-sym nm]
-  (let [names (keep :name (store/forms store ns-sym))
-        q     (str/lower-case (str nm))
-        near  (->> names
-                   (filter #(let [s (str/lower-case (str %))]
-                              (or (str/includes? s q) (str/includes? q s))))
-                   (take 5)
-                   seq)]
-    {:error (str "no form named " nm " in " ns-sym
-                 (if near
-                   (str " — nearest: " (str/join ", " near))
-                   (str " — query_source {ns " ns-sym "} lists what exists")))}))
+(defn contract-drift
+  "What replacing `old-node` with `new-node` changed that the author probably
+  did not mean to: `[{:kind :metadata-lost|:docstring-lost|:arity-changed
+  :detail …}]`, empty when the contract is intact.
 
-(defn remove-require-source
-  "Symmetric counterpart of add-require-source: structurally remove the
-  require spec for `lib` from an ns form's source. Returns {:src new-src} or
-  {:error msg}."
-  [ns-source lib]
-  (try
-    (let [zloc (z/of-string ns-source)
-          rq   (z/find-value zloc z/next :require)]
-      (if-not rq
-        {:error "no :require clause"}
-        (let [spec (->> (z/right rq)
-                        (iterate z/right)
-                        (take-while some?)
-                        (filter #(let [s (z/sexpr %)]
-                                   (or (= lib s)
-                                       (and (vector? s) (= lib (first s))))))
-                        first)]
-          (if-not spec
-            {:error (str lib " is not required")}
-            (let [root   (z/root-string (z/remove spec))
-                  zloc2  (z/of-string root)
-                  clause (z/up (z/find-value zloc2 z/next :require))
-                  vals*  (remove #(or (n/whitespace? %) (n/comment? %))
-                                 (n/children (z/node clause)))]
-              ;; drop the whole clause if only `:require` itself remains
-              {:src (if (= 1 (count vals*))
-                      (z/root-string (z/remove clause))
-                      root)})))))
-    (catch Exception e
-      {:error (str "remove-require failed: " (ex-message e))})))
+  Reported, never refused — dropping a hint, a docstring or an arity is
+  sometimes exactly the intent. The point is that it is never SILENT. A
+  refactor here once rebuilt a destructuring from `sexpr` and quietly dropped
+  `^Repository`, turning direct interop into reflection: it compiled, passed
+  every gate, and reported green. The only way to catch that was to re-read
+  the form afterwards, which is the agent doing the write result's job."
+  [old-node new-node]
+  (let [sx    (fn [nd] (try (n/sexpr nd) (catch Exception _ nil)))
+        hints (fn [nd]
+                ;; every ^Hint in the form's source, by the symbol it rides
+                (into {} (for [zl   (->> (iterate z/next (z/of-string (n/string nd)))
+                                         (take-while (complement z/end?)))
+                               :let [nd* (z/node zl)]
+                               :when (= :meta (n/tag nd*))
+                               ;; children include the whitespace between ^Hint and the symbol
+                               :let [[m v] (filter n/sexpr-able? (n/children nd*))]
+                               :when (symbol? (sx v))]
+                           [(sx v) (n/string m)])))
+        ;; through the shared accessor — indexing here is the same mistake
+        ;; that hid nine documented globals from ambient-state
+        docs  store/form-docstring
+        arits (fn [nd] (mapv count (edit.modules/fn-arglists (sx nd))))
+        lost  (remove (fn [[sym _]] (contains? (hints new-node) sym))
+                      (hints old-node))]
+    (cond-> []
+      (seq lost)
+      (conj {:kind :metadata-lost
+             :detail (into {} (map (fn [[s m]] [s m])) lost)})
 
-(defn anchor-error
-  "Compile/exception text with VFS coordinates → the anchor agents can act
-  on: {:form qsym :at \"snippet\"} — the owning form plus the trimmed
-  offending line, paste-ready for edit_subform/query_slice match. nil when
-  the text carries no resolvable location (the caller keeps the raw
-  message). Agents never consume file:line — reads are name-addressed and
-  edits are anchor-addressed; this is the translation, applied once at the
-  boundary."
-  [store err]
-  (when err
-    (when-let [[_ path line] (re-find #"\(([\w/._-]+\.clj):(\d+)(?::\d+)?\)"
-                                      (str err))]
-      (let [nsx (symbol (-> path
-                            (str/replace #"\.clj$" "")
-                            (str/replace "/" ".")
-                            (str/replace "_" "-")))]
-        (when (contains? (:namespaces store) nsx)
-          (let [row (parse-long line)
-                e   (store.render/owner-form store nsx row 1)
-                at  (nth (str/split-lines (store.render/render-ns store nsx))
-                         (dec row) nil)]
-            (when (or e at)
-              (cond-> {}
-                e  (assoc :form (symbol (str nsx) (str (or (:name e) (:id e)))))
-                at (assoc :at (str/trim at))))))))))
+      (and (docs old-node) (not (docs new-node)))
+      (conj {:kind :docstring-lost})
+
+      (not= (arits old-node) (arits new-node))
+      (conj {:kind :arity-changed
+             :detail {:was (arits old-node) :now (arits new-node)}}))))
+
+(defn live-handle-shape-change
+  "`{:added #{kw} :removed #{kw}}` when replacing `old-node` with `new-node`
+  changes the KEY SHAPE of a `^:live-handle` constructor — otherwise nil.
+
+  A `^:live-handle` fn returns a map the SESSION holds across calls
+  (`repl/start!`'s image, `git/open-ctx!`'s ctx, `api/open!`'s session). Those
+  are the one piece of state a write cannot reach: a cache keyed on its input
+  is safe by construction — every memo in this store is — but a handle is
+  keyed on NOTHING. It is a resource built once, under one version of the
+  code, and passed back forever after.
+
+  So a write can leave the STORE perfectly consistent (constructor and every
+  reader rewritten together) while the value already in memory still has the
+  old shape. New code, old value: the reader gets nil. That bricked this
+  session twice, unrecoverably, because `undo` and `restart` both work through
+  the handle they would have repaired.
+
+  Deliberately over-broad — it compares the form's whole keyword-literal set
+  rather than trying to identify the returned map, which is often nested
+  (`(inject-rt! {…})`). A false positive costs one image rebuild; a false
+  negative costs the session."
+  [old-node new-node]
+  (let [marked? (fn [nd]
+                  (let [s (store/form-sexpr nd)]
+                    (boolean (and (seq? s) (symbol? (second s))
+                                  (:live-handle (meta (second s)))))))
+        kws     (fn [nd]
+                  (set (filter keyword?
+                               (tree-seq coll? seq (store/form-sexpr nd)))))]
+    (when (or (marked? old-node) (marked? new-node))
+      (let [o (kws old-node) n (kws new-node)]
+        (when (not= o n)
+          {:added (set/difference n o) :removed (set/difference o n)})))))
+
+(def ^:private local-binder-heads
+  "Heads that introduce LOCAL names. Built partly from strings: `binding` is
+  D3-denylisted, so writing it as a symbol here would trip the dialect gate in
+  this very namespace. `with-redefs`/`with-local-vars` are NOT denylisted
+  (tests rely on `with-redefs` for mocking); they ride the string list only
+  for consistency with `binding`."
+  (into '#{defn defn- fn fn* let let* loop loop* doseq for if-let when-let
+           if-some when-some with-open}
+        (map symbol)
+        ["binding" "with-redefs" "with-local-vars"]))
+
+(defn local-name?
+  "Is `sym` bound as a LOCAL name anywhere in sexpr `s` — a parameter vector or
+  a let-style binding vector, destructuring included?
+
+  DELIBERATELY imprecise, and that bounds what it may be used for. There is no
+  scope tracking: it finds the name in ANY binding vector under a binder head,
+  not only one that covers the reference. So it may REPORT a shadow and must
+  never be the thing that REFUSES one. Both callers pay the over-match the
+  same way:
+
+  - `dialect-check` explains a D3 refusal it does not permit. A local named
+    `binding` cannot invoke `clojure.core/binding` (locals shadow it), so the
+    refusal IS a false positive — but permitting on that basis needs real
+    scope tracking to be sound, and a denylist with a hole is worse than one
+    with a confusing message. So: still refuse, and say why.
+  - `slopp.edit.refactor/move-plan` reports `:shadowed` when dequalifying a
+    moved call would land it on a local of the same name. Over-matching costs
+    a spurious warning; refusing on it would block a legitimate move with no
+    way through.
+
+  Over-matching here costs a slightly wrong hint and nothing else."
+  [s sym]
+  (boolean
+   (some (fn [node]
+           (and (seq? node)
+                (contains? local-binder-heads (first node))
+                (some (fn [v]
+                        (and (vector? v)
+                             (some #{sym} (filter symbol? (tree-seq coll? seq v)))))
+                      (tree-seq coll? seq node))))
+         (tree-seq coll? seq s))))
+
+(def write-coherence-lint
+  "The kondo finding types that refuse a WRITE. Everything else kondo reports
+  is a `done`-grain concern.
+
+  These two dials answer DIFFERENT QUESTIONS, which is why there are two of
+  them (contrast the duplicated dead-surface scans, which were two copies of
+  ONE question and drifted):
+
+  - `index/kondo-config`'s `:level` — *is this codebase finished and clean?*
+    `:error` counts at `done`, `:warning` is listed for the agent to judge.
+  - THIS set — *is this form internally incoherent right now?*
+
+  A write is BY DEFINITION mid-work, so almost nothing belongs here. Writing
+  `(if x y)` on the way to adding an else branch is normal; refusing it is
+  not. The bar is: the form cannot be a step toward anything correct.
+
+  Why these five specifically:
+  - `:syntax`, `:unresolved-symbol`, `:unresolved-var` — the form does not
+    hold together. Compilation catches most of these too, but lint reaches
+    them FIRST and with a far better message: the too-narrow-subform-edit
+    hint (a binding without its use, a loop without its recur) fires here and
+    is the single most common agent edit mistake, cheap to fix the instant it
+    happens and expensive to diagnose later.
+  - `:invalid-arity`, `:type-mismatch` — these COMPILE FINE and fail at
+    runtime. Two `invalid-arity` findings once dismissed as noise in this
+    project were real ArityExceptions in shipped handlers.
+
+  Cross-form staleness is already handled elsewhere: findings in OTHER forms
+  ride as `:carried` and are re-checked at `done`, so an incremental
+  signature change is never blocked by its own not-yet-updated callers."
+  #{:syntax :unresolved-symbol :invalid-arity :type-mismatch})
 
 (defn require-cycles
   "Namespace require CYCLES reachable from `ns-syms`, as a vector of paths
@@ -826,51 +726,6 @@
            " \"[" (:to (first unreq)) " :as …]\"}), or write the call through change,"
            " which stores the project's alias and adds the require itself."))))
 
-(def write-coherence-lint
-  "The kondo finding types that refuse a WRITE. Everything else kondo reports
-  is a `done`-grain concern.
-
-  These two dials answer DIFFERENT QUESTIONS, which is why there are two of
-  them (contrast the duplicated dead-surface scans, which were two copies of
-  ONE question and drifted):
-
-  - `index/kondo-config`'s `:level` — *is this codebase finished and clean?*
-    `:error` counts at `done`, `:warning` is listed for the agent to judge.
-  - THIS set — *is this form internally incoherent right now?*
-
-  A write is BY DEFINITION mid-work, so almost nothing belongs here. Writing
-  `(if x y)` on the way to adding an else branch is normal; refusing it is
-  not. The bar is: the form cannot be a step toward anything correct.
-
-  Why these five specifically:
-  - `:syntax`, `:unresolved-symbol`, `:unresolved-var` — the form does not
-    hold together. Compilation catches most of these too, but lint reaches
-    them FIRST and with a far better message: the too-narrow-subform-edit
-    hint (a binding without its use, a loop without its recur) fires here and
-    is the single most common agent edit mistake, cheap to fix the instant it
-    happens and expensive to diagnose later.
-  - `:invalid-arity`, `:type-mismatch` — these COMPILE FINE and fail at
-    runtime. Two `invalid-arity` findings once dismissed as noise in this
-    project were real ArityExceptions in shipped handlers.
-
-  Cross-form staleness is already handled elsewhere: findings in OTHER forms
-  ride as `:carried` and are re-checked at `done`, so an incremental
-  signature change is never blocked by its own not-yet-updated callers."
-  #{:syntax :unresolved-symbol :invalid-arity :type-mismatch})
-
-(defn declare-node
-  "Build a `(declare …)` form NODE for `names`, optionally carrying the
-  `^{:auto-declare \"<why>\"}` marker (a pipeline-owned declare says why it
-  exists — markers-carry-their-why). Built with the RAW parser on purpose:
-  `parse-form` BANS hand-written declares (D5), and the pipeline's own
-  inserts/rewrites must not trip the gate they enforce on agents."
-  [names & {:keys [why]}]
-  (first (filter n/sexpr-able?
-                 (n/children
-                  (p/parse-string-all
-                   (str (when why (str "^{:auto-declare \"" why "\"}\n"))
-                        "(declare " (str/join " " (map str names)) ")"))))))
-
 (defn resolve-cold-load
   "ARRANGE `ns-sym` so it cold-loads WITHOUT the agent ever writing (declare …)
   or saying where a form goes. Returns {:store <arranged> …} or nil (the
@@ -907,26 +762,121 @@
               (when (and st'' (nil? (cold-load-errors st'' [ns-sym])))
                 {:store st'' :declared names}))))))))
 
-(defn parse-one
-  "Parse `source` as exactly ONE top-level form — the RAW parse, NO gate.
-  Returns {:node node} or {:error msg}; never throws (F3).
+(defn ns-form-delete-error
+  "Refuse deleting the (ns …) form itself. A namespace without its ns form
+  renders as a headless file that still COLD-LOADS (the forms compile into
+  whatever namespace preceded them), so nothing downstream catches it.
+  Returns {:error msg} or nil; the shared guard for every delete path."
+  [ns-sym form-name]
+  (when (= (str ns-sym) (str form-name))
+    {:error (str "cannot delete the ns form of " ns-sym
+                 " — a namespace must keep its (ns …) form (rendering and"
+                 " cold-load depend on it). Delete the namespace's other forms"
+                 " instead; the shell stays.")}))
 
-  `parse-form` layers the dialect gate (D3/D4 + D7's declare ban) on top of
-  this, for the WRITE paths. Read-only callers that carry their OWN gate use
-  this directly — notably `query_store`, whose sandbox is
-  `pure-eval-refusal`. The dialect denylist exists to keep STORED code
-  statically analyzable; a throwaway analysis query is not stored and nothing
-  analyzes it, so borrowing that list there refused the right things for the
-  wrong reason (and with nonsense teaching about carriers), and would refuse
-  MORE for no reason as D3 grows."
-  [source]
-  (try
-    (let [forms (filter n/sexpr-able? (n/children (p/parse-string-all source)))]
-      (if (not= 1 (count forms))
-        {:error (str "expected exactly one top-level form, got " (count forms))}
-        {:node (first forms)}))
-    (catch Exception e
-      {:error (str "unparseable source (unbalanced?): " (ex-message e))})))
+(defn- banned-sym?
+  "Is `sym` a D3-denylisted core operator? Matched by NAME against a bare or
+  `clojure.core/`-qualified symbol — the qualified form of `eval` is as much
+  an analysis-defeater as the bare one, while a same-named var in another
+  namespace (`clojure.edn/read-string`, `my.app/resolve`) is a different var
+  and clean. The refusal text promises exactly this behavior; the whole-symbol
+  set lookup it replaced delivered only the bare case."
+  [sym]
+  (and (symbol? sym)
+       (contains? banned-syms (symbol (name sym)))
+       (let [ns (namespace sym)]
+         (or (nil? ns) (= "clojure.core" ns)))))
+
+(defn dialect-check
+  "nil if the form is admissible; an error string otherwise (D3/D4). An
+  `^:unsafe` form is admissible by assertion — the author takes on the
+  obligation the analyzer can't discharge (it stays greppable via `unsafe?`).
+  Shared by the single-form edit gate (`parse-form`) and the whole-namespace
+  import gate (`dialect-scan`) so both paths reject identically."
+  [node]
+  (when-not (unsafe? node)
+    (let [s    (n/sexpr node)
+          head (when (seq? s) (first s))
+          ;; ANY tagged literal sexprs as `(read-string "#<tag> …")`, so it is
+          ;; recognised by SHAPE and by its TAG — never by mentioning the
+          ;; banned symbol, which is the one thing this gate must not do.
+          ;;
+          ;; This arm previously matched the single tag it was written for
+          ;; (`#?`), so every OTHER tagged literal fell through to the denylist
+          ;; below and was blamed on `read-string`: the synthetic head of its
+          ;; own expansion, and a symbol the author's source does not contain.
+          ;; Measured: `#inst` and `#uuid` — ordinary data literals the store
+          ;; round-trips perfectly — were refused outright.
+          tag-of (fn [x]
+                   (when (and (seq? x) (symbol? (first x))
+                              (= "read-string" (name (first x)))
+                              (= 2 (count x)) (string? (second x)))
+                     (let [t (str/triml (second x))]
+                       (when (str/starts-with? t "#")
+                         (apply str (take-while
+                                     (complement #{\space \tab \newline \return
+                                                   \( \[ \{ \" \^})
+                                     (subs t 1)))))))
+          tagged? (fn [x] (some? (tag-of x)))
+          tags    (into #{} (keep tag-of) (tree-seq coll? seq s))
+          ;; a tagged literal is DATA: the gate reads no more inside one than
+          ;; inside a string. `#?`/`#?@` are the exception, and the reason is
+          ;; that they change what code is READ.
+          ;;
+          ;; QUOTED forms are data by the identical argument, and leaving them
+          ;; out cost more than the tagged case: `slopp.store/def-heads` is a
+          ;; quoted SET naming the head symbols this analyzer recognises —
+          ;; `defmacro` among them — so the vocabulary a gate reads was refused
+          ;; BY that gate, and slopp could not import its own projection. To
+          ;; execute a banned symbol you have to call it unquoted, which the
+          ;; walk still sees; a quoted mention is a name, not a call.
+          quoted? (fn [x] (and (seq? x) (= 'quote (first x))))
+          data?   (fn [x] (or (tagged? x) (quoted? x)))
+          hits    (filter banned-sym? (all-symbols node data?))]
+      (cond
+        (some #{"?" "?@"} tags)
+        (str "dialect (D3): reader conditionals (#?/#?@) are not allowed in"
+             " stored code — slopp is single-dialect, so a form must read the"
+             " same everywhere. Write the one branch this store targets.")
+
+        (contains? banned-heads head)
+        (str "dialect (D4): user macros are banned — " head)
+
+        (seq hits)
+        (let [hit (first hits)]
+          (str "dialect (D3): denylisted symbol used — " hit
+               " — "
+               (if (and (local-name? s hit) (not= "defmacro" (name hit)))
+                 ;; positional, so it cannot live on the denylist entry: the
+                 ;; symbol is fine, its USE as a binding name is not
+                 (str "you are using it as a LOCAL name, which cannot invoke"
+                      " clojure.core/" (name hit) " at all (locals shadow); the"
+                      " gate matches symbol NAMES regardless of position, so"
+                      " RENAME the local (binding → bnd, eval → ev) — ^:unsafe"
+                      " is the wrong tool here")
+                 (get banned-syms (symbol (name hit))))))
+        :else nil))))
+
+(defn dialect-scan
+  "Run the D3/D4 dialect gate (the SAME check `parse-form` applies per form) over
+  every form of `ns-sym` already in `store`. The import path parses a whole
+  namespace at once, so it can't gate through `parse-form` — this closes the
+  hole. Returns an error string naming EVERY offending form (a whole-ns import
+  otherwise has to be re-sent once per host form, discovering them one rejection
+  at a time), or nil if all are admissible. `^:unsafe` forms pass exactly as on
+  the edit path: a host form can only ENTER the store already marked, so it is
+  never frozen (un-editable) against a later edit of its own body."
+  [store ns-sym]
+  (let [violations (keep (fn [e]
+                           (when-let [err (dialect-check (:node e))]
+                             (str "  " (or (:name e) "?") ": " err)))
+                         (store/forms store ns-sym))]
+    (when (seq violations)
+      (str (if (= 1 (count violations))
+             "1 form uses a denylisted symbol — mark it ^:unsafe"
+             (str (count violations) " forms use denylisted symbols — mark each ^:unsafe"))
+           " if the boundary code is intentional:\n"
+           (str/join "\n" violations)))))
 
 (defn ^:export control-char-refusal
   "nil if `source` is free of raw control characters; a teaching string if not.
@@ -951,35 +901,6 @@
          "transit. Spell it as an escape the READER sees (\\\\uXXXX), or use a "
          "class like \\p{Cntrl}. Stored control bytes make the source read as "
          "BINARY to grep, so the form goes invisible to every text sweep.")))
-
-(defn parse-forms
-  "Parse `source` as ONE OR MORE dialect-legal top-level forms — the batch
-  face of `parse-form`, for a write that lands several new forms at once.
-  Every form passes the same gate one would (`control-char-refusal` on the
-  text, D3/D4 via `dialect-check`, D7's declare ban). Returns
-  `{:nodes [node …]}` or `{:error msg}` — never throws (F3)."
-  [source]
-  (if-let [ctl (control-char-refusal source)]
-    {:error ctl}
-    (try
-      (let [nodes (vec (filter n/sexpr-able? (n/children (p/parse-string-all source))))]
-        (if (empty? nodes)
-          {:error "expected at least one top-level form, got 0"}
-          (or (some (fn [node]
-                      (let [s (n/sexpr node)]
-                        (cond
-                          (and (seq? s) (= 'declare (first s)))
-                          {:error (str "(declare …) is managed for you — slopp orders forms"
-                                       " itself: write your forms in any order (definitions are"
-                                       " reordered above their callers), and a genuine"
-                                       " mutual-recursion cycle gets a marked declare inserted"
-                                       " automatically. Drop the declare and write the real forms.")}
-                          (dialect-check node)
-                          {:error (dialect-check node)})))
-                    nodes)
-              {:nodes nodes})))
-      (catch Exception e
-        {:error (str "unparseable source (unbalanced?): " (ex-message e))}))))
 
 (defn parse-form
   "Parse `source` as exactly ONE dialect-legal top-level form (the gate every
@@ -1011,92 +932,100 @@
           (catch Exception e
             {:error (str "unparseable source (unbalanced?): " (ex-message e))}))))))
 
-(defn live-handle-shape-change
-  "`{:added #{kw} :removed #{kw}}` when replacing `old-node` with `new-node`
-  changes the KEY SHAPE of a `^:live-handle` constructor — otherwise nil.
+(def reentrant-vars
+  "Vars that run the WHOLE suite, or a server that never returns. A deftest
+  touching one CANNOT run in-image and the reason really is recursion: the
+  in-image run would invoke the suite, which contains this test, which invokes
+  the suite again — unbounded — or it would block forever on a server that
+  does not return.
 
-  A `^:live-handle` fn returns a map the SESSION holds across calls
-  (`repl/start!`'s image, `git/open-ctx!`'s ctx, `api/open!`'s session). Those
-  are the one piece of state a write cannot reach: a cache keyed on its input
-  is safe by construction — every memo in this store is — but a handle is
-  keyed on NOTHING. It is a resource built once, under one version of the
-  code, and passed back forever after.
+  Kept apart from `image-spawning-vars` because the two are excluded for
+  DIFFERENT reasons and saying so matters. Telling an agent that `api/open!`
+  \"would recurse\" is false, and reasoning from it makes the process boundary
+  look more fundamental than it is."
+  '#{slopp.ops/external-test-run!
+     slopp.daemon/-main slopp.daemon/start!
+     slopp.kernel.boot/-main slopp.lab.benchmark/-main})
 
-  So a write can leave the STORE perfectly consistent (constructor and every
-  reader rewritten together) while the value already in memory still has the
-  old shape. New code, old value: the reader gets nil. That bricked this
-  session twice, unrecoverably, because `undo` and `restart` both work through
-  the handle they would have repaired.
+(def image-spawning-vars
+  "Vars that spawn ONE image and return. A deftest touching one is still kept
+  out of the in-image tier, but NOT because it would recurse — it terminates
+  at depth two. Two other reasons hold:
 
-  Deliberately over-broad — it compares the form's whole keyword-literal set
-  rather than trying to identify the returned map, which is often nested
-  (`(inject-rt! {…})`). A false positive costs one image rebuild; a false
-  negative costs the session."
-  [old-node new-node]
-  (let [marked? (fn [nd]
-                  (let [s (store/form-sexpr nd)]
-                    (boolean (and (seq? s) (symbol? (second s))
-                                  (:live-handle (meta (second s)))))))
-        kws     (fn [nd]
-                  (set (filter keyword?
-                               (tree-seq coll? seq (store/form-sexpr nd)))))]
-    (when (or (marked? old-node) (marked? new-node))
-      (let [o (kws old-node) n (kws new-node)]
-        (when (not= o n)
-          {:added (set/difference n o) :removed (set/difference o n)})))))
+  - **Cost.** The in-image tier runs inside a child JVM already, so each such
+    test would boot another JVM one level deeper. Measured: ~830ms of class
+    loading per boot, and the external tier carries ~400 of them.
+  - **Trace pollution.** The runner instruments `src` vars to attribute
+    test→form coverage. A fixture store loading into the same runtime muddies
+    the attribution the warranty numbers are built on.
 
-(defn contract-drift
-  "What replacing `old-node` with `new-node` changed that the author probably
-  did not mean to: `[{:kind :metadata-lost|:docstring-lost|:arity-changed
-  :detail …}]`, empty when the contract is intact.
+  Neither is recursion, and conflating them with `reentrant-vars` is what made
+  the process boundary look load-bearing in ways it is not — the isolation a
+  session needs is a clean NAMESPACE SPACE, which is why an image can be
+  recycled (`repl/reset-to-baseline!`) rather than respawned."
+  '#{slopp.ops/open! slopp.ops/restart! slopp.image.repl/start!
+     slopp.sync/clone! slopp.sync/import! slopp.sync/pull!
+     slopp.sync/maybe-auto-import!})
 
-  Reported, never refused — dropping a hint, a docstring or an arity is
-  sometimes exactly the intent. The point is that it is never SILENT. A
-  refactor here once rebuilt a destructuring from `sexpr` and quietly dropped
-  `^Repository`, turning direct interop into reflection: it compiled, passed
-  every gate, and reported green. The only way to catch that was to re-read
-  the form afterwards, which is the agent doing the write result's job."
-  [old-node new-node]
-  (let [sx    (fn [nd] (try (n/sexpr nd) (catch Exception _ nil)))
-        hints (fn [nd]
-                ;; every ^Hint in the form's source, by the symbol it rides
-                (into {} (for [zl   (->> (iterate z/next (z/of-string (n/string nd)))
-                                         (take-while (complement z/end?)))
-                               :let [nd* (z/node zl)]
-                               :when (= :meta (n/tag nd*))
-                               ;; children include the whitespace between ^Hint and the symbol
-                               :let [[m v] (filter n/sexpr-able? (n/children nd*))]
-                               :when (symbol? (sx v))]
-                           [(sx v) (n/string m)])))
-        ;; through the shared accessor — indexing here is the same mistake
-        ;; that hid nine documented globals from ambient-state
-        docs  store/form-docstring
-        arits (fn [nd] (mapv count (edit.modules/fn-arglists (sx nd))))
-        lost  (remove (fn [[sym _]] (contains? (hints new-node) sym))
-                      (hints old-node))]
-    (cond-> []
-      (seq lost)
-      (conj {:kind :metadata-lost
-             :detail (into {} (map (fn [[s m]] [s m])) lost)})
+(def spawning-vars
+  "Every var whose call keeps a deftest out of the in-image tier — the union
+  of `reentrant-vars` (would run the whole suite again, or never return) and
+  `image-spawning-vars` (spawns one image and terminates, excluded for cost
+  and trace pollution). Membership is the question every caller asks; WHICH
+  half decides what the refusal should say.
 
-      (and (docs old-node) (not (docs new-node)))
-      (conj {:kind :docstring-lost})
+  Resolution is alias-based (see `require-aliases`); fully-qualified calls hit
+  directly."
+  (into reentrant-vars image-spawning-vars))
 
-      (not= (arits old-node) (arits new-node))
-      (conj {:kind :arity-changed
-             :detail {:was (arits old-node) :now (arits new-node)}}))))
-
-(defn ns-form-delete-error
-  "Refuse deleting the (ns …) form itself. A namespace without its ns form
-  renders as a headless file that still COLD-LOADS (the forms compile into
-  whatever namespace preceded them), so nothing downstream catches it.
-  Returns {:error msg} or nil; the shared guard for every delete path."
-  [ns-sym form-name]
-  (when (= (str ns-sym) (str form-name))
-    {:error (str "cannot delete the ns form of " ns-sym
-                 " — a namespace must keep its (ns …) form (rendering and"
-                 " cold-load depend on it). Delete the namespace's other forms"
-                 " instead; the shell stays.")}))
+(defn isolation-refusal
+  "Q7 gate — nil when `node` may run in-image; the refusal string (naming the
+  fix) when it's an untagged deftest that calls a spawning var and would
+  recurse under in-image verification. `aliases` = require-aliases of the
+  target ns; fully-qualified calls resolve through the identity entries."
+  [aliases node]
+  (let [s (try (n/sexpr node) (catch Exception _ nil))]
+    (when (and (seq? s)
+               (contains? '#{deftest clojure.test/deftest} (first s))
+               (symbol? (second s))
+               ;; ONE spelling. Tolerating the old `^:isolated` too would be WORSE
+               ;; than rejecting it: the runner (`test-var-tiers`) reads
+               ;; `:external`, so a tolerated old marker would pass this gate
+               ;; and then run in-image and recurse — the two checks
+               ;; disagreeing, which is this codebase's recurring failure.
+               ;;
+               ;; Renaming the marker needed a two-phase migration precisely
+               ;; because this gate enforces it: a live gate runs from the OLD
+               ;; compiled code while a sweep rewrites it, so it must accept
+               ;; both for one step, then tighten. The sweep also rewrote the
+               ;; comment that said so — prose describing a rename is not
+               ;; exempt from the rename.
+               (not (:external (meta (second s)))))
+      (when-let [hit (some (fn [sym]
+                             (let [q (when-let [a (some-> (namespace sym) symbol)]
+                                       (when-let [full (aliases a)]
+                                         (symbol (str full) (name sym))))]
+                               (when (contains? spawning-vars (or q sym)) sym)))
+                           (all-symbols node))]
+        ;; the reason has to be the one that is TRUE of this var. Telling an
+        ;; agent that api/open! "would recurse" is false — it spawns one image
+        ;; and terminates — and reasoning from it makes the process boundary
+        ;; look more fundamental than it is.
+        (let [q (or (when-let [a (some-> (namespace hit) symbol)]
+                      (when-let [full (aliases a)] (symbol (str full) (name hit))))
+                    hit)]
+          (str "this test calls " hit " — "
+               (if (contains? reentrant-vars q)
+                 (str "it runs the whole suite (or a server that never"
+                      " returns), so in-image it would re-enter itself without"
+                      " bound")
+                 (str "it spawns a slopp image, which costs a JVM per test one"
+                      " level deeper than the in-image tier already runs, and"
+                      " loading a fixture store into that runtime pollutes the"
+                      " test→form trace the warranty numbers come from"))
+               ". Tag it ^:external:"
+               " (deftest ^:external " (second s) " …) — external tests run in"
+               " the external suite (test_run {:external true})"))))))
 
 (defn replace-form
   "Pure edit: validate `new-source` (one dialect-legal form) and replace the form
@@ -1149,6 +1078,77 @@
                 (seq advisories) (assoc :advisories advisories)
                 (seq drift)      (assoc :drift drift))))
           (missing-form-error store ns-sym form-name))))))
+
+(defn live-callers-error
+  "Refuse deleting `ns-sym/nm` while something still CALLS it — nil when
+  nothing does.
+
+  The delete was accepted and the damage arrived later, somewhere else: the
+  form goes, the reload of its namespace fails to compile, and the store then
+  boots NOWHERE. Three times in one wave that left a store its own tools could
+  not open. `delete-form!`'s docstring claimed the failure would show up as
+  tests going red, \"the honest signal if it was still referenced\" — but the
+  reload fails before any test runs, so the verification reported zero tests
+  and nothing wrong.
+
+  Only `:static` references count: those are the ones that must resolve at
+  compile time and so are the ones that break the load. A quoted symbol
+  (`:carrier`) or a `^{:covers}` marker names the form without needing it to
+  exist. A form calling ITSELF is not a caller — recursion would otherwise
+  make every recursive function undeletable.
+
+  Same-namespace callers count, and they are the common case: the delete that
+  bricked the store was used by three performers in its OWN namespace, and a
+  cross-namespace-only check would have waved it through."
+  [store ns-sym nm]
+  (let [qsym    (symbol (str ns-sym) (str nm))
+        callers (->> (refs/refs-to store qsym)
+                     (filter #(= :static (:via %)))
+                     (remove #(and (= ns-sym (:from-ns %)) (= nm (:from-var %))))
+                     (map #(symbol (str (:from-ns %)) (str (:from-var %))))
+                     distinct sort vec)]
+    (when (seq callers)
+      {:error (str qsym " is still called by "
+                   (str/join ", " (take 8 callers))
+                   (when (> (count callers) 8)
+                     (str " (+" (- (count callers) 8) " more)"))
+                   " — delete or update them first."
+                   " query_depends {on \"" qsym "\"} lists every caller."
+                   " Deleting it now would be accepted and the RELOAD would"
+                   " fail, leaving the store unable to boot. Delete the"
+                   " CALLERS and this together in one edit_group (delete steps, any"
+                   " order — a caller inside the group is fine), or one"
+                   " edit_delete_form each, callers first. If two forms call"
+                   " EACH OTHER, a group deleting both is the valid order.")})))
+
+(defn parse-forms
+  "Parse `source` as ONE OR MORE dialect-legal top-level forms — the batch
+  face of `parse-form`, for a write that lands several new forms at once.
+  Every form passes the same gate one would (`control-char-refusal` on the
+  text, D3/D4 via `dialect-check`, D7's declare ban). Returns
+  `{:nodes [node …]}` or `{:error msg}` — never throws (F3)."
+  [source]
+  (if-let [ctl (control-char-refusal source)]
+    {:error ctl}
+    (try
+      (let [nodes (vec (filter n/sexpr-able? (n/children (p/parse-string-all source))))]
+        (if (empty? nodes)
+          {:error "expected at least one top-level form, got 0"}
+          (or (some (fn [node]
+                      (let [s (n/sexpr node)]
+                        (cond
+                          (and (seq? s) (= 'declare (first s)))
+                          {:error (str "(declare …) is managed for you — slopp orders forms"
+                                       " itself: write your forms in any order (definitions are"
+                                       " reordered above their callers), and a genuine"
+                                       " mutual-recursion cycle gets a marked declare inserted"
+                                       " automatically. Drop the declare and write the real forms.")}
+                          (dialect-check node)
+                          {:error (dialect-check node)})))
+                    nodes)
+              {:nodes nodes})))
+      (catch Exception e
+        {:error (str "unparseable source (unbalanced?): " (ex-message e))}))))
 
 (defn- gate-with
   "nil if `code` uses none of `banned` where it could act; else the refusal
@@ -1255,22 +1255,6 @@
       (when (seq cands)
         [alias (vec cands)]))))
 
-(defn ^:export missing-alias-require
-  "The ONE require spec — `\"[clojure.string :as str]\"` — that would supply
-  the alias a `No such namespace: X` failure names, or nil when the failure
-  is not that shape, nothing can supply it, or SEVERAL namespaces could
-  (`missing-alias-hint` names those; a guess costs more than a question).
-  A DOTTED X is a fully-qualified reference to a store namespace the ns form
-  never required (a cold image's shape of the loader hole): the repair is
-  the bare `\"[a.b.c]\"`. The write path adds this as a `:system` require
-  and retries the write."
-  [store err]
-  (when-let [[alias cands] (alias-candidates store err)]
-    (when (= 1 (count cands))
-      (if (and (str/includes? alias ".") (= (symbol alias) (first cands)))
-        (str "[" (first cands) "]")
-        (str "[" (first cands) " :as " alias "]")))))
-
 (defn- missing-alias-hint
   "For a `No such namespace: X` compile failure, the `ns_add_require` call that
   would supply `X` — or nil when nothing can, because a wrong suggestion costs
@@ -1321,6 +1305,22 @@
      (if-let [a (anchor-error store err)]
        (assoc a :error msg)
        {:error msg}))))
+
+(defn ^:export missing-alias-require
+  "The ONE require spec — `\"[clojure.string :as str]\"` — that would supply
+  the alias a `No such namespace: X` failure names, or nil when the failure
+  is not that shape, nothing can supply it, or SEVERAL namespaces could
+  (`missing-alias-hint` names those; a guess costs more than a question).
+  A DOTTED X is a fully-qualified reference to a store namespace the ns form
+  never required (a cold image's shape of the loader hole): the repair is
+  the bare `\"[a.b.c]\"`. The write path adds this as a `:system` require
+  and retries the write."
+  [store err]
+  (when-let [[alias cands] (alias-candidates store err)]
+    (when (= 1 (count cands))
+      (if (and (str/includes? alias ".") (= (symbol alias) (first cands)))
+        (str "[" (first cands) "]")
+        (str "[" (first cands) " :as " alias "]")))))
 
 (def clojure-test-publics
   "clojure.test's public names — what a spec uses unqualified through

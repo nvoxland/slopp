@@ -21,11 +21,12 @@
   an organising principle and became the only thing there is."
   (:require [slopp.api.contracts :as contracts]))
 
-(defn ^{:http/method :get :rest/path "/api/namespaces" :http/auth :public
+(defn ^{:http/method :get :rest/path "/api/projects/:slug/namespaces" :http/auth :public
         :rest/response contracts/namespace-list
-        :http/reads {:namespaces [:browse/namespaces []]}}
+        :http/reads {:namespaces [:browse/namespaces []]}
+        :http/resolve {:session [:project/reader [:path-params :slug]]}}
   namespaces
-  "GET /api/namespaces — every namespace with its form count, sorted.
+  "GET /api/projects/:slug/namespaces — every namespace with its form count, sorted.
 
   Goes through the `:browse/namespaces` read rather than reading the store
   here. Reads are addressed by VOCABULARY rather than by var, so a performer
@@ -43,12 +44,13 @@
    :body (mapv (fn [{:keys [ns forms]}] {:ns (str ns) :forms forms})
                (:namespaces (:http/reads req)))})
 
-(defn ^{:http/method :get :rest/path "/api/ns/:ns" :http/auth :public
+(defn ^{:http/method :get :rest/path "/api/projects/:slug/ns/:ns" :http/auth :public
         :rest/request contracts/ns-outline-request
         :rest/response contracts/ns-outline
-        :http/reads {:outline [:browse/ns-outline [:path-params :ns]]}}
+        :http/reads {:outline [:browse/ns-outline [:path-params :ns]]}
+        :http/resolve {:session [:project/reader [:path-params :slug]]}}
   ns-outline
-  "GET /api/ns/:ns — one namespace's forms in store order, and what tests it.
+  "GET /api/projects/:slug/ns/:ns — one namespace's forms in store order, and what tests it.
 
   An unknown namespace is a 404 rather than an empty outline: `{:forms []}`
   would say the namespace exists and holds nothing, which is a different
@@ -79,11 +81,12 @@
             :gaps gaps}}
     {:status 404 :body {:error "no such namespace"}}))
 
-(defn ^{:http/method :get :rest/path "/api/timeline" :http/auth :public
+(defn ^{:http/method :get :rest/path "/api/projects/:slug/timeline" :http/auth :public
         :rest/response contracts/timeline
-        :http/reads {:timeline [:ui/timeline []]}}
+        :http/reads {:timeline [:ui/timeline []]}
+        :http/resolve {:session [:project/reader [:path-params :slug]]}}
   timeline
-  "GET /api/timeline — commit-points newest first, plus the working set.
+  "GET /api/projects/:slug/timeline — commit-points newest first, plus the working set.
 
   A projection, not new logic: `slopp.api.model/timeline` already returns a
   JSON-shaped value, which is why the SPA rewrite is mostly moving rendering
@@ -91,12 +94,13 @@
   [req]
   {:status 200 :body (:timeline (:http/reads req))})
 
-(defn ^{:http/method :get :rest/path "/api/change/:range" :http/auth :public
+(defn ^{:http/method :get :rest/path "/api/projects/:slug/change/:range" :http/auth :public
         :rest/request contracts/change-request
         :rest/response contracts/change-view
-        :http/reads {:change [:ui/change [:path-params :range]]}}
+        :http/reads {:change [:ui/change [:path-params :range]]}
+        :http/resolve {:session [:project/reader [:path-params :slug]]}}
   change
-  "GET /api/change/:range — one commit-point reviewed, `from..to`.
+  "GET /api/projects/:slug/change/:range — one commit-point reviewed, `from..to`.
 
   A range arrives from a URL, so both ends are user input. The read already
   separates \"nothing changed here\" from \"that is not a range\", and only the
@@ -106,12 +110,13 @@
     {:status 200 :body c}
     {:status 404 :body {:error "no such change range"}}))
 
-(defn ^{:http/method :get :rest/path "/api/form/:id" :http/auth :public
+(defn ^{:http/method :get :rest/path "/api/projects/:slug/form/:id" :http/auth :public
         :rest/request contracts/form-request
         :rest/response contracts/form-view
-        :http/reads {:view [:ui/form []]}}
+        :http/reads {:view [:ui/form []]}
+        :http/resolve {:session [:project/reader [:path-params :slug]]}}
   form
-  "GET /api/form/:id — one form's permalink model, at the requested rendering
+  "GET /api/projects/:slug/form/:id — one form's permalink model, at the requested rendering
   FIDELITY (`?view=`) and call-graph DEPTH (`?depth=`).
 
   Declared over the WHOLE request rather than one segment, because it is
@@ -136,12 +141,13 @@
     {:status 200 :body v}
     {:status 404 :body {:error "no such form"}}))
 
-(defn ^{:http/method :get :rest/path "/api/source/:ns/:name" :http/auth :public
+(defn ^{:http/method :get :rest/path "/api/projects/:slug/source/:ns/:name" :http/auth :public
         :rest/request contracts/source-request
         :rest/response contracts/form-source
-        :http/reads {:source [:browse/form-source [:path-params]]}}
+        :http/reads {:source [:browse/form-source [:path-params]]}
+        :http/resolve {:session [:project/reader [:path-params :slug]]}}
   source
-  "GET /api/source/:ns/:name — one form's source text.
+  "GET /api/projects/:slug/source/:ns/:name — one form's source text.
 
   The text arrives as a STRING and is escaped by the client when it renders.
   Serving arbitrary store source safely is the standing security dogfood
@@ -154,11 +160,12 @@
                           :form-id form-id :source source}}
       {:status 404 :body {:error "no such form"}})))
 
-(defn ^{:http/method :get :rest/path "/api/modules" :http/auth :public
+(defn ^{:http/method :get :rest/path "/api/projects/:slug/modules" :http/auth :public
         :rest/response contracts/module-index
-        :http/reads {:modules [:browse/modules []]}}
+        :http/reads {:modules [:browse/modules []]}
+        :http/resolve {:session [:project/reader [:path-params :slug]]}}
   modules
-  "GET /api/modules — the architecture: one row per module, the layering, and
+  "GET /api/projects/:slug/modules — the architecture: one row per module, the layering, and
   the cycles.
 
   A projection, not new logic: `slopp.api.model/module-index` already returns
@@ -174,7 +181,58 @@
   [req]
   {:status 200 :body (:modules (:http/reads req))})
 
-(defn ^{:http/method :get :rest/path "/api/rest/paths" :http/auth :public
+(defn ^{:http/method :get :rest/path "/api/projects/:slug/module/:m" :http/auth :public
+        :rest/request contracts/module-request
+        :rest/response contracts/module-detail
+        :http/reads {:detail [:browse/module [:path-params :m]]}
+        :http/resolve {:session [:project/reader [:path-params :slug]]}}
+  module
+  "GET /api/projects/:slug/module/:m — one module from the inside: its namespaces, the edges
+  among them, the layering, and what crosses its boundary.
+
+  The level below `/api/modules`, which ships module→module `:deps` and so
+  stops exactly where the next question starts — descending into a box on the
+  diagram had nothing behind it.
+
+  An unknown module is a 404, not an empty frame, on the same reasoning
+  `ns-outline` uses: `{:namespaces []}` would say the module exists and holds
+  nothing, which is a different statement and a false one."
+  [req]
+  (if-let [d (:detail (:http/reads req))]
+    {:status 200 :body d}
+    {:status 404 :body {:error "no such module"}}))
+
+(defn ^{:http/method :get :rest/path "/api/projects/:slug/search" :http/auth :public
+        :rest/request contracts/search-request
+        :rest/response contracts/search-results
+        :http/reads {:results [:browse/search []]}
+        :http/resolve {:session [:project/reader [:path-params :slug]]}}
+  search
+  "GET /api/projects/:slug/search?q=&limit= — the door: everything whose name, docstring,
+  recorded why or source matches, ranked across all three grains at once.
+
+  Every other read here answers a question a reader already knows how to ask.
+  This is the one that finds the ADDRESS, which is why it is the entry that
+  decides whether the rest of the reader API has a way in at all — `/store`
+  opening on a module diagram with no way to ask a question was the finding
+  that drove the wave.
+
+  **Always 200, including for a blank query and for no matches.** The search
+  screen is reachable by URL, so a reader can arrive having asked nothing; the
+  honest answer to that is the empty state, and a 400 would put an error panel
+  in front of someone who did nothing wrong. No-match is 200 for the ordinary
+  reason. There is no 404 here at all — unlike `/api/module/:m`, this endpoint
+  has no subject that can fail to exist, only a question that can go
+  unanswered, and those are different things.
+
+  `:rest/request` is declared for the same reason `form`'s is: without it the
+  generated client takes a params map nothing reads from, so `?q=` answers on
+  the wire and is unreachable through the typed client — which pushes a
+  consumer toward the hand-rolled fetch `direct-http` refuses."
+  [req]
+  {:status 200 :body (:results (:http/reads req))})
+
+(defn ^{:http/method :get :rest/path "/api/projects/:slug/rest/paths" :http/auth :public
         :rest/media-type "application/edn"
         :rest/response contracts/rest-paths-document
         :rest/unconstrained-ok
@@ -190,9 +248,10 @@
          and generates from, so a [:fn …] in it would arrive as something they
          cannot evaluate or trust. The constraint is the publishing, and
          publishing is the point."
-        :http/reads {:doc [:ui/rest-paths []]}}
+        :http/reads {:doc [:ui/rest-paths []]}
+        :http/resolve {:session [:project/reader [:path-params :slug]]}}
   rest-paths
-  "GET /api/rest/paths — the typed API this project serves, as EDN.
+  "GET /api/projects/:slug/rest/paths — the typed API this project serves, as EDN.
 
   What makes a reviewer UI in a DIFFERENT store possible: it generates its
   typed client from this document instead of sharing the producer's contracts
@@ -222,7 +281,7 @@
    :headers {"Content-Type" "application/edn"}
    :body (pr-str (:doc (:http/reads req)))})
 
-(defn ^{:http/method :get :rest/path "/api/http/paths" :http/auth :public
+(defn ^{:http/method :get :rest/path "/api/projects/:slug/http/paths" :http/auth :public
         :rest/media-type "application/edn"
         :rest/response contracts/http-paths-document
         :rest/unconstrained-ok
@@ -231,9 +290,10 @@
          [:group \"admin\"] — so no narrower shape is true of all of them.
          PERMANENT for the same reason the typed document's is: a predicate
          cannot be published to a consumer who has to evaluate it."
-        :http/reads {:doc [:ui/http-paths []]}}
+        :http/reads {:doc [:ui/http-paths []]}
+        :http/resolve {:session [:project/reader [:path-params :slug]]}}
   http-paths
-  "GET /api/http/paths — the CONTENT this project serves, as EDN.
+  "GET /api/projects/:slug/http/paths — the CONTENT this project serves, as EDN.
 
   The gap this closes, reported by a consumer building a reviewer UI: **a
   remote consumer of a slopp project could discover every API and zero
@@ -260,12 +320,13 @@
    :headers {"Content-Type" "application/edn"}
    :body (pr-str (:doc (:http/reads req)))})
 
-(defn ^{:http/method :get :rest/path "/api/webapp/paths" :http/auth :public
+(defn ^{:http/method :get :rest/path "/api/projects/:slug/webapp/paths" :http/auth :public
         :rest/media-type "application/edn"
         :rest/response contracts/webapp-paths-document
-        :http/reads {:doc [:ui/webapp-paths []]}}
+        :http/reads {:doc [:ui/webapp-paths []]}
+        :http/resolve {:session [:project/reader [:path-params :slug]]}}
   webapp-paths
-  "GET /api/webapp/paths — the pages this project's BROWSER routes to, as EDN.
+  "GET /api/projects/:slug/webapp/paths — the pages this project's BROWSER routes to, as EDN.
 
   One row per `:webapp/path` form, naming the function that renders it and
   what that page is.
@@ -286,64 +347,16 @@
    :headers {"Content-Type" "application/edn"}
    :body (pr-str (:doc (:http/reads req)))})
 
-(defn ^{:http/method :get :rest/path "/api/module/:m" :http/auth :public
-        :rest/request contracts/module-request
-        :rest/response contracts/module-detail
-        :http/reads {:detail [:browse/module [:path-params :m]]}}
-  module
-  "GET /api/module/:m — one module from the inside: its namespaces, the edges
-  among them, the layering, and what crosses its boundary.
-
-  The level below `/api/modules`, which ships module→module `:deps` and so
-  stops exactly where the next question starts — descending into a box on the
-  diagram had nothing behind it.
-
-  An unknown module is a 404, not an empty frame, on the same reasoning
-  `ns-outline` uses: `{:namespaces []}` would say the module exists and holds
-  nothing, which is a different statement and a false one."
-  [req]
-  (if-let [d (:detail (:http/reads req))]
-    {:status 200 :body d}
-    {:status 404 :body {:error "no such module"}}))
-
-(defn ^{:http/method :get :rest/path "/api/search" :http/auth :public
-        :rest/request contracts/search-request
-        :rest/response contracts/search-results
-        :http/reads {:results [:browse/search []]}}
-  search
-  "GET /api/search?q=&limit= — the door: everything whose name, docstring,
-  recorded why or source matches, ranked across all three grains at once.
-
-  Every other read here answers a question a reader already knows how to ask.
-  This is the one that finds the ADDRESS, which is why it is the entry that
-  decides whether the rest of the reader API has a way in at all — `/store`
-  opening on a module diagram with no way to ask a question was the finding
-  that drove the wave.
-
-  **Always 200, including for a blank query and for no matches.** The search
-  screen is reachable by URL, so a reader can arrive having asked nothing; the
-  honest answer to that is the empty state, and a 400 would put an error panel
-  in front of someone who did nothing wrong. No-match is 200 for the ordinary
-  reason. There is no 404 here at all — unlike `/api/module/:m`, this endpoint
-  has no subject that can fail to exist, only a question that can go
-  unanswered, and those are different things.
-
-  `:rest/request` is declared for the same reason `form`'s is: without it the
-  generated client takes a params map nothing reads from, so `?q=` answers on
-  the wire and is unreachable through the typed client — which pushes a
-  consumer toward the hand-rolled fetch `direct-http` refuses."
-  [req]
-  {:status 200 :body (:results (:http/reads req))})
-
 (defn ^{:rest/unconstrained-ok
         "`:config → :default` and `:config → :effective` ONLY. A setting's value has the type ITS OWN registry entry declares — most are scalars and http.auth.providers is a SET — so there is no common type to name, and the registry is open: the next capability may declare a map. Constraining them to a scalar union was tried and REFUSED a real document, 500ing this endpoint against its own contract. Every other field here IS named: :value is the raw stored string, :owners is string to string, :orphaned/:value is a string."}
-        ^{:http/method :get :rest/path "/api/config" :http/auth :public
+        ^{:http/method :get :rest/path "/api/projects/:slug/config" :http/auth :public
         :rest/media-type "application/edn"
         :rest/request contracts/config-request
         :rest/response contracts/config-document
-        :http/reads {:doc [:ui/config []]}}
+        :http/reads {:doc [:ui/config []]}
+        :http/resolve {:session [:project/reader [:path-params :slug]]}}
   config
-  "GET /api/config — how this project is CONFIGURED, as EDN.
+  "GET /api/projects/:slug/config — how this project is CONFIGURED, as EDN.
 
   One row per setting, each carrying the capability that OWNS it, so a single
   page can group by owner without knowing the list of capabilities. That is
@@ -367,23 +380,25 @@
    :headers {"Content-Type" "application/edn"}
    :body (pr-str (:doc (:http/reads req)))})
 
-(defn ^{:http/method :get :rest/path "/api/bundle" :http/auth :public
+(defn ^{:http/method :get :rest/path "/api/projects/:slug/bundle" :http/auth :public
         :rest/response contracts/bundle
-        :http/reads {:bundle [:orient/bundle []]}}
+        :http/reads {:bundle [:orient/bundle []]}
+        :http/resolve {:session [:project/reader [:path-params :slug]]}}
   bundle
-  "GET /api/bundle?ask= — the ask's map as ONE injectable text block: the
+  "GET /api/projects/:slug/bundle?ask= — the ask's map as ONE injectable text block: the
   prompt hook fetches this at prompt time and the model starts with its
   orientation already in context (moonshot A). Always 200; a blank ask is
-  the plain ranking, exactly as /api/search answers a blank query."
+  the plain ranking, exactly as /api/projects/:slug/search answers a blank query."
   [req]
   {:status 200 :body {:bundle (:bundle (:http/reads req))}})
 
-(defn ^{:http/method :get :rest/path "/api/cost" :http/auth :public
+(defn ^{:http/method :get :rest/path "/api/projects/:slug/cost" :http/auth :public
         :rest/request contracts/cost-request
         :rest/response contracts/cost
-        :http/reads {:cost [:ui/cost []]}}
+        :http/reads {:cost [:ui/cost []]}
+        :http/resolve {:session [:project/reader [:path-params :slug]]}}
   cost
-  "GET /api/cost?by= — where this store's wall clock and model spend went, as
+  "GET /api/projects/:slug/cost?by= — where this store's wall clock and model spend went, as
   a SERIES.
 
   Every other read here answers a question about the store as it stands. This
