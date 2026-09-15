@@ -147,7 +147,7 @@ released jar from a neutral dir, and slopp2 is opened on it like any other
 project. The in-progress version is slopp2's dev instance — `run.daemon.main =
 slopp.daemon/-main`, `run.daemon.port = 7358` in the `dev` config — booted from
 the store by the machine daemon and refreshed at every `done`. To exercise it,
-start a second agent with `SLOPP_DAEMON_PORT=7358` in its environment; the
+start a second agent with `SLOPP_PORT=7358` in its environment; the
 plugin's MCP url, hooks and CLI all name that port and never start a daemon
 there. So: a
 fix to a TOOL you are using reaches the dev instance at the next done and the

@@ -274,11 +274,11 @@ slopp <op> [json]        # one tool call, routed to the daemon (fails, and says 
 slopp --doctor           # self-check java, jar, hooks, skills, store probe (through the daemon)
 ```
 
-The daemon's port is the argument, else `SLOPP_DAEMON_PORT`, else 7357 —
+The daemon's port is the argument, else `SLOPP_PORT`, else 7357 —
 one knob, read by the daemon, the plugin's MCP url, the hooks and `slopp
 <op>` alike, so they cannot disagree. The daemon records itself in
 `~/.slopp/daemon.json` (the default port) or `daemon-<port>.json`; setting
-`SLOPP_DAEMON_PORT` names a different one, such as a project's dev instance.
+`SLOPP_PORT` names a different one, such as a project's dev instance.
 Neither is ever started by a call or by the plugin:
 the machine daemon is yours (`slopp daemon`), and a dev instance is run by a
 project's dev config. `SLOPP_LIVE=1` makes a daemon hot-reload its own namespaces as the store

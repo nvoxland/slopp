@@ -2,7 +2,7 @@
 # should talk to recorded itself, and how to read that record.
 #   daemon_file       sets PORT and DAEMON_FILE — ~/.slopp/daemon.json for the
 #                     default port (7357), daemon-<port>.json for any other;
-#                     SLOPP_DAEMON_PORT is the one knob, the same one the
+#                     SLOPP_PORT is the one knob, the same one the
 #                     plugin's MCP url and the daemon itself read
 #   read_daemon_file  sets DURL, DPID and DTOKEN from that file
 #   no_daemon         one sentence on stdout saying what to start, when the
@@ -11,7 +11,7 @@
 # fields so nothing beyond bash and curl is needed on the client.
 DEFAULT_PORT=7357
 daemon_file() {
-  PORT="${SLOPP_DAEMON_PORT:-$DEFAULT_PORT}"
+  PORT="${SLOPP_PORT:-$DEFAULT_PORT}"
   if [ "$PORT" = "$DEFAULT_PORT" ]; then DAEMON_FILE="$HOME/.slopp/daemon.json"; else DAEMON_FILE="$HOME/.slopp/daemon-$PORT.json"; fi
 }
 read_daemon_file() {

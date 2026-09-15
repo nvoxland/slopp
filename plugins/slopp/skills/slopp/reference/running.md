@@ -111,7 +111,7 @@ that job running while somebody works on it.
 ### One slopp for the machine: `slopp daemon`
 
 `slopp daemon [port]` runs ONE slopp process for every project on the box.
-Its port is the argument, else `SLOPP_DAEMON_PORT`, else 7357 — ONE knob,
+Its port is the argument, else `SLOPP_PORT`, else 7357 — ONE knob,
 because the plugin's MCP entry is a URL Claude Code expands from the
 environment, and a settings file would be a second source it cannot read.
 It binds first and
@@ -146,7 +146,7 @@ session's `done` refreshes that one server.
 
 **This is the only server, and the plugin talks to it directly.** The
 plugin's MCP entry is the daemon's URL
-(`http://127.0.0.1:${SLOPP_DAEMON_PORT:-7357}/api/projects/_/mcp`, the
+(`http://127.0.0.1:${SLOPP_PORT:-7357}/api/projects/_/mcp`, the
 project named by an `X-Slopp-Dir: ${CLAUDE_PROJECT_DIR}` header Claude Code
 expands) — no process per session at all. A session id the daemon no
 longer holds (a restart, an idle reap) is re-attached UNDER THAT ID when
@@ -168,7 +168,7 @@ slopp.daemon/-main`, `run.daemon.port = 7358`. The machine daemon boots that
 child from the store, refreshes it at every `done`, and the child — told its
 role — serves whatever attaches to IT and never manages its own project's app
 server. To drive the in-progress version, give a second agent
-`SLOPP_DAEMON_PORT=7358`: the MCP url, the hooks and the CLI then all name
+`SLOPP_PORT=7358`: the MCP url, the hooks and the CLI then all name
 that port (the record is `~/.slopp/daemon-7358.json`) and never START a
 daemon there — a dev instance is the machine daemon's to run. A new release replaces the base;
 until one is cut, a jar built from a commit point is the base. Two daemons of

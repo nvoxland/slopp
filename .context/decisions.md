@@ -7149,8 +7149,8 @@ project's app server like any other's. Nathan's framing, 2026-09-12.
 
 - **The machine daemon's port is a machine setting** — `daemon-port` in
   `~/.slopp/config.json` — because the daemon has no store to read one from.
-  (Retired by `D-no-pipe`, 2026-09-14: `SLOPP_DAEMON_PORT` is the one knob.)
-  Precedence in `daemon-port`: argument, `SLOPP_DAEMON_PORT`, what the manager
+  (Retired by `D-no-pipe`, 2026-09-14: `SLOPP_PORT` is the one knob.)
+  Precedence in `daemon-port`: argument, `SLOPP_PORT`, what the manager
   told a declared entry, the machine setting, 7357. `daemon.json` belongs to
   the machine's configured port, not the literal default.
 - **A declared entry's dev port is the run config's** (`run.<name>.port`),
@@ -7166,7 +7166,7 @@ project's app server like any other's. Nathan's framing, 2026-09-12.
   daemon and its in-progress copy serve the same namespaces by name, and once
   the base is a release the rule's premise inverts — the child is the newer
   copy, not the staler one.
-- **The pipe and the CLI honour `SLOPP_DAEMON_PORT`** to pick the daemon file,
+- **The pipe and the CLI honour `SLOPP_PORT`** to pick the daemon file,
   and never START a daemon on a port that is not the machine's: a dev instance
   is the machine daemon's to run. (Superseded the next day by `D-daemon-is-yours`:
   they never start one on ANY port.)
@@ -7218,7 +7218,7 @@ daemon serving a project's declared app, not the plugin starting a daemon.
 
 **Decision.** The plugin ships no Python and no per-session process. Its MCP
 entry is the daemon's URL —
-`http://127.0.0.1:${SLOPP_DAEMON_PORT:-7357}/api/projects/_/mcp` with
+`http://127.0.0.1:${SLOPP_PORT:-7357}/api/projects/_/mcp` with
 `X-Slopp-Dir: ${CLAUDE_PROJECT_DIR}` — and the hooks and `slopp <op>` are
 one `curl` each onto two new declared doors: `POST /api/projects/:slug/hook`
 (the Claude Code hook payload in, what the hook prints out; the ask into the
@@ -7234,7 +7234,7 @@ shell has none to keep in step. Two consequences fell out:
   transport echoes the id `initialize` gave it and never adopts another, so
   the pipe-era "re-attach under a fresh id" would have minted a session per
   request after a daemon restart. Now a restart costs one late answer.
-- **One knob for the port: `SLOPP_DAEMON_PORT`.** `daemon-port` in
+- **One knob for the port: `SLOPP_PORT`.** `daemon-port` in
   `~/.slopp/config.json` (D-release-base) is retired: the MCP url is expanded
   from the environment and cannot read a file, and two sources that can
   disagree is the failure the pipe used to paper over. `daemon.json` is the
