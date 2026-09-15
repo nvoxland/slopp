@@ -173,9 +173,7 @@ that port (the record is `~/.slopp/daemon-7358.json`) and never START a
 daemon there — a dev instance is the machine daemon's to run. A new release replaces the base;
 until one is cut, a jar built from a commit point is the base. Two daemons of
 different versions will hold one store, so the store format must stay readable
-by the previous release, or the release ships first. (`SLOPP_LIVE=1
-SLOPP_DAEMON_DIR=$PWD slopp daemon` is the older loop — the tool you are using
-is the code you are editing — and is still honoured.)
+by the previous release, or the release ships first.
 
 Under the daemon three things are shared that used to be per session. Your
 oracle image boots on the FIRST call that needs one (an eval, a write, a

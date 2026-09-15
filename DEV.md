@@ -70,14 +70,14 @@ code and the other serving you.
 From a checkout:
 
 ```sh
-SLOPP_LIVE=1 clojure -M -m slopp.kernel.boot .
+clojure -M -m slopp.kernel.boot .
 ```
 
-`SLOPP_LIVE=1` makes it watch the store's `data_version` and hot-reload changed
-namespaces and everything that requires them (dependencies first), so an edit
-you just committed is live in the server that made it — including in handlers
-that captured a value from what you changed at `def` time. Unset (the default)
-freezes at startup instead.
+This boots slopp from the store and serves it — loaded once, no hot-reload of
+its own code. To develop with the in-progress version tracking your edits,
+work through the machine daemon: the checkout runs as a project whose dev
+instance the daemon re-serves at each `done` (see
+`plugins/slopp/skills/slopp/reference/running.md`).
 
 **Startup is async (concurrent sessions).** The MCP server completes its
 `initialize` handshake as soon as the store VALUE loads and boots the image
@@ -153,13 +153,10 @@ plugin's MCP url, hooks and CLI all name that port and never start a daemon
 there. So: a
 fix to a TOOL you are using reaches the dev instance at the next done and the
 machine daemon at the next release. Until a release is cut, `target/slopp.jar`
-built from a commit point is the base (`SLOPP_JAR=$PWD/target/slopp.jar`, no
-`SLOPP_LIVE`): `slopp daemon stop`, then `slopp daemon` — the daemon is
-yours to run (2026-09-13); no call or session start brings one up, and a
-session with none on the port fails until you do. The older
-loop — `SLOPP_LIVE=1`, the daemon booted from this dir, the tool you use being
-the code you edit — still works and is what `.claude/settings.json` set
-before.
+built from a commit point is the base (`SLOPP_JAR=$PWD/target/slopp.jar`):
+`slopp daemon stop`, then `slopp daemon` — the daemon is yours to run
+(2026-09-13); no call or session start brings one up, and a session with none
+on the port fails until you do.
 
 Rebuild the jar for kernel or dependency changes, and to cut a base: `uber`
 builds aside and atomically renames, so a live process keeps its old jar inode

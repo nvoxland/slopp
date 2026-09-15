@@ -7263,6 +7263,40 @@ Windows story without bash — is the next step if the floor should drop
 further, and with the logic in the daemon it is a transport swap; slopp's own
 `build-native.sh` is the way to build it.
 
+## D-no-daemon-live (2026-09-15, user decision) — the daemon has no self-reload; live is purely a dev-instance property
+
+**Decision.** The boot kernel's live-reload subsystem is removed: `watch-live!`
+and the primitives only it used (`reload-ns!`, `departed-vars`,
+`failure-message`, `data-version`). `slopp.kernel.boot/-main` loads a store's
+program ONCE and runs it; `:mode` is always `:snapshot`. `SLOPP_LIVE` is gone
+entirely — no env var, no flag, no `--live`.
+
+Keeping a process current AS ITS STORE CHANGES is now purely a property of
+being a DEV INSTANCE the daemon manages: `slopp.webdev.live` re-serves a
+managed child at each `done`, booting it afresh from the store. That is
+inherent to the manager's app-management, not something the boot kernel knows
+about. `with-dependents` (the dependency-aware reload set) stays — the
+dev-instance refresh shares it.
+
+**Why.** Nathan, 2026-09-15: "there should not be any 'is it live and
+reloading' logic built into the daemon itself. That should be purely part of
+'it's running as a dev instance, started by the daemon.'" The two mechanisms
+were redundant: `watch-live!` only ever served the old self-host loop, and its
+one meaningful case (a daemon booted from a project store) is exactly the
+dev-instance case the manager already handles by re-serving at done. And
+`SLOPP_LIVE` was a footgun — on a released jar from a neutral dir it watched a
+store that never appears (`watch-live!`'s unadopted-dir wait spins forever), so
+the knob silently did nothing where it was most likely to be set. Reverses R2's
+"two modes behind a switch" and drops the `SLOPP_LIVE` half of `D-release-base`
+/ `D-no-pipe`.
+
+**What it costs.** There is no longer a self-modifying daemon: a session's own
+tools do not update as it edits. The in-progress version updates by the daemon
+re-serving the dev instance at each `done` (for testing on that instance), and
+the machine daemon's own tools update only by a jar rebuild + restart. That is
+the release-base trade made total: stability of the tools you edit with, in
+exchange for no mid-session self-modification.
+
 ## G6-revised (2026-09-12, user decision) — the repo is `nvoxland/slopp`; `slopp3` is deleted, not renamed
 
 G6 named `slopp3` "the permanent repo (for now)". The permanent repo is

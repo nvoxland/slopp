@@ -78,16 +78,15 @@ case "${1:-}" in
     # the projects it serves are whatever attaches. Working ON slopp needs
     # none of this: the machine daemon is a release and slopp's checkout is
     # a project like any other, whose dev instance (its run.daemon entry)
-    # is the in-progress version. SLOPP_LIVE=1 with SLOPP_DAEMON_DIR=$PWD
-    # is the older self-host loop, still honoured.
+    # is the in-progress version. SLOPP_DAEMON_DIR=$PWD boots the daemon from
+    # a project's own store instead of the neutral dir (still snapshot — the
+    # kernel loads once and does not hot-reload its own code).
     DIR="${SLOPP_DAEMON_DIR:-$HOME/.slopp}"
     mkdir -p "$DIR"
     shift
     # the port is passed explicitly: with no --main argument the kernel hands
-    # the entry its DIR, and a dir is not a port. Live vs snapshot is NOT a
-    # flag: SLOPP_LIVE in the environment (already set here if the user set it)
-    # is read by the kernel, so the daemon hot-reloads its own code only when
-    # asked, and a plain start is snapshot.
+    # the entry its DIR, and a dir is not a port. The kernel loads the code
+    # once and serves it; there is no live mode.
     daemon_file
     set -- "$DIR" --main slopp.daemon/-main "${1:-$PORT}"
     ;;
@@ -209,7 +208,6 @@ if [ "${1:-}" = "--doctor" ]; then
   else
     say "warn" "jar not cached yet — first launch fetches ${VERSION} (~27MB); run 'slopp --warm'"
   fi
-  [ -n "${SLOPP_LIVE:-}" ] && say "ok " "SLOPP_LIVE set — server tracks the store live"
   if [ -f ".slopp/store.db" ]; then
     if [ -n "${SLOPP_JAR:-}" ] || [ -f "$JAR" ]; then
       # query_project, not query_namespaces — the latter has never been a

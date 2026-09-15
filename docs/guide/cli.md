@@ -79,26 +79,28 @@ These are about the slopp SERVER's own code, not about your app — a
 distinction worth keeping, because one word covered both for a long time and
 cost several confident wrong diagnoses.
 
-```sh
-slopp .                 # snapshot (default): freeze the loaded version at startup
-SLOPP_LIVE=1 slopp .     # hot-reload the server's own namespaces as the store changes
-```
+There is only one: the daemon — and any built app — loads its code once at
+boot and serves it until restarted. There is no live/snapshot switch and no
+flag; a snapshot is all a running process is.
 
-Live mode (`SLOPP_LIVE`) matters when you are working on slopp itself, or on any store whose
-program the server is running. It watches the journal's `data_version` and
-reloads the namespaces whose source changed **plus everything that requires
-them**, dependencies first.
+Freshness of the IN-PROGRESS code is a property of a **dev instance**, not a
+mode of the server. When a project declares a `dev` run entry, the daemon
+manages that entry as the project's app and **re-serves it at each `done`**,
+booting it afresh from the store. So working on slopp itself, the machine
+daemon stays on its released jar while the in-progress version runs as the
+project's dev instance and tracks every landed change.
 
-The dependents are not thoroughness for its own sake. Clojure evaluates a lot
-ONCE, at `def` time, and keeps the result — a response schema referenced from a
-handler's metadata is a value captured when that `defn` ran. Reload only what
-changed and the handler goes on publishing the old schema forever, because its
-own source never moved. Dependencies reload first, so a dependent never
-re-captures the value that is about to change.
+That re-serve reloads the changed namespaces **plus everything that requires
+them**, dependencies first — not thoroughness for its own sake. Clojure
+evaluates a lot ONCE, at `def` time, and keeps the result: a response schema
+referenced from a handler's metadata is a value captured when that `defn` ran.
+Reload only what textually changed and the handler goes on publishing the old
+schema forever, because its own source never moved; reloading its dependencies
+first is what stops it re-capturing a value that is about to change.
 
-The one layer live mode cannot reload is the boot kernel itself
-(`src/slopp/kernel/boot.clj`, `src/slopp/kernel/rt.clj`), because that is the code doing the
-loading.
+The one layer nothing can reload is the boot kernel itself
+(`src/slopp/kernel/boot.clj`, `src/slopp/kernel/rt.clj`) — it is the code doing the
+loading, so a change there needs a rebuilt jar and a restart.
 
 ## CI
 

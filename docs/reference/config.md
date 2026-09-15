@@ -281,6 +281,6 @@ one knob, read by the daemon, the plugin's MCP url, the hooks and `slopp
 `SLOPP_PORT` names a different one, such as a project's dev instance.
 Neither is ever started by a call or by the plugin:
 the machine daemon is yours (`slopp daemon`), and a dev instance is run by a
-project's dev config. `SLOPP_LIVE=1` makes a daemon hot-reload its own namespaces as the store
-it booted from changes (the older self-host loop); the default freezes the
-loaded version at startup.
+project's dev config. A daemon loads its code once at boot and serves it
+until restarted; the in-progress version of a project runs as its dev
+instance, which the daemon re-serves at each done.
