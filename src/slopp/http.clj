@@ -129,7 +129,8 @@
                                  " " (:path row)))))
         missing (for [row (:http/routes ctx)
                       [decl performers] [[:http/reads (:http/read-performers ctx)]
-                                         [:http/effects (:http/effect-performers ctx)]]
+                                         [:http/effects (:http/effect-performers ctx)]
+                                         [:http/resolve (:http/read-performers ctx)]]
                       kind (let [d (get row decl)]
                              ;; :http/reads is {key [kind & path]}; :http/effects
                              ;; is a plain collection of kinds

@@ -29,7 +29,7 @@
   metadata, the same contract query_surface reads off the stored node. A
   namespace that isn't loaded contributes no rows.
   Rows: {:handler <the var, callable> :method :path :kind :auth :http/effects
-  :http/reads :effectful?}.
+  :http/reads :http/resolve :effectful?}.
 
   **Both markers, because this is what actually serves.** The store-side
   traversal (`edit.http/web-endpoint-rows`) is a different walk over a
@@ -53,11 +53,6 @@
   [ns-syms]
   (vec
    (mapcat
-    ;; ONE row per declaration. A client-routed document used to contribute a
-    ;; generated catch-all per `:webapp/client-routes` prefix so a refreshed
-    ;; deep link reached the app; a shell now declares its own `**` path, so
-    ;; the catch-all IS the declaration and there is nothing to synthesize —
-    ;; which also ends the class of row nobody wrote appearing in the table.
     (fn [{:keys [row]}] [row])
     (for [ns-sym ns-syms
           :let   [nsx (find-ns (symbol ns-sym))]
@@ -68,13 +63,6 @@
                              (:http/path m) :content)]
           :when  kind]
       {:kind kind
-       ;; the CONTRACT rides the row when the endpoint declared one. The
-       ;; dispatcher holds a row at request time and nothing else, so a
-       ;; schema that is not here cannot be honoured — which is exactly why
-       ;; the wire crossing was unchecked until `rest` existed. `cond->`
-       ;; rather than plain keys: an endpoint that declares no contract must
-       ;; carry no key, because nil-because-absent and nil-because-broken
-       ;; would otherwise be the same row.
        :row (cond-> {:handler   v
                      :method    (:http/method m)
                      :path      (str (or (:rest/path m) (:http/path m)))
@@ -82,6 +70,12 @@
                      :auth      (:http/auth m)
                      :http/effects (:http/effects m)
                      :http/reads   (:http/reads m)
+                     ;; the REQUEST-SCOPED resolve declaration — {dep [kind &
+                     ;; path]}, resolved into the perform-ctx before the reads
+                     ;; run (slopp.http.dispatch/handle!). In the base map like
+                     ;; :http/reads: nil-because-absent is a fine row, since
+                     ;; the dispatcher reduces over nil to the base ctx.
+                     :http/resolve (:http/resolve m)
                      :effectful? (boolean (:http/effectful m))}
               (:rest/request m)  (assoc :rest/request (:rest/request m))
               (:rest/response m) (assoc :rest/response (:rest/response m))

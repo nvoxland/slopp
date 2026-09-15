@@ -802,3 +802,51 @@
                                       :webapp/bundle "/js/main.js"})]
         (is (= 200 (:status (slopp.http/handle!
                              bare {:request-method :get :uri "/app/nonsense"}))))))))
+
+(deftest a-route-RESOLVES-a-dependency-from-the-request-into-the-perform-ctx
+  ;; A route may declare a dependency resolved FROM the request into the
+  ;; perform-ctx before its reads or handler run — a per-tenant session keyed
+  ;; on a path param, say. Resolved through the SAME read performers, folded
+  ;; onto the base perform-ctx for THIS request only, so the value varies per
+  ;; request while the context is assembled once. This is the seam that lets a
+  ;; db-scoped endpoint receive a per-project reader without the handler doing
+  ;; the slug→session resolution itself.
+  (let [resolver (fn [_pctx tenant] {:tenant tenant :opened true})
+        who      (fn [pctx _] (:tenant pctx))
+        ctx {:http/routes [{:method :get :path "/t/:id/who" :kind :rest :auth :public
+                            :handler (fn [req] {:status 200 :body {:deps (:http/deps req)
+                                                                   :reads (:http/reads req)}})
+                            :http/resolve {:tenant [:open/tenant [:path-params :id]]}
+                            :http/reads {:name [:who/name [:path-params :id]]}}]
+             :http/read-performers {:open/tenant resolver :who/name who}
+             :http/effect-performers {}
+             :http/perform-ctx {:base true}}]
+    (testing "the resolved dependency is folded into the perform-ctx the handler sees as :http/deps"
+      (let [r (slopp.http/handle! ctx {:request-method :get :uri "/t/acme/who"})]
+        (is (= 200 (:status r)) (pr-str r))
+        (is (= {:base true :tenant {:tenant "acme" :opened true}} (get-in r [:body :deps]))
+            "the base ctx plus the per-request resolved dependency")))
+    (testing "a read performer sees the resolved dependency — resolve runs BEFORE reads"
+      (let [r (slopp.http/handle! ctx {:request-method :get :uri "/t/acme/who"})]
+        (is (= {:tenant "acme" :opened true} (get-in r [:body :reads :name]))
+            "who/name read the :tenant the resolve phase put on the ctx")))
+    (testing "with no :http/resolve the perform-ctx is the base, unchanged"
+      (let [plain {:http/routes [{:method :get :path "/x" :kind :rest :auth :public
+                                  :handler (fn [req] {:status 200 :body {:deps (:http/deps req)}})}]
+                   :http/read-performers {} :http/effect-performers {} :http/perform-ctx {:base true}}
+            r (slopp.http/handle! plain {:request-method :get :uri "/x"})]
+        (is (= {:base true} (get-in r [:body :deps])) (pr-str r))))))
+
+(deftest a-context-refuses-a-resolve-kind-no-performer-serves
+  ;; `:http/resolve` is checked at ASSEMBLY like `:http/reads` and
+  ;; `:http/effects`: a route resolving a dependency through a kind no
+  ;; performer here serves would throw at request time (500, not 404), so the
+  ;; namespace list is checked where the app is stood up. Resolvers ARE read
+  ;; performers, so the same `:http/read-performers` answers whether one exists.
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo #"(?i)perform"
+       (slopp.http/context
+        {:http/namespaces []
+         :http/routes [{:method :get :path "/t/:id" :kind :rest :auth :public
+                        :handler (fn [_] {:status 200 :body {}})
+                        :http/resolve {:session [:project/reader [:path-params :id]]}}]}))))

@@ -129,13 +129,14 @@
   the request carries none — a pre-resolved :http/identity is respected) →
   ROUTE (404) → POLICY (401 unauthenticated / 403 unauthorized — the
   handler is unreachable un-checked) → the declared CONTRACT (400, and only
-  when the context carries a validator) → declared :http/reads fetched via the
-  app's read performers → the handler, with :path-params, :query-params
+  when the context carries a validator) → declared :http/resolve dependencies
+  folded into a request-scoped perform-ctx → declared :http/reads fetched via
+  the app's read performers → the handler, with :path-params, :query-params
   (parsed from :query-string once, here, so no app writes its own
   splitter — and a declared read's path addresses it the same way, so
   [:query-params :view] works exactly like [:path-params :id]),
-  :http/deps (the perform-ctx as a value) and the fetched :http/reads on
-  the request → the
+  :http/deps (the request-scoped perform-ctx as a value) and the fetched
+  :http/reads on the request → the
   response's :http/effects interpreted through the app's effect performers,
   BOUNDED by the route's declared :http/effects (a handler cannot emit a kind
   its route did not declare — the runtime half of http-unsafe-get /
@@ -170,15 +171,8 @@
                      (auth/resolve-identity (:http/auth-config ctx) req)))
         row (router/match (:http/routes ctx)
                           (:request-method req) (:uri req))
-        ;; the params are derived HERE rather than inside the handler branch,
-        ;; because they are part of the CONTRACT and so must exist before it is
-        ;; judged. :query-string is parsed once, so no app writes its own
-        ;; splitter and a declared read addresses a query param exactly as it
-        ;; addresses a path param.
         pp   (:path-params row)
         qp   (lang/query-params (:query-string req))
-        ;; decided ONCE, before the cond, so the refusal branch and the handler
-        ;; branch cannot disagree about what the caller sent
         sent (decoded-input ctx row req pp qp)]
     (cond
       (nil? row)
@@ -189,58 +183,16 @@
         {:status 403 :body {:error "forbidden"}}
         {:status 401 :body {:error "unauthenticated"}})
 
-      ;; THE CONTRACT, and its position in this cond is the point: after
-      ;; policy, BEFORE the declared reads and before the handler. A refusal
-      ;; that arrives later has already done work on unvalidated input, which
-      ;; is the thing a boundary exists to prevent.
-      ;;
-      ;; The explain is the CLIENT's own data described back to them, so it
-      ;; travels — unlike a response violation, which is the server's fault and
-      ;; says nothing.
       (:error sent)
       {:status 400 :body {:error (:error sent)}}
 
-      ;; CONTENT, and it is served by DEREFERENCING the var rather than
-      ;; calling it. `:http/path` declares a `def` whose value IS the page, so
-      ;; there is no handler to invoke, no request to hand it, and nothing
-      ;; below this branch applies: a stored value cannot declare reads,
-      ;; cannot emit effects, and cannot violate a response contract it has no
-      ;; way to declare. Placing it after POLICY and not before is the whole
-      ;; point — content is as unreachable un-authorized as any handler.
       (= :content (:kind row))
       (let [resp (html/content-response
                   (let [value (var-get (:handler row))]
                     (if (:webapp/shell row)
-                      ;; the row DECLARES it is a shell; WHICH bundle is a deployment
-                      ;; fact the app states once on the context, beside the mount point
                       (html/complete-shell value (:webapp/bundle ctx) (:webapp/base ctx))
                       value))
                   (:http/media-type row))]
-        ;; A SHELL'S STATUS IS DERIVED, and the body is not.
-        ;;
-        ;; A `**` shell covers every address beneath it — that is what makes a
-        ;; refreshed deep link work — so without this the whole subtree answers
-        ;; 200 and a typo, a stale asset url and a real page are
-        ;; indistinguishable at the server. An app that can never 404 has no
-        ;; way to say "no such thing", and the only alternative was a
-        ;; hand-maintained prefix list that goes stale.
-        ;;
-        ;; The client route table answers it, and the app already declares it:
-        ;; `^{:webapp/path …}` markers are the single declaration of a browser
-        ;; address. Matched with the SERVER's matcher rather than the client's,
-        ;; because `slopp.webapp/match-route` ships in the `webapp` family and
-        ;; this ships in `http` — a store may vendor either without the other.
-        ;; The two grammars agree, and a test runs both over one table.
-        ;;
-        ;; Same bytes either way: the SPA boots, finds an address its own table
-        ;; does not match, and renders whatever not-found it wants. Rendering
-        ;; stays the app's job; telling the truth becomes the server's.
-        ;;
-        ;; ABSENT `:webapp/routes` means the status is NOT derived and the
-        ;; shell answers 200, exactly as it always did. That is the
-        ;; compatibility answer and it is deliberate — with no table the server
-        ;; cannot know, and inventing 404s for an app that never declared its
-        ;; routes would break every shell that predates this.
         (if-let [client (and (:webapp/shell row) (seq (:webapp/routes ctx)))]
           (if (router/match (mapv (fn [[p target]]
                                     {:method :get :path p :handler target})
@@ -251,25 +203,38 @@
           resp))
 
       :else
-      (let [;; DECODED IN PLACE: a handler reads :path-params, :query-params and
-            ;; :body where it always did and finds them typed — a path segment
-            ;; declared :int arrives an int. With no contract and no validator
-            ;; these are exactly what they always were.
-            req' (assoc req :path-params (:path-params (:value sent))
+      (let [base (assoc req :path-params (:path-params (:value sent))
                         :query-params (:query-params (:value sent))
-                        :http/deps (:http/perform-ctx ctx)
                         :body (:body (:value sent)))
+            ;; REQUEST-SCOPED RESOLVE. A route may declare dependencies
+            ;; resolved FROM the request into the perform-ctx before its reads
+            ;; or handler run — `{dep [kind & path]}`, a per-tenant session
+            ;; keyed on a path param, say. Resolved through the same read
+            ;; performers, folded onto the base perform-ctx for THIS request
+            ;; only: the value varies per request while the context is
+            ;; assembled once. Each resolves against the ctx the earlier ones
+            ;; produced, so one dependency can build on another; and a route
+            ;; declaring none leaves the perform-ctx exactly as it was, so no
+            ;; existing endpoint changes.
+            pctx (reduce (fn [pc [dep [kind path]]]
+                           (if-let [f (get (:http/read-performers ctx) kind)]
+                             (assoc pc dep (f pc (get-in base path)))
+                             (throw (ex-info (str "no performer for resolve kind " kind)
+                                             {:http/resolve kind}))))
+                         (:http/perform-ctx ctx)
+                         (:http/resolve row))
+            ;; DECODED IN PLACE: a handler reads :path-params, :query-params and
+            ;; :body where it always did and finds them typed — a path segment
+            ;; declared :int arrives an int. :http/deps is the REQUEST-SCOPED
+            ;; perform-ctx, so a handler receives whatever the resolve phase
+            ;; put there.
+            req' (assoc base :http/deps pctx)
             fetch (fn [[alias [kind path]]]
                     (if-let [f (get (:http/read-performers ctx) kind)]
-                      [alias (f (:http/perform-ctx ctx) (get-in req' path))]
+                      [alias (f pctx (get-in req' path))]
                       (throw (ex-info (str "no performer for read kind " kind)
                                       {:http/read kind}))))
             declared (set (:http/effects row))
-            ;; the response contract is judged between the handler and the
-            ;; return, so a violation never reaches the adapter. The explain
-            ;; goes to the LOG and not the body: a response that breaks its own
-            ;; contract is the server's fault, and the same rule already
-            ;; governs an unexpected exception two branches down.
             check (fn [r] (if-let [err (response-violation ctx row r)]
                             (do (.println System/err
                                           (str "slopp.http: response contract violated at "
@@ -285,9 +250,6 @@
                          undeclared (seq (remove #(contains? declared (first %))
                                                  effects))]
                      (cond
-                       ;; a kind the ROUTE never declared — the static gate
-                       ;; can't see a handler that computes its effects, so
-                       ;; the dispatcher refuses before running any of them
                        undeclared
                        {:status 500
                         :body {:error (str "endpoint emitted undeclared effect kind(s) "
@@ -297,7 +259,7 @@
                        effects
                        (or (when-let [err (run-effects!
                                            (:http/effect-performers ctx)
-                                           (:http/perform-ctx ctx) effects)]
+                                           pctx effects)]
                              {:status 500 :body err})
                            (check resp))
 
@@ -305,14 +267,10 @@
                    (catch Exception e
                      (let [data (ex-data e)]
                        (if-let [status (:http/status data)]
-                         ;; a DELIBERATE boundary error: its message and only
-                         ;; an explicit :http/public allowlist reach the client
                          {:status status
                           :body (cond-> {:error (ex-message e)}
                                   (contains? data :http/public)
                                   (assoc :data (:http/public data)))}
-                         ;; anything else is unexpected — log the detail,
-                         ;; return nothing that discloses internals
                          (do (.println System/err
                                        (str "slopp.http: unhandled "
                                             (.getName (class e)) " — "
