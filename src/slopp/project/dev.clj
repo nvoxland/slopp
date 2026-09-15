@@ -47,7 +47,12 @@
 
   Named, because a project grows a second process — a worker, an admin port —
   and a single anonymous entry would have to be redesigned the day it does.
-  The names are also what a per-user override layer keys on when it arrives.
+
+  Each field resolves highest precedence first: a per-process env override
+  ([[slopp.project.capabilities/env-config]], `SLOPP_dev.<key>` — e.g.
+  `SLOPP_dev.run.daemon.port` for this daemon's dev-instance port), else the
+  stored `dev` value, else the registry default. The override is what lets two
+  daemons on one store run their dev instances on different ports.
 
   **An entry with no `:main` is dropped.** Arguments alone cannot start
   anything, and reporting one would hand the supervisor something it could
@@ -58,10 +63,9 @@
   (let [values (get-in store [:config "dev" :values])
         read   (fn [k]
                  (when-let [entry (capabilities/find-entry registry k)]
-                   (let [v (get values k)]
-                     (if (and v (nil? (capabilities/check-value entry v)))
-                       (capabilities/parse-value entry v)
-                       (:default entry)))))
+                   (capabilities/resolve-config entry
+                                                (capabilities/env-config "dev" k)
+                                                (get values k))))
         ;; the name is the MIDDLE segment of `run.<name>.<field>`, so the set
         ;; of declared names comes from the keys rather than from a list
         ;; somebody has to keep in step with them
@@ -77,12 +81,8 @@
                     [nm (cond-> {:main     main
                                  :args     (or (read (str "run." nm ".args")) [])
                                  :enabled? (read (str "run." nm ".enabled"))}
-                          ;; ABSENT rather than nil when undeclared: a worker
-                          ;; has no address, and a key present-but-nil trains
-                          ;; a reader to skip the one that matters
                           (read (str "run." nm ".url"))
                           (assoc :url (read (str "run." nm ".url")))
-                          ;; likewise its dev port — a worker has none
                           (read (str "run." nm ".port"))
                           (assoc :port (read (str "run." nm ".port"))))])))
           names)))

@@ -330,121 +330,6 @@
     ;; are not one type
     :csv-list (into [] (map str/trim) (str/split v #","))))
 
-(defn ^:export effective
-  "The effective value of capability `k` for this store: the stored
-  `capabilities` config value parsed per its registry type, else the
-  entry's `:default` — so a registered key with a default never nil-puns.
-  Unknown key → nil. A stored value failing its check (reachable only via
-  a foreign merge; the write gate refuses it) falls back to the default
-  rather than throwing at serve time.
-
-  Exported: it is THE reader for a capability value, and a consumer
-  outside this module reaching into `[:config \"capabilities\" :values]`
-  would skip both the type parsing and the default."
-  [store k]
-  (let [k (str k)
-        entry (find-entry k)
-        v (get-in store [:config "capabilities" :values k])]
-    (cond
-      (nil? entry) nil
-      (and v (nil? (check-value entry v))) (parse-value entry v)
-      :else (:default entry))))
-
-(defn ^:export stored?
-  "Whether capability `k` was explicitly SET in this store, as opposed to
-  carrying its registry default.
-
-  `effective` deliberately erases that distinction so a registered key never
-  nil-puns. Some callers need it back: the dev server binds an explicitly
-  pinned `http.port` but DERIVES one when nobody pinned it, because a fixed
-  default collides between two projects on one machine (the reasoning
-  `slopp.webdev.live/derived-port` records). \"8080\" typed by hand and 8080
-  arriving from the registry have to be told apart to do that.
-
-  Exported for the same reason `effective` is: the config path is this
-  namespace's business, and a consumer reaching into
-  `[:config \"capabilities\" :values]` to answer this would be the second
-  place that knows where values live."
-  [store k]
-  (some? (get-in store [:config "capabilities" :values (str k)])))
-
-(defn ^:export enabled?
-  "Whether `store` has opted into capability `c`.
-
-  THE predicate. It existed six times as a hand-rolled
-  `(= \"true\" (get-in candidate [:config \"capabilities\" :values \"web.enabled\"]))`
-  — in the write gates, in the done-grain checks, in the dev server and in the
-  client build — which is a second reader of a path this namespace is supposed
-  to be the only owner of, copied five more times. A rename then reaches five
-  of the six, and the sixth keeps working against a key nothing writes.
-
-  Reads through [[effective]] rather than the raw config, so it inherits the
-  type parse and the registry default: an unregistered or misspelled capability
-  is `false` rather than a truthy string, and there is no spelling of `true`
-  that works here and not in `query_capabilities`."
-  [store c]
-  (true? (effective store (str c ".enabled"))))
-
-(defn ^:export implied-puts
-  "The `<c>.enabled` keys a write of `k`=`v` must ALSO set, in dependency
-  order — empty when there is nothing to imply.
-
-  Enabling a capability turns on what it requires, transitively, because the
-  alternative is the puzzle every project would otherwise meet once: opting
-  into `webapp` appears to work and then nothing serves, since `http` was
-  never set. Only prerequisites already OFF are returned, so the reported
-  `:implied` names the changes a reader could not have predicted rather than
-  restating the graph back at them.
-
-  Only ever ADDS. A write of `false` implies nothing — turning `webapp` off is
-  not a reason to tear down the server, which may be serving other things —
-  and that asymmetry is deliberate: the enable direction has one safe answer
-  and the disable direction is a question only the author can settle, which is
-  what [[disable-refusal]] asks."
-  [store k v]
-  (let [k (str k)]
-    (if-not (and (str/ends-with? k ".enabled") (= "true" (str v)))
-      []
-      (let [c (subs k 0 (- (count k) (count ".enabled")))]
-        (into []
-              (comp (remove #(enabled? store %))
-                    (map #(str % ".enabled")))
-              (sort (prerequisites c)))))))
-
-(defn ^:export disable-refusal
-  "A teaching refusal when turning `k` off would leave a dependent capability
-  standing on nothing — nil when the write may land.
-
-  The mirror of [[implied-puts]], and the half that is easy to leave out. An
-  enable that implies its prerequisites but a disable that does not check its
-  dependents lets the config reach a state the catalog says is impossible:
-  `webapp` on with `http` off. Nothing would refuse it, and the consequence
-  would surface as a browser app that never loads — a diagnosis several layers
-  from the config that caused it.
-
-  It REFUSES rather than cascading, and the asymmetry with the enable
-  direction is the point: turning something on has one safe answer, since a
-  prerequisite is exactly what the capability cannot work without. Turning
-  something off does not — silently disabling `webapp` because you disabled
-  `http` would be slopp deciding to remove a feature the author never
-  mentioned. So the enable direction acts, and this one asks."
-  [store k v]
-  (let [k (str k)]
-    (when (and (str/ends-with? k ".enabled") (= "false" (str v)))
-      (let [c    (subs k 0 (- (count k) (count ".enabled")))
-            held (sort (filter #(enabled? store %) (dependents c)))]
-        (when (seq held)
-          (str k " cannot be turned off while "
-               (str/join ", " held)
-               (if (= 1 (count held)) " is enabled" " are enabled")
-               " — " (str/join " and " held)
-               (if (= 1 (count held)) " requires " " require ")
-               c ", so this would leave "
-               (if (= 1 (count held)) "it" "them")
-               " standing on nothing. Turn "
-               (str/join ", " (map #(str % ".enabled") held))
-               " off first, or leave " k " as it is."))))))
-
 (defn ^:export rule-owner
   "The capability that owns rule `k` — read off the rule's own NAME — or nil for
   a rule every project has.
@@ -573,6 +458,160 @@
            " with its type, default, and effective value; known keys/patterns: "
            (str/join ", " (map :key registry))))))
 
+(def ^:export secret-families
+  "Key prefixes whose VALUES are credentials and must never be published.
+
+  Declared as data rather than matched by name, and the difference is the whole
+  point. A denylist of fragments — `token`, `secret`, `password` — has to be
+  updated by whoever adds the next setting, and its failure mode is publishing
+  a credential rather than withholding a boring key. A family declared here is
+  withheld until somebody removes it.
+
+  **This governs the PUBLISHED document, not the store-side tool.**
+  `query_capabilities` runs for an agent that already holds the store and can
+  read the config directly, so redacting there would hide a value from the one
+  reader entitled to it while protecting nothing. `/api/config` answers a
+  REMOTE consumer over a public route, which is a different trust boundary and
+  the only one that needs this.
+
+  What is withheld is the VALUE. The key, its owner, its doc and whether it is
+  SET all still publish — *this is configured and I am not showing you* is a
+  useful answer, and *nothing here* would be a false one."
+  ["http.auth.static." "http.auth.bearer." "http.auth.oidc."])
+
+(defn ^:export resolve-config
+  "The effective value for registry `entry`, highest precedence first: the
+  `override` string (a per-process env override), else the `stored` string,
+  else the entry's `:default` — and the default too when the chosen value
+  fails the entry's check (a bad value must not throw at serve time). Pure:
+  the env read is the caller's, so this stays a function of its arguments.
+  Unknown key (nil `entry`) → nil."
+  [entry override stored]
+  (let [v (or override stored)]
+    (cond
+      (nil? entry) nil
+      (and v (nil? (check-value entry v))) (parse-value entry v)
+      :else (:default entry))))
+
+(defn env-config
+  "A per-process config override read from the environment: `SLOPP_<file>.<key>`,
+  or nil. `SLOPP_dev.run.daemon.port=7360` overrides the `dev` file's
+  `run.daemon.port` for THIS process, above the store value and the registry
+  default — so two daemons sharing one store can run their dev instances on
+  different ports. A dot cannot appear in a bare shell assignment, so set it
+  with `env` (`env 'SLOPP_dev.run.daemon.port=7360' slopp daemon`) or a
+  settings.json env block; both reach `System/getenv`."
+  [file key]
+  (not-empty (System/getenv (str "SLOPP_" file "." key))))
+
+(defn ^:export effective
+  "The effective value of capability `k` for this store, highest precedence
+  first: a per-process env override ([[env-config]], `SLOPP_capabilities.<k>`),
+  else the stored `capabilities` value parsed per its registry type, else the
+  entry's `:default` — so a registered key with a default never nil-puns.
+  Unknown key → nil. A value failing its check falls back to the default
+  rather than throwing at serve time.
+
+  Exported: it is THE reader for a capability value, and a consumer outside
+  this module reaching into `[:config \"capabilities\" :values]` would skip
+  the override, the type parsing and the default."
+  [store k]
+  (let [k (str k)]
+    (resolve-config (find-entry k)
+                    (env-config "capabilities" k)
+                    (get-in store [:config "capabilities" :values k]))))
+
+(defn ^:export stored?
+  "Whether capability `k` is explicitly SET for this store — by a per-process
+  env override ([[env-config]]) or a stored `capabilities` value — as opposed
+  to carrying its registry default.
+
+  `effective` deliberately erases that distinction so a registered key never
+  nil-puns. Some callers need it back: the dev server binds an explicitly
+  pinned `http.port` but DERIVES one when nobody pinned it, so a value a
+  developer chose and one from the registry have to be told apart — and an env
+  override is a choice too, so it counts as set."
+  [store k]
+  (or (some? (env-config "capabilities" (str k)))
+      (some? (get-in store [:config "capabilities" :values (str k)]))))
+
+(defn ^:export enabled?
+  "Whether `store` has opted into capability `c`.
+
+  THE predicate. It existed six times as a hand-rolled
+  `(= \"true\" (get-in candidate [:config \"capabilities\" :values \"web.enabled\"]))`
+  — in the write gates, in the done-grain checks, in the dev server and in the
+  client build — which is a second reader of a path this namespace is supposed
+  to be the only owner of, copied five more times. A rename then reaches five
+  of the six, and the sixth keeps working against a key nothing writes.
+
+  Reads through [[effective]] rather than the raw config, so it inherits the
+  type parse and the registry default: an unregistered or misspelled capability
+  is `false` rather than a truthy string, and there is no spelling of `true`
+  that works here and not in `query_capabilities`."
+  [store c]
+  (true? (effective store (str c ".enabled"))))
+
+(defn ^:export implied-puts
+  "The `<c>.enabled` keys a write of `k`=`v` must ALSO set, in dependency
+  order — empty when there is nothing to imply.
+
+  Enabling a capability turns on what it requires, transitively, because the
+  alternative is the puzzle every project would otherwise meet once: opting
+  into `webapp` appears to work and then nothing serves, since `http` was
+  never set. Only prerequisites already OFF are returned, so the reported
+  `:implied` names the changes a reader could not have predicted rather than
+  restating the graph back at them.
+
+  Only ever ADDS. A write of `false` implies nothing — turning `webapp` off is
+  not a reason to tear down the server, which may be serving other things —
+  and that asymmetry is deliberate: the enable direction has one safe answer
+  and the disable direction is a question only the author can settle, which is
+  what [[disable-refusal]] asks."
+  [store k v]
+  (let [k (str k)]
+    (if-not (and (str/ends-with? k ".enabled") (= "true" (str v)))
+      []
+      (let [c (subs k 0 (- (count k) (count ".enabled")))]
+        (into []
+              (comp (remove #(enabled? store %))
+                    (map #(str % ".enabled")))
+              (sort (prerequisites c)))))))
+
+(defn ^:export disable-refusal
+  "A teaching refusal when turning `k` off would leave a dependent capability
+  standing on nothing — nil when the write may land.
+
+  The mirror of [[implied-puts]], and the half that is easy to leave out. An
+  enable that implies its prerequisites but a disable that does not check its
+  dependents lets the config reach a state the catalog says is impossible:
+  `webapp` on with `http` off. Nothing would refuse it, and the consequence
+  would surface as a browser app that never loads — a diagnosis several layers
+  from the config that caused it.
+
+  It REFUSES rather than cascading, and the asymmetry with the enable
+  direction is the point: turning something on has one safe answer, since a
+  prerequisite is exactly what the capability cannot work without. Turning
+  something off does not — silently disabling `webapp` because you disabled
+  `http` would be slopp deciding to remove a feature the author never
+  mentioned. So the enable direction acts, and this one asks."
+  [store k v]
+  (let [k (str k)]
+    (when (and (str/ends-with? k ".enabled") (= "false" (str v)))
+      (let [c    (subs k 0 (- (count k) (count ".enabled")))
+            held (sort (filter #(enabled? store %) (dependents c)))]
+        (when (seq held)
+          (str k " cannot be turned off while "
+               (str/join ", " held)
+               (if (= 1 (count held)) " is enabled" " are enabled")
+               " — " (str/join " and " held)
+               (if (= 1 (count held)) " requires " " require ")
+               c ", so this would leave "
+               (if (= 1 (count held)) "it" "them")
+               " standing on nothing. Turn "
+               (str/join ", " (map #(str % ".enabled") held))
+               " off first, or leave " k " as it is."))))))
+
 (defn ^:export report
   "The `query_capabilities` payload: `{:settings [...] :patterns [...]
   :owners {...}}`, plus `:orphaned` when the store has stored keys this build
@@ -645,24 +684,3 @@
                   " migrated: set the current key (query_capabilities lists"
                   " them all) and then config_file {path \"capabilities\" key"
                   " <old> unset true}")))))
-
-(def ^:export secret-families
-  "Key prefixes whose VALUES are credentials and must never be published.
-
-  Declared as data rather than matched by name, and the difference is the whole
-  point. A denylist of fragments — `token`, `secret`, `password` — has to be
-  updated by whoever adds the next setting, and its failure mode is publishing
-  a credential rather than withholding a boring key. A family declared here is
-  withheld until somebody removes it.
-
-  **This governs the PUBLISHED document, not the store-side tool.**
-  `query_capabilities` runs for an agent that already holds the store and can
-  read the config directly, so redacting there would hide a value from the one
-  reader entitled to it while protecting nothing. `/api/config` answers a
-  REMOTE consumer over a public route, which is a different trust boundary and
-  the only one that needs this.
-
-  What is withheld is the VALUE. The key, its owner, its doc and whether it is
-  SET all still publish — *this is configured and I am not showing you* is a
-  useful answer, and *nothing here* would be a false one."
-  ["http.auth.static." "http.auth.bearer." "http.auth.oidc."])

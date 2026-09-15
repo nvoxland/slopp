@@ -444,3 +444,16 @@
     (is (= {"cli" "slopp.cli" "http" "slopp.http" "rest" "slopp.rest"
             "webapp" "slopp.webapp"}
            (capabilities/shipping-families)))))
+
+(deftest config-precedence-is-override-then-store-then-default
+  (let [entry (capabilities/find-entry "http.port")]
+    (testing "override wins over the stored value"
+      (is (= 9090 (capabilities/resolve-config entry "9090" "8080"))))
+    (testing "no override: the stored value"
+      (is (= 8080 (capabilities/resolve-config entry nil "8080"))))
+    (testing "neither set: the entry default"
+      (is (= (:default entry) (capabilities/resolve-config entry nil nil))))
+    (testing "a chosen value that fails its type check falls back to the default, not a throw"
+      (is (= (:default entry) (capabilities/resolve-config entry "not-a-port" "8080"))))
+    (testing "an unknown key (nil entry) is nil"
+      (is (nil? (capabilities/resolve-config nil "whatever" "whatever"))))))
