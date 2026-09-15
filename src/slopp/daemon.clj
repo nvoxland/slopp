@@ -43,7 +43,7 @@
          :otel {:routed 0 :dropped 0} :otel-dirs {}}))
 
 (def ^:export default-port
-  "Where a daemon listens unless told otherwise (`SLOPP_DAEMON_PORT`, or the
+  "Where a daemon listens unless told otherwise (`SLOPP_PORT`, or the
   argument to `-main`). One per machine, so one number rather than a
   per-directory formula: the derived-port formula existed so N per-session
   listeners would not collide, and there is one listener now."
@@ -117,7 +117,7 @@
   "Where a daemon records itself: `~/.slopp/daemon.json` — `{url port token
   pid started}` — for the default port, `~/.slopp/daemon-<port>.json` for
   any other. The shell derives the same name from the same one knob
-  (`SLOPP_DAEMON_PORT`), so the two never disagree; a dev instance on
+  (`SLOPP_PORT`), so the two never disagree; a dev instance on
   another port (slopp's own, run from its store by the same machinery every
   project's dev instance gets) never takes the default's file over on boot.
   One writer per file by construction."
@@ -736,11 +736,11 @@
       (.setWritable f true true)))
   (spit f content))
 
-(defn ^{:breaking-ok "the machine-setting source is REMOVED: ~/.slopp/config.json's daemon-port is retired for the one knob SLOPP_DAEMON_PORT, which the plugin's MCP url can read and a file cannot"}
+(defn ^{:breaking-ok "the machine-setting source is REMOVED: ~/.slopp/config.json's daemon-port is retired for the one knob SLOPP_PORT, which the plugin's MCP url can read and a file cannot"}
   daemon-port
   "The port `slopp daemon [port]` listens on, as `{:port n}` or `{:error
   sentence}` for a value that is not one. Three sources, in order: the
-  argument `arg`; the environment (`env`, `SLOPP_DAEMON_PORT` — the ONE
+  argument `arg`; the environment (`env`, `SLOPP_PORT` — the ONE
   knob, because the plugin's MCP entry is a URL Claude Code expands from
   the environment and a settings file would be a second source it cannot
   read); what the MANAGER told a declared entry (`told`, the
@@ -760,7 +760,7 @@
         (if (and n (< 0 n 65536))
           {:port n}
           {:error (str (pr-str raw) " is not a port (1–65535) — slopp daemon [port],"
-                       " SLOPP_DAEMON_PORT=<n>, or run.<name>.port in a dev config")})))))
+                       " SLOPP_PORT=<n>, or run.<name>.port in a dev config")})))))
 
 (defn- own-reader!
   "A read-only reader on the daemon's OWN store at `dir`, for the assets the
@@ -909,7 +909,7 @@
   that did not exit cleanly leaves its file behind, and naming a dead pid
   as the holder sends someone to kill the wrong thing."
   [& [port]]
-  (let [{p :port err :error} (daemon-port port (System/getenv "SLOPP_DAEMON_PORT")
+  (let [{p :port err :error} (daemon-port port (System/getenv "SLOPP_PORT")
                                        (System/getProperty "slopp.app-port"))]
     (if err
       (do (.println System/err (str "slopp daemon: " err))

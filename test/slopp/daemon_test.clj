@@ -761,7 +761,7 @@
       "the manager's word: slopp's dev instance is told its port, not passed it")
   (is (= {:port 7400} (daemon/daemon-port nil "7400" "7358")) "the environment beats the manager")
   (is (= {:port daemon/default-port} (daemon/daemon-port nil nil nil)) "the default otherwise")
-  (is (re-find #"SLOPP_DAEMON_PORT" (:error (daemon/daemon-port "seven" nil nil))) "the refusal names the one knob")
+  (is (re-find #"SLOPP_PORT" (:error (daemon/daemon-port "seven" nil nil))) "the refusal names the one knob")
   (is (re-find #"not a port" (:error (daemon/daemon-port "seven" nil nil))))
   (is (re-find #"not a port" (:error (daemon/daemon-port "70000" nil nil)))))
 
