@@ -178,7 +178,7 @@
   cache waits on, made takeable. The tree is fileless, so this goes through
   the boot kernel:
 
-    clojure -M -m slopp.kernel.boot . --snapshot --main slopp.lab.verdicts/-main
+    clojure -M -m slopp.kernel.boot . --main slopp.lab.verdicts/-main
 
   Prints [[reuse-rate]] (`:source :journal`) and then [[reuse-by-grain]] —
   the first is the gate's own question, the second is the one the built

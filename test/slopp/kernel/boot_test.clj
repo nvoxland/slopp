@@ -51,20 +51,22 @@
                                         'y "(ns y (:require [x :as x]))"}))))))
 
 (deftest parse-args-trampolines-main-args
-  (testing "default: the DAEMON, with no args — the dir is what boot loads, not the port"
-    (is (= {:dir "." :live? false :main 'slopp.daemon/-main :args []}
-           (boot/parse-args ["." "--snapshot"]))))
-  (testing "--main with NO extra args keeps the dir-arg convention"
-    (is (= {:dir "/p" :live? true :main 'app.core/-main :args ["/p"]}
-           (boot/parse-args ["/p" "--live" "--main" "app.core/-main"]))))
-  (testing "--main passes everything after the symbol through verbatim"
-    (is (= {:dir "." :live? false :main 'slopp.sync/-main
-            :args ["push" "." "https://x/y.git"]}
-           (boot/parse-args ["." "--main" "slopp.sync/-main"
-                             "push" "." "https://x/y.git"]))))
-  (testing "--call is retired: refused with the routed spelling, never a silent daemon"
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"slopp <op>"
-                          (boot/parse-args ["." "--call" "query_project"])))))
+  (let [daemon-main (symbol "slopp.daemon" "-main")
+        sync-main   (symbol "slopp.sync" "-main")]
+    (testing "default: the DAEMON, with no args — the dir is what boot loads, not the port"
+      (is (= {:dir "." :main daemon-main :args []}
+             (boot/parse-args ["."]))))
+    (testing "--main with NO extra args keeps the dir-arg convention"
+      (is (= {:dir "/p" :main (symbol "app.core" "-main") :args ["/p"]}
+             (boot/parse-args ["/p" "--main" "app.core/-main"]))))
+    (testing "--main passes everything after the symbol through verbatim"
+      (is (= {:dir "." :main sync-main
+              :args ["push" "." "https://x/y.git"]}
+             (boot/parse-args ["." "--main" "slopp.sync/-main"
+                               "push" "." "https://x/y.git"]))))
+    (testing "--call is retired: refused with the routed spelling, never a silent daemon"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"slopp <op>"
+                            (boot/parse-args ["." "--call" "query_project"]))))))
 
 (deftest jvm-loadable-skips-cljs-namespaces
   ;; F5: the kernel boot path must NEVER JVM-load a :cljs namespace — it
