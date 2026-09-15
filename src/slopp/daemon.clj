@@ -21,7 +21,7 @@
             ;; the stylesheet (the v0.3.0 jar answered 404 everywhere).
             [slopp.ui.pages]
             [slopp.ui.shell]
-            [slopp.ui.styles] [slopp.daemon.hooks :as hooks] [slopp.read.history :as history] [slopp.ops.engine :as engine] [clojure.java.io :as io]))
+            [slopp.ui.styles] [slopp.daemon.hooks :as hooks] [slopp.read.history :as history] [slopp.ops.engine :as engine] [clojure.java.io :as io] [slopp.rules.http :as rules.http] [slopp.rules.webapp :as rules.webapp] [slopp.project.capabilities :as capabilities]))
 
 (defonce ^:private state
   ;; `:projects` {dir {:slug :dir :opened-at :sessions #{sid}
@@ -828,39 +828,6 @@
 
       :else (static/file-or-resource-reader (or dir ".")))))
 
-(defn- serving-opts
-  "Everything the daemon serves, as the opts `slopp.http/context` and
-  `slopp.http/serve!` both take — the same assembly every project's app
-  goes through:
-
-  - the endpoints DECLARED on this namespace's public vars, under the rest
-    validator, and the read performer [[delegate!]] declares;
-  - the PAGES: the shell (`slopp.ui.shell`, one document at every page
-    address) and the stylesheet (`slopp.ui.styles`), declared content on
-    namespaces listed here;
-  - the client route table, read off the loaded page markers the way the
-    headless driver reads them, so the shell's status is DERIVED — 404 for
-    an address no page claims — and the two readers of one marker cannot
-    disagree;
-  - the static mount for the compiled bundle, read from this daemon's own
-    store or the jar ([[asset-reader]]).
-
-  One map for the listener and for a test driving the context without a
-  port, so the two cannot disagree."
-  []
-  {:http/namespaces ['slopp.daemon 'slopp.ui.shell 'slopp.ui.styles]
-   :http/routes (static/mount-routes asset-mounts (asset-reader))
-   :webapp/bundle bundle-url
-   :webapp/base ""
-   :webapp/routes (cljnx/marked-pages)
-   :http/wrap-context slopp.rest/validating})
-
-(defn ^:export context
-  "The assembled dispatch context for every route under `/api/` — what the
-  listener serves, and what a test drives without a port."
-  []
-  (slopp.http/context (serving-opts)))
-
 (defn- text
   "A text/plain answer: what a hook or a shell prints as it stands."
   [status s]
@@ -1121,6 +1088,80 @@
                                   :served-head head :served-version dv))
               (swap! state assoc-in [:projects dir :served-version] dv)))))
       (catch Throwable _ nil))))
+
+(defn own-namespaces
+  "The namespaces the daemon serves at its OWN root — everything slopp's store
+  serves EXCEPT the project API, which `delegate!` serves per-project through
+  the mount from `slopp.api.server/serving-opts`. Derived for the reason
+  `serving-namespaces` itself is: a `:http/namespaces` list missing half an app
+  assembles happily and 404s, and a UI namespace added later is the entry a
+  hand list forgets. `served-namespaces` is the one record of what the project
+  API serves, so subtracting it here keeps the two surfaces from disagreeing."
+  [store]
+  (vec (remove (set server/served-namespaces)
+               (rules.http/serving-namespaces store))))
+
+(defn- own-store!
+  "slopp's OWN store value when this daemon booted from a slopp checkout — the
+  self-host loop, where `serving-opts` DERIVES its surface from the same
+  capabilities every app's dev server does — or nil, when a released jar booted
+  from a neutral dir and serves its BAKED surface from the classpath and the
+  loaded image instead. Guarded on the store actually being slopp's (it declares
+  `slopp.daemon`) so a jar started inside some OTHER project's dir does not
+  derive this daemon's surface from that project's web namespaces. Reached
+  through the daemon's own reader ([[own-reader!]]), synced with the journal on
+  each read, so a page or mount a `done` added is served on the next assembly."
+  []
+  (let [dir (try (:dir ((store/late-ref 'slopp.kernel.boot/current-boot-info)))
+                 (catch Throwable _ nil))]
+    (when (and dir (store-file? dir))
+      (let [st (:store @(own-reader! dir))]
+        (when (contains? (:namespaces st) 'slopp.daemon)
+          st)))))
+
+(defn- serving-opts
+  "Everything the daemon serves, as the opts `slopp.http/context` and
+  `slopp.http/serve!` both take — the same assembly, and now the same
+  DERIVATION, every project's app goes through:
+
+  - the namespaces are `serving-namespaces` over slopp's own store MINUS the
+    project API `delegate!` mounts per-project ([[own-namespaces]]) — the
+    daemon's management endpoints plus the UI (`slopp.ui.shell`/`styles`);
+  - the mount, the bundle url, the client route table and whether contracts
+    are validated all DERIVE from slopp's own capabilities the way
+    `slopp.webdev.live/serve-plan` derives them for every managed dev instance:
+    `static-mounts`, `bundle-url`, `page-routes` (from the STORE, not an image
+    scan) and `rest`;
+  - page routes come from the store so the shell's status is derived — 404 for
+    an address no page claims — without the daemon and the build reading the
+    same marker two ways.
+
+  Reads slopp's own store when it booted from a checkout ([[own-store]]); falls
+  back to the BAKED surface — spelled namespaces, the classpath mount, the
+  image page scan — for the storeless neutral-dir boot a released jar makes.
+
+  One map for the listener and for a test driving the context without a port,
+  so the two cannot disagree."
+  []
+  (if-let [st (own-store!)]
+    {:http/namespaces   (own-namespaces st)
+     :http/routes       (static/mount-routes (rules.http/static-mounts st) (asset-reader))
+     :webapp/bundle     (rules.http/bundle-url st)
+     :webapp/base       ""
+     :webapp/routes     (mapv (juxt :path :page) (rules.webapp/page-routes st))
+     :http/wrap-context (when (capabilities/enabled? st "rest") slopp.rest/validating)}
+    {:http/namespaces   ['slopp.daemon 'slopp.ui.shell 'slopp.ui.styles]
+     :http/routes       (static/mount-routes asset-mounts (asset-reader))
+     :webapp/bundle     bundle-url
+     :webapp/base       ""
+     :webapp/routes     (cljnx/marked-pages)
+     :http/wrap-context slopp.rest/validating}))
+
+(defn ^:export context
+  "The assembled dispatch context for every route under `/api/` — what the
+  listener serves, and what a test drives without a port."
+  []
+  (slopp.http/context (serving-opts)))
 
 (defn ^:export start!
   "Bind the daemon's listener on `port` (loopback; nil = [[default-port]])

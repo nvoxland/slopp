@@ -971,3 +971,30 @@
     (is (= :touch (daemon/reserve-decision 5 "h1" 6 nil))))
   (testing "first sight (nothing served yet): a head present is an advance"
     (is (= :reserve (daemon/reserve-decision nil nil 1 "h1")))))
+
+(deftest the-daemons-own-served-namespaces-are-derived-not-hand-listed
+  ;; The daemon serves slopp's OWN surface — its management endpoints and the
+  ;; UI — at its root; the project API (`slopp.api.*`) is served per-project
+  ;; through the mount by `delegate!`, never here. Both apps live in one store,
+  ;; so the daemon's own namespaces are what the store serves MINUS the project
+  ;; API: derived, so a UI namespace added later is served without editing a
+  ;; list, and a project-API namespace is not double-served here.
+  (let [proj-api (str "(ns slopp.api.endpoints)\n\n"
+                      "(defn ^{:http/method :get :http/path \"/api/x\"\n"
+                      "        :rest/response :map} x \"X.\" [req] req)\n")
+        ui       (str "(ns my.ui)\n\n"
+                      "(defn ^{:http/method :get :http/path \"/css/s.css\"\n"
+                      "        :rest/response :string} sheet \"S.\" [req] \"body{}\")\n")
+        mgmt     (str "(ns my.daemon)\n\n"
+                      "(defn ^{:http/method :get :http/path \"/api/status\"\n"
+                      "        :rest/response :map} status \"St.\" [req] req)\n")
+        s   (-> (store/empty-store)
+                (store/ingest 'slopp.api.endpoints proj-api)
+                (store/ingest 'my.ui ui)
+                (store/ingest 'my.daemon mgmt))
+        own (daemon/own-namespaces s)]
+    (testing "the project API namespace is NOT served at the daemon's own root"
+      (is (not (some #{'slopp.api.endpoints} own)) (pr-str own)))
+    (testing "the daemon's own management and UI namespaces ARE — read from the store"
+      (is (some #{'my.ui} own) (pr-str own))
+      (is (some #{'my.daemon} own) (pr-str own)))))
