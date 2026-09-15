@@ -49,10 +49,10 @@
   and a single anonymous entry would have to be redesigned the day it does.
 
   Each field resolves highest precedence first: a per-process env override
-  ([[slopp.project.capabilities/env-config]], `SLOPP_dev.<key>` — e.g.
-  `SLOPP_dev.run.daemon.port` for this daemon's dev-instance port), else the
-  stored `dev` value, else the registry default. The override is what lets two
-  daemons on one store run their dev instances on different ports.
+  ([[slopp.project.capabilities/env-config]], e.g. `SLOPP_DEV_RUN_DAEMON_PORT`
+  for this daemon's dev-instance port), else the stored `dev` value, else the
+  registry default. The override is what lets two daemons on one store run
+  their dev instances on different ports.
 
   **An entry with no `:main` is dropped.** Arguments alone cannot start
   anything, and reporting one would hand the supervisor something it could

@@ -493,24 +493,32 @@
       (and v (nil? (check-value entry v))) (parse-value entry v)
       :else (:default entry))))
 
-(defn env-config
-  "A per-process config override read from the environment: `SLOPP_<file>.<key>`,
-  or nil. `SLOPP_dev.run.daemon.port=7360` overrides the `dev` file's
-  `run.daemon.port` for THIS process, above the store value and the registry
-  default — so two daemons sharing one store can run their dev instances on
-  different ports. A dot cannot appear in a bare shell assignment, so set it
-  with `env` (`env 'SLOPP_dev.run.daemon.port=7360' slopp daemon`) or a
-  settings.json env block; both reach `System/getenv`."
+(defn ^:export env-var-name
+  "The environment variable that overrides config `key` in `file`: `SLOPP_`
+  followed by the path (`file.key`) UPPERCASED with every non-alphanumeric
+  character mapped to `_` — so the `dev` file's `http.port` is
+  `SLOPP_DEV_HTTP_PORT`. Conventional env casing (no dots or dashes) so a bare
+  shell `SLOPP_DEV_HTTP_PORT=7360 slopp daemon` sets it. Pure, so it is
+  testable without touching the real environment."
   [file key]
-  (not-empty (System/getenv (str "SLOPP_" file "." key))))
+  (str "SLOPP_" (str/upper-case (str/replace (str file "." key) #"[^A-Za-z0-9]" "_"))))
+
+(defn env-config
+  "A per-process config override read from the environment, or nil. The
+  variable is [[env-var-name]] — `SLOPP_<FILE>_<KEY>`, e.g.
+  `SLOPP_DEV_HTTP_PORT` for the `dev` file's `http.port`. It overrides the
+  store value and the registry default for THIS process, so two daemons
+  sharing one store can run their dev instances on different ports."
+  [file key]
+  (not-empty (System/getenv (env-var-name file key))))
 
 (defn ^:export effective
   "The effective value of capability `k` for this store, highest precedence
-  first: a per-process env override ([[env-config]], `SLOPP_capabilities.<k>`),
-  else the stored `capabilities` value parsed per its registry type, else the
-  entry's `:default` — so a registered key with a default never nil-puns.
-  Unknown key → nil. A value failing its check falls back to the default
-  rather than throwing at serve time.
+  first: a per-process env override ([[env-config]], e.g.
+  `SLOPP_CAPABILITIES_HTTP_PORT`), else the stored `capabilities` value parsed
+  per its registry type, else the entry's `:default` — so a registered key with
+  a default never nil-puns. Unknown key → nil. A value failing its check falls
+  back to the default rather than throwing at serve time.
 
   Exported: it is THE reader for a capability value, and a consumer outside
   this module reaching into `[:config \"capabilities\" :values]` would skip
