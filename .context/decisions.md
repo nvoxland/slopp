@@ -7377,6 +7377,107 @@ daemon-shaped remains except that its `-main` also manages other projects.
 The per-process override mechanism (`D-config-env-override`, `SLOPP_<FILE>_<KEY>`)
 is the knob these steps lean on for per-instance ports.
 
+## D-framework-and-server-split (2026-09-15, user decision) — `slopp.*` is the framework/language; `slopp-server.*` is slopp's own application; one endpoint surface, db-scope resolved per request
+
+**Decision.** Split slopp into two top-level roots by what each IS, not by
+transport or subsystem:
+
+- **`slopp.*` — the framework / language.** The reusable substrate every
+  slopp project is built on and that gets vendored into a built app:
+  `store edit ops read rules index http rest webapp cljnx image kernel build …`.
+- **`slopp-server.*` — slopp's OWN application.** The one program that hosts
+  projects and serves the UI + the JSON API + MCP + the registry/process, built
+  *on* the framework exactly as any project's app is, and reused by no project.
+  It has no privileged relationship to the framework — a project requires
+  `slopp.http`/`slopp.store`, never `slopp-server.anything`.
+
+This is the truest form of `D-daemon-is-an-app`: "the daemon is a normal app"
+becomes structurally true — the server is an ordinary framework consumer that
+happens to be shipped in the same repo/jar. It also resolves the incoherence
+`slopp.api.reads/app-namespaces` documents in its own docstring ("on slopp's own
+store the two answers coincide — `slopp.api.endpoints` is a form in slopp's store
+and framework everywhere else"): with the app under `slopp-server.*` and the
+framework under `slopp.*`, framework and app stop coinciding.
+
+**One endpoint surface — the `slopp.daemon` "two apps" framing is retired.**
+There is no "daemon API" vs "project API" as separate context assemblies. There
+is one served surface; whether an endpoint touches the daemon's own state or a
+particular project's store is a **per-endpoint property**, resolved through a
+normal dependency. `slopp.http` gains a request-scoped RESOLVE phase (a declared
+dependency resolved *from the request* into the perform-ctx before the handler
+runs — a generic web pattern, no "project" concept in the framework);
+`slopp-server` provides the resolver performers (`:project/reader` slug→reader,
+`:project/session` dir→write session) and owns their lifecycle (open-on-first-use,
+reap-on-idle, image budget). The db-scoped read performers then consume
+`(:session ctx)` unchanged — they never learn where it came from. This dissolves
+`delegate!`, `project-api-endpoint`, `served-namespaces`, `own-namespaces`
+(added in step 1 of `D-daemon-is-an-app`, now interim), and
+`slopp.api.server/serving-opts`.
+
+**Addressing is matched to the consumer, deliberately mixed:**
+- the **read API** (browser/UI consumer) is **path-addressed** —
+  `/api/projects/:slug/…`, resolver source `[:path-params :slug]` — because the
+  browser cannot be relied on to send `X-Slopp-Dir` and a path is bookmarkable;
+- **MCP + the write doors** (agent/CLI consumer) are **header-addressed** —
+  slug-free URLs (`/api/mcp`, `/api/call`, `/api/hook`, `/api/cli`) + `X-Slopp-Dir`,
+  resolver source `[:headers "x-slopp-dir"]` — because the agent already sends the
+  dir and a slug in the URL too is redundant. This also retires the `_`-slug
+  placeholder.
+
+**Namespace tree.**
+```
+slopp.*            framework: store edit ops read rules index http rest webapp cljnx image kernel build …
+                   (ops = the programmatic store-operation surface; NO mcp here — see below)
+slopp-server.*     slopp's application:
+  .api.*           JSON API: endpoints reads model contracts        (← slopp.api.*)
+  .ui.*            the webapp: pages views app page shell styles + render helpers + generated client (← slopp.ui.*)
+  .mcp.*           agent-facing MCP: transport + tool descriptors + doors + hooks (← slopp.mcp.*)
+  .registry        project registry + session lifecycle + reaping   (← part of slopp.daemon)
+  .process         port, token, -main, the one serving-opts/context (← part of slopp.daemon)
+  .refresh         the app-refresh poll                             (← part of slopp.daemon)
+  .telemetry       the OTLP sink                                    (← part of slopp.daemon + slopp.api.otel)
+```
+`.api` is a sibling of `.ui`, not under it (the API is the server's, consumed by
+the UI and potentially others). No `.core` junk-drawer — the residual of
+`slopp.daemon` fans out into the meaningful namespaces above.
+
+**MCP is NOT framework today, and I'll say why not.** `slopp.mcp` exposes
+`slopp.ops` as tools — it is hardwired to slopp's own operation surface, reused
+by no project; there is no MCP-server *capability* the way there is an
+`http`/`webapp` capability. So it moves to `slopp-server.mcp` as slopp-specific.
+`slopp.ops` itself (the programmatic store operations) STAYS framework — it drives
+any store and the whole framework is built on it. Generalizing MCP into an
+app-type capability (any store declares tools; the framework serves them; slopp's
+server becomes the first consumer) is a real, slopp-native future but a SEPARATE
+feature — recorded in `ideas/product/mcp-as-an-app-type.md`, not part of this split.
+
+**Two top-level roots was checked, not assumed.** No production code hardcodes
+"`slopp.*` = framework": the `"slopp."` literals are test assertions (isolation
+checks, internal filtering) or system-property *names* (`slopp.static-dir`,
+`slopp.app-port` — strings, unaffected); module/tier/refactor prefix logic takes
+the prefix as a parameter. The costs are mechanical: test literals move with the
+migration, the boot default `-main` becomes a `slopp-server.*` entry (the kernel
+stays `slopp.*`), `orient`'s `:family` grows to report two roots, and the jar
+carries both roots (inert for a project that never requires the server — already
+true of `slopp.daemon`). A subtree (`slopp.server.*`) was the lower-ceremony
+alternative and was rejected: it leaves the app under `slopp.*`, so the
+framework/app boundary stays notional and any "framework = slopp.* minus server"
+rule needs a hand-kept carve-out.
+
+**Supersedes / extends.** Extends `D-daemon-is-an-app` (its step-1
+`serving-opts` derivation and `own-namespaces` are interim; this collapses them
+into the one surface). Renames the surface `D-ui-in-daemon` established:
+`slopp.ui.*` → `slopp-server.ui.*`, and the "pages are the daemon's" framing
+becomes "pages are the server's." The `slopp.daemon.*` naming floated while
+sketching this is dropped in favor of the tree above.
+
+**Sequence** — tracked in `ideas/product/daemon-one-endpoint-surface.md`
+(framework resolve-phase → server resolvers → the one migration that moves the
+three families and collapses to one surface). Slots after the current
+`D-daemon-is-an-app` steps 2–4. Open detail: exact home of the `call`/`cli`/`hook`
+write doors (with `slopp-server.mcp.*` or a `slopp-server.hooks`), settled when
+the plan lands.
+
 ## G6-revised (2026-09-12, user decision) — the repo is `nvoxland/slopp`; `slopp3` is deleted, not renamed
 
 G6 named `slopp3` "the permanent repo (for now)". The permanent repo is
