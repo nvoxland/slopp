@@ -930,8 +930,6 @@
   ;; same way: declared rather than derived, because the store that needs the
   ;; answer is often the one missing the entry.
   (testing "the two sets are DISJOINT"
-    ;; a path in both is a contradiction with no sensible reading, and the
-    ;; failure would be silent in whichever direction the caller asked first
     (is (empty? (filter store/projected-config-paths store/local-config-paths))
         (str "a config path is declared BOTH projected and local: "
              (pr-str (filter store/projected-config-paths
@@ -941,13 +939,8 @@
     (is (contains? store/local-config-paths "dev")))
 
   (testing "and LOCAL wins over the has-config fallback"
-    ;; the trap, and the reason this test exists. `projected-config-paths`'
-    ;; own docstring tells callers to treat a path as projected if it is in
-    ;; the set OR the store already holds `:config` for it — which is exactly
-    ;; true of a dev entry somebody has set. Read naively, the fallback
-    ;; projects the one thing that must never be projected.
     (let [st (-> (store/empty-store)
-                 (assoc-in [:config "dev" :values "run.app.main"] "app.core/-main")
+                 (assoc-in [:config "dev" :values "http.port"] "7399")
                  (assoc-in [:config "capabilities" :values "http.port"] "8080"))
           projected? (fn [path]
                        (and (not (store/local-config-paths path))

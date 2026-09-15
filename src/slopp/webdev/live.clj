@@ -60,30 +60,24 @@
   "Whether slopp should run this store's dev instance while someone works on
   it — `already-served` being what the calling process has mounted itself.
 
-  Two reasons, either sufficient. A DECLARED entry (`run.<name>.main` in
-  the dev config, enabled) is the project saying what its dev instance is
-  — a worker, a daemon, a main — and that is reason enough whatever its
-  HTTP surface: `serve-plan` already knew so, and the gate in front of it
-  did not, so such a store was never started at all. Otherwise
-  `http.enabled` says the project SERVES HTTP — that is what makes the web
-  rules and `query_surface` exist, and production reads it — unless this
-  process already serves that surface itself ([[self-served?]]): a store
-  whose surface this process already serves must not get a second, staler
-  copy of it.
+  Two reasons, either sufficient. A DECLARED entry (`app.main`) is the
+  project saying what its dev instance is — a worker, a daemon, a main — and
+  that is reason enough whatever its HTTP surface. Otherwise `http.enabled`
+  says the project SERVES HTTP — that is what makes the web rules and
+  `query_surface` exist, and production reads it — unless this process already
+  serves that surface itself ([[self-served?]]): a store whose surface this
+  process already serves must not get a second, staler copy of it.
 
-  **Nothing a web project configures decides this any more, and that is the
-  point.** A project under development should not have to think about
-  turning its server on, or keeping it current — those are slopp's job, and
-  a per-project switch is an invitation to answer a question nobody should
-  be asked. The evidence it was one: the only adopter that ever set the
-  switch set it to work around 404ing assets, and the switch then made a
-  bug look like a preference.
+  **Nothing a web project configures decides this, and that is the point.** A
+  project under development should not have to think about turning its server
+  on, or keeping it current — those are slopp's job, and a per-project switch
+  is an invitation to answer a question nobody should be asked.
 
   Deliberately NOT folded into `serve-plan`. That answers \"what would this
   store serve, and where\", which production asks too, and a dev-only
   exemption in it would be an answer to a question it was not asked."
   [store already-served]
-  (boolean (or (some (comp :enabled? val) (dev/runnables store))
+  (boolean (or (capabilities/effective store "app.main")
                (and (capabilities/effective store "http.enabled")
                     (not (self-served? store already-served))))))
 
@@ -114,120 +108,79 @@
   [dir]
   (+ 49152 (mod (hash (str "slopp-app:" dir)) 16384)))
 
-(defn- enabled-runnables
-  "The declared entries a reader asked to be RUNNING — `dev/runnables` minus
-  the silenced ones.
-
-  `runnables` keeps a silenced entry so it is visibly still declared; the
-  PLAN is what gets launched, and launching something declared off is the one
-  reading of `:enabled? false` that would be plainly wrong."
-  [store]
-  (into {} (filter (comp :enabled? val)) (dev/runnables store)))
-
 (defn serve-plan
   "What to launch for this store's app server, as data — `{:enabled? :mode
-  :dir :namespaces :host :port :adapter}`, or `{:enabled? false :reason …}`.
+  :dir :main :namespaces :host :port :adapter}`, or `{:enabled? false
+  :reason …}`.
 
   Pure, and separate from the launching on purpose: everything worth getting
   wrong here (is this a web project, what does it serve, on what address) is
   decidable from the store, and deciding it inside a function that also
   spawns a JVM would make it testable only by spawning one.
 
-  `:namespaces` is DERIVED (`web/serving-namespaces`) — the app never hands
-  over a list it can get wrong.
+  `:main` is the app's ENTRY (`app.main`) — a qualified symbol when the store
+  declares one, else nil. Set = the dev instance RUNS that fn (a custom
+  process, e.g. slopp's own daemon); nil + `http.enabled` = the derived
+  `slopp.http/serve!` server. So a project enables its dev instance either by
+  serving HTTP or by declaring an entry, and a declared entry replaces the
+  derived call rather than joining it.
 
-  `:port` prefers an explicitly SET `http.port` and otherwise DERIVES
-  ([[derived-port]]). The registry default of 8080 stands for production,
-  where a known number is the point; a dev session wants collision-freedom
-  instead, because two projects on one machine both taking the default is
-  not a rare case — it is the second project: a fixed default \"worked for
-  exactly one project and collided for the second\".
+  Every address field is DEV-OVERLAID: `dev.http.port` overrides `http.port`
+  for the dev instance and so on ([[slopp.project.dev/override]]), which is
+  what keeps the in-progress copy off the PRODUCTION address — for slopp's own
+  store, the machine daemon's port. `:port` with no override prefers an
+  explicitly SET `http.port` and otherwise DERIVES ([[derived-port]]), so two
+  projects on one machine do not both take the registry default.
 
-  `:mode` is `:dev`. It rides the plan so nothing downstream reads a dev plan
-  as the shipped one: the two serve the same routes from different stores at
-  different grains, and an unlabelled plan is a stand-in for whichever the
-  reader assumed. `:dir` rides it so the manager can tell a declared entry
-  which store it is the declared entry OF ([[startup-code]])."
+  `:mode` is `:dev`, riding the plan so nothing downstream reads a dev plan as
+  the shipped one. `:dir` rides it so the manager can tell a declared entry
+  which store it is the entry OF ([[startup-code]])."
   [store dir]
-  (if-not (or (capabilities/effective store "http.enabled")
-              (seq (enabled-runnables store)))
-    {:enabled? false
-     :reason (str "http.enabled is false — config_file {path \"capabilities\" "
-                  "key \"http.enabled\" value \"true\"} opts this store into web."
-                  " A project that is not a web project can still declare what"
-                  " to run: config_file {path \"dev\" key \"run.<name>.main\""
-                  " value \"my.ns/-main\"}")}
-    {:enabled?   true
-     :mode       :dev
-     :dir        (str dir)
-     ;; what this project SAID to run, which derivation cannot know. Empty for
-     ;; a store that declares nothing — which is every store that worked before
-     ;; this existed, so the derived server below is unchanged for them.
-     :runnables  (enabled-runnables store)
-     :namespaces (rules.http/serving-namespaces store)
-     :host       (capabilities/effective store "http.host")
-     :port       (if (capabilities/stored? store "http.port")
-                   (capabilities/effective store "http.port")
-                   (derived-port dir))
-     :adapter    (capabilities/effective store "http.adapter")
-     ;; what the app NEEDS, not only where it answers. Dropping these is what
-     ;; made a managed server 500 on any app that took slopp's own advice to
-     ;; receive its dependencies as :http/deps.
-     :max-body-bytes  (capabilities/effective store "http.max-body-bytes")
-     :context-builder (rules.http/context-builder store)
-     ;; the app's own assets. A UI's stylesheet and cljs bundle ARE the
-     ;; product, so a managed server that 404s them is not a lesser version
-     ;; of the app — it is an unusable one, and the project it happened to
-     ;; switched the managed server off rather than reading it as a bug.
-     :static          (rules.http/static-mounts store)
-     ;; the url a shell injects, JOINED from the compile output and the
-     ;; mounts above rather than typed on every shell route. nil when no
-     ;; mount reaches the bundle, which `slopp.http/context` refuses at
-     ;; assembly if anything declares itself a shell — the honest failure,
-     ;; where a blank page on every route is the alternative
-     :bundle          (rules.http/bundle-url store)
-     ;; the CLIENT route table, derived from the same page markers the
-     ;; build bakes into the browser entry — [[pattern page] …]. Without it
-     ;; the managed server cannot derive a shell's status and answers 200
-     ;; to every address (the compatibility default), which slopp-ui
-     ;; measured on the one surface humans actually browse. Pure store
-     ;; derivation; the child needs no image scan.
-     :page-routes     (mapv (juxt :path :page) (rules.webapp/page-routes store))
-     ;; whether the served app HONOURS its declared contracts. Read here rather
-     ;; than in serve-code for the same reason every other derivation is: the
-     ;; plan is what production and the dev server both answer from, and a
-     ;; switch consulted at code-generation time would be a second reader of the
-     ;; config that could disagree with this one.
-     :validate?       (capabilities/enabled? store "rest")
-     ;; WHAT IT WILL ACTUALLY SERVE, counted from the store before anything is
-     ;; spawned. `serve-in!` reports health on the BIND, and a bind succeeds
-     ;; whether or not anything is mounted behind it — so an app whose markers
-     ;; this slopp no longer reads comes up, answers 404 to every path, and is
-     ;; advertised by `session_brief` and `start-app!` as a healthy url. That is
-     ;; what a consuming store experienced the day a marker family moved: the
-     ;; server was up, the url was right, and nothing was behind it.
-     :endpoints       (count (rules.http/endpoints store))
-     ;; ...and the sentence, when it will serve NOTHING. Static-only is not
-     ;; nothing: a store may legitimately serve just its assets, and calling
-     ;; that empty would turn a working configuration into a warning. Both
-     ;; empty is the case where the port answers and every path 404s.
-     :serves-nothing  (when (and (empty? (rules.http/endpoints store))
-                                 (empty? (rules.http/static-mounts store)))
-                        (str "this app will bind its port and answer 404 to"
-                             " EVERY path: the store declares no endpoint this"
-                             " slopp can read, and no static mount. A bind"
-                             " succeeds either way, so the url reported after"
-                             " this is not evidence that anything is behind it."
-                             " If the store was written against an older slopp,"
-                             " its endpoint markers may be a retired spelling —"
-                             " session_brief's :unread-declarations says so and"
-                             " names the current one."))}))
+  (let [main (capabilities/effective store "app.main")]
+    (if-not (or (capabilities/effective store "http.enabled") main)
+      {:enabled? false
+       :reason (str "http.enabled is false — config_file {path \"capabilities\" "
+                    "key \"http.enabled\" value \"true\"} opts this store into web."
+                    " A project that is not a web project can still declare what"
+                    " to run: config_file {path \"capabilities\" key \"app.main\""
+                    " value \"my.ns/-main\"}")}
+      {:enabled?   true
+       :mode       :dev
+       :dir        (str dir)
+       :main       main
+       :serves-http? (boolean (capabilities/effective store "http.enabled"))
+       :namespaces (rules.http/serving-namespaces store)
+       :host       (or (dev/override store "http.host") (capabilities/effective store "http.host"))
+       :port       (or (dev/override store "http.port")
+                       (if (capabilities/stored? store "http.port")
+                         (capabilities/effective store "http.port")
+                         (derived-port dir)))
+       :adapter    (or (dev/override store "http.adapter") (capabilities/effective store "http.adapter"))
+       :max-body-bytes  (or (dev/override store "http.max-body-bytes")
+                            (capabilities/effective store "http.max-body-bytes"))
+       :context-builder (rules.http/context-builder store)
+       :static          (rules.http/static-mounts store)
+       :bundle          (rules.http/bundle-url store)
+       :page-routes     (mapv (juxt :path :page) (rules.webapp/page-routes store))
+       :validate?       (capabilities/enabled? store "rest")
+       :endpoints       (count (rules.http/endpoints store))
+       :serves-nothing  (when (and (empty? (rules.http/endpoints store))
+                                   (empty? (rules.http/static-mounts store)))
+                          (str "this app will bind its port and answer 404 to"
+                               " EVERY path: the store declares no endpoint this"
+                               " slopp can read, and no static mount. A bind"
+                               " succeeds either way, so the url reported after"
+                               " this is not evidence that anything is behind it."
+                               " If the store was written against an older slopp,"
+                               " its endpoint markers may be a retired spelling —"
+                               " session_brief's :unread-declarations says so and"
+                               " names the current one."))})))
 
 (defn load-order
   "The store namespaces to load into the app image, dependencies first.
 
-  The transitive closure of the web surface over the store's require graph
-  — NOT the whole store. The app image exists to run the app: loading
+  The transitive closure of the web surface over the store's require graph —
+  NOT the whole store. The app image exists to run the app: loading
   everything would make its boot cost grow with the codebase and would put
   code in a serving process that nothing serving can reach.
 
@@ -239,27 +192,21 @@
   **`slopp.http` is seeded when the STORE holds it.** slopp's own store does;
   an ordinary app gets the framework from its declared `slopp-web` coord,
   already on the child's classpath. Both must work without the app saying
-  which, so this asks the store rather than requiring an answer — and its
-  absence is a fact, not an error."
+  which, so this asks the store rather than requiring an answer.
+
+  The context builder and the app's declared ENTRY (`app.main`) are seeded
+  too, for the same reason: each declares no route and performs no kind, so
+  nothing in the served surface reaches it and the generated call would
+  require its way out to a classpath the child lacks (measured — a declared
+  entry crossed the wire and failed with \"Could not locate
+  worker/core__init.class\")."
   [store]
   (let [builder (rules.http/context-builder store)
+        main    (capabilities/effective store "app.main")
         seeds   (cond-> (set (rules.http/serving-namespaces store))
                   (contains? (:namespaces store) 'slopp.http) (conj 'slopp.http)
-                  ;; the context builder is NOT part of the served surface —
-                  ;; it declares no route and performs no kind — so nothing
-                  ;; else pulls its namespace in, and the generated call would
-                  ;; require its way out to a classpath the child lacks
-                  builder (conj (symbol (namespace builder))))
-        ;; and every DECLARED entry, for exactly the builder's reason: an
-        ;; entry point declares no route and performs no kind, so nothing in
-        ;; the served surface reaches it and the generated call would require
-        ;; its way out to a classpath the child does not have. Measured — the
-        ;; first declared entry that crossed the wire failed with "Could not
-        ;; locate worker/core__init.class", and every pure test above it was
-        ;; green.
-        seeds   (into seeds
-                      (map (comp symbol namespace :main val))
-                      (dev/runnables store))
+                  builder (conj (symbol (namespace builder)))
+                  main    (conj (symbol (namespace main))))
         want    (into #{} (mapcat #(store/ns-closure store %)) seeds)]
     (filterv want (store/ns-dependency-order store))))
 
@@ -626,45 +573,32 @@
 
   Two answers, and which applies is a property of the PLAN:
 
-  - **nothing declared** → one [[serve-code]], the generated
-    `slopp.http/serve!` call. Unchanged for every store that predates the
-    `dev` config, which is most of them.
-  - **entries declared** → one [[run-code]] each, and NO generated call —
-    preceded by what the MANAGER decided and the entry could not know, as
-    system properties set before any entry runs: `slopp.managed-for`, the
-    store dir this child is the declared entry of (the role, which is what
-    stops slopp's own in-progress daemon from managing its own project's
-    app server — see [[managed-child-of?]]); `slopp.static-dir`, where the
-    mounts' bytes were materialized, when there is such a dir (a declared
-    entry assembles its own server and had no way to learn it, so slopp's
-    daemon run this way 404'd its own bundle); `slopp.run.<name>.port` for
-    each entry that declared one, and `slopp.app-port` when exactly one
-    did. A property naming nothing is a lie the entry would act on, so
-    each is set only when there is something to say.
+  - **no entry declared** (`:main` nil) → one [[serve-code]], the generated
+    `slopp.http/serve!` call. Unchanged for every plain web project.
+  - **an entry declared** (`:main`) → one [[run-code]] calling it, and NO
+    generated call — preceded by what the MANAGER decided and the entry could
+    not know, as system properties set before the entry runs: `slopp.managed-for`,
+    the store dir this child is the declared entry of (the role that stops
+    slopp's own in-progress daemon from managing its own project's app server
+    — see [[managed-child-of?]]); `slopp.static-dir`, where the mounts' bytes
+    were materialized, when there is such a dir (a declared entry assembles
+    its own server and had no way to learn it, so slopp's daemon run this way
+    404'd its own bundle); and `slopp.app-port`, the dev-overlaid port the
+    manager decided (which the entry reads as its listen port). A property
+    naming nothing is a lie the entry would act on, so each is set only when
+    there is something to say.
 
   **Declared REPLACES derived, rather than joining it.** A generated `serve!`
   running beside a declared entry would bind a port the project never asked
-  for, and a reader who declared one server would have two — with the derived
-  one answering at an address they were never given. A project that wants
-  both says so by declaring both.
-
-  Decided here rather than inside `serve-in!` for the reason `serve-plan`
-  exists at all: everything worth getting wrong is decidable from the store,
-  and deciding it inside the function that also spawns a JVM makes it
-  testable only by spawning one."
+  for, and a reader who declared one server would have two."
   [plan]
-  (if-let [declared (seq (:runnables plan))]
-    (let [ported (into {} (filter (comp :port val)) declared)
-          told   (fn [k v] (pr-str (list 'System/setProperty k (str v))))]
+  (if-let [main (:main plan)]
+    (let [told (fn [k v] (pr-str (list 'System/setProperty k (str v))))]
       (-> []
           (into (when-let [d (:dir plan)] [(told "slopp.managed-for" d)]))
           (into (when-let [sd (:static-dir plan)] [(told "slopp.static-dir" sd)]))
-          (into (map (fn [[nm {:keys [port]}]] (told (str "slopp.run." nm ".port") port)))
-                (sort-by key ported))
-          (into (when (= 1 (count ported))
-                  [(told "slopp.app-port" (:port (val (first ported))))]))
-          (into (map (fn [[_ {:keys [main args]}]] (run-code main args)))
-                (sort-by key declared))))
+          (into (when-let [p (:port plan)] [(told "slopp.app-port" p)]))
+          (conj (run-code main []))))
     [(serve-code plan)]))
 
 (defn ^:export stop!
@@ -810,18 +744,15 @@
               (keep! (stamp (assoc running :reloaded (vec todo) :loaded now))))))))))
 
 (defn ^:export declared-url
-  "Where a human should open a plan's declared entries: a `run.<name>.url`
-  when one is declared, else `http://<host>:<port>/` when exactly ONE entry
-  carries a `run.<name>.port` — the manager told the child that port, so the
-  address follows from the declaration rather than being typed twice. nil
-  for workers, and for two ported entries, where naming one would be a
-  guess."
+  "Where a human should open a declared entry that SERVES HTTP:
+  `http://<host>:<port>/` — the manager told the child that port, so the
+  address follows from the plan rather than being typed twice. nil for a
+  worker (a declared entry that does not serve HTTP), because a declared
+  entry hands back no socket and a plausible url nobody can be sure answers
+  is worse than none."
   [plan]
-  (let [rs (vals (:runnables plan))]
-    (or (some :url rs)
-        (let [ported (filter :port rs)]
-          (when (= 1 (count ported))
-            (str "http://" (:host plan) ":" (:port (first ported)) "/"))))))
+  (when (and (:main plan) (:serves-http? plan))
+    (str "http://" (:host plan) ":" (:port plan) "/")))
 
 (defn- serve-in!
   "Bring the app up inside an already-loaded app image (`boot!`'s result) and
@@ -832,22 +763,18 @@
 
   **Two shapes of success, because there are two shapes of start.** A
   generated `serve!` answers the port it BOUND, and the reported `:url`
-  carries that rather than the one asked for — an integer is unambiguous
-  evidence a socket is open. A declared entry answers `:started`, which is
-  weaker on purpose: it proves the namespace loaded and a thread spawned, and
-  nothing about whether the app came up. So a declared plan reports the url
-  the project DECLARED, or none, and never invents one.
+  carries that. A declared entry answers `:started`, which is weaker on
+  purpose: it proves the namespace loaded and a thread spawned, and nothing
+  about whether the app came up. So a declared plan reports the url the
+  address DERIVES (host + the port the manager told it) only when the entry
+  serves HTTP, and never invents one for a worker.
 
   For the derived path a failure here is a BIND failure by construction —
-  `boot!` already proved the code loads — so the reason is narrow enough to
-  act on. For a declared entry it is whatever the entry threw on its way out
-  of `require` or its first line."
+  `boot!` already proved the code loads. For a declared entry it is whatever
+  the entry threw on its way out of `require` or its first line."
   [{:keys [image plan boot-ms served-at loaded]}]
-  ;; `:boot-ms` rides through rather than being measured here: hot-loading a
-  ;; refresh would remove the BOOT and not the bind, so folding the two into
-  ;; one number would make a contended port read as a slow image.
   (try
-    (let [declared? (seq (:runnables plan))
+    (let [declared? (:main plan)
           results   (mapv (fn [code] (first (repl/eval! image code)))
                           (startup-code plan))
           bad       (first (remove #(or (integer? %) (= :started %)) results))]
@@ -856,16 +783,10 @@
                 {:serving? false :plan plan
                  :reason (bind-failure (:port plan) bad)})
 
-        declared? (let [url (declared-url plan)]
-                    (cond-> {:serving? true :image image :plan plan
-                             :boot-ms boot-ms :served-at served-at :loaded loaded
-                             ;; NAMES, so a reader can see which entries this
-                             ;; process is carrying — there may be several and
-                             ;; only one of them has an address
-                             :started (vec (sort (keys (:runnables plan))))}
-                      ;; only when the project DECLARED one. Absent beats a
-                      ;; url nobody can be sure answers.
-                      url (assoc :url url)))
+        declared? (cond-> {:serving? true :image image :plan plan
+                           :boot-ms boot-ms :served-at served-at :loaded loaded
+                           :started [(:main plan)]}
+                    (declared-url plan) (assoc :url (declared-url plan)))
 
         :else (let [v (first results)]
                 {:serving? true :image image :plan plan :port v

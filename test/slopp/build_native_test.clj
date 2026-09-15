@@ -348,8 +348,8 @@
 (deftest ^:external a-LOCAL-config-path-never-reaches-a-BUILT-tree
   ;; `build!` writes every `:config` entry as a file at its own path, with no
   ;; filter — which is right for `capabilities`, since a built app reads the
-  ;; rendered file, and wrong for `dev`, which says what to RUN while somebody
-  ;; works on the project. A developer's port number has no business in a jar.
+  ;; rendered file, and wrong for `dev`, which OVERRIDES capabilities for the
+  ;; dev instance. A developer's dev port has no business in a jar.
   ;;
   ;; Asserted against the TREE rather than against the filter, because the
   ;; tree is what ships and the filter is one line that could be correct while
@@ -363,10 +363,8 @@
                         "(defn run-cli [args] (doseq [a args] (println a)))\n"))
       (ops/config-file! sess "capabilities" :key "app.main" :value "calc.core/run-cli"
                         :prompt "the product's entry point")
-      (ops/config-file! sess "dev" :key "run.app.main" :value "calc.core/run-cli"
-                        :prompt "what to run while working on this")
-      (ops/config-file! sess "dev" :key "run.app.args" :value "--port,9999"
-                        :prompt "on a port this developer chose")
+      (ops/config-file! sess "dev" :key "http.port" :value "7399"
+                        :prompt "a dev port this developer chose")
 
       (let [r (external/build! sess dir)]
         (is (nil? (:error r)) (pr-str r))
@@ -380,18 +378,16 @@
               "a dev entry was written into the built tree"))
 
         (testing "nor does its content arrive in any other file"
-          ;; the failure a filename check cannot see: rendered into a file
-          ;; somebody else owns, or swept up by a later writer
           (let [hits (for [^java.io.File f (file-seq (io/file dir))
                            :when (.isFile f)
-                           :when (try (str/includes? (slurp f) "--port,9999")
+                           :when (try (str/includes? (slurp f) "7399")
                                       (catch Exception _ false))]
                        (str f))]
             (is (empty? hits)
                 (str "dev content shipped inside: " (pr-str (vec hits)))))))
 
       (testing "and it is still IN THE STORE — local means unshipped, not unsaved"
-        (is (= "--port,9999"
-               (get-in (:store @sess) [:config "dev" :values "run.app.args"]))))
+        (is (= "7399"
+               (get-in (:store @sess) [:config "dev" :values "http.port"]))))
 
       (finally (ops/close! sess)))))

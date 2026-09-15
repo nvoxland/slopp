@@ -11,79 +11,19 @@
             [slopp.store :as store]
             [slopp.project.dev :as dev]))
 
-(deftest a-project-DECLARES-what-to-run-in-development
-  ;; Whether slopp runs a project's server is DERIVED (`live/managed?`), and
-  ;; that stays derived — a per-project on/off switch let a bug masquerade as
-  ;; a preference once, which is why the `dev.server` capability was deleted.
-  ;;
-  ;; This is the other question. Not WHETHER, but WHAT: an entry point, its
-  ;; arguments, and a name to address it by. Derivation cannot know that a
-  ;; developer wants the admin server on 9999, and until now there was
-  ;; nowhere to say it.
+(deftest dev-override-reads-the-dev-overlay-of-a-capability-key
+  ;; The `dev` file overrides a CAPABILITY for the dev instance: `dev.http.port`
+  ;; overrides `http.port`. The keys ARE capability keys, validated against the
+  ;; capabilities registry, so a dev override is checked at the write like any
+  ;; config and parsed to the capability's own type.
   (let [st (-> (store/empty-store)
-               (assoc-in [:config "dev" :values "run.app.main"] "shop.core/-main")
-               (assoc-in [:config "dev" :values "run.app.args"] "--port,8080")
-               (assoc-in [:config "dev" :values "run.worker.main"] "shop.jobs/-main"))]
-
-    (testing "each declared name comes back with what to run"
-      (is (= 'shop.core/-main (get-in (dev/runnables st) ["app" :main])))
-      (is (= 'shop.jobs/-main (get-in (dev/runnables st) ["worker" :main]))))
-
-    (testing "arguments are a LIST, in the order they were written"
-      ;; a set would lose the order, and an entry point's arguments are
-      ;; positional — `--port 8080` is not `8080 --port`. That is the whole
-      ;; reason :csv-list exists beside :csv rather than reusing it
-      (is (= ["--port" "8080"] (get-in (dev/runnables st) ["app" :args]))))
-
-    (testing "an entry with no args declares none, rather than an empty string"
-      (is (= [] (get-in (dev/runnables st) ["worker" :args]))))
-
-    (testing "enabled by default, because declaring it IS asking for it"
-      (is (true? (get-in (dev/runnables st) ["app" :enabled?]))))
-
-    (testing "and a declared entry can be turned off without deleting it"
-      ;; the reason this key exists rather than "just remove the line": a
-      ;; developer silencing the worker for an afternoon should not have to
-      ;; retype its entry point to get it back
-      (let [off (assoc-in st [:config "dev" :values "run.worker.enabled"] "false")]
-        (is (false? (get-in (dev/runnables off) ["worker" :enabled?])))
-        (is (true? (get-in (dev/runnables off) ["app" :enabled?])))))
-
-    (testing "a store that declares nothing runs nothing"
-      ;; the common case — EMPTY, rather than a map of nils
-      (is (= {} (dev/runnables (store/empty-store)))))
-
-    (testing "an entry with no :main is not a runnable"
-      ;; args alone cannot start anything, and reporting it would hand the
-      ;; supervisor something it could only refuse
-      (let [orphan (assoc-in (store/empty-store)
-                             [:config "dev" :values "run.ghost.args"] "--port,1")]
-        (is (= {} (dev/runnables orphan)))))
-
-    (testing "a declared url rides along, and an undeclared one is ABSENT"
-      ;; slopp reads a bound port back from the serve! call it generates, but
-      ;; a declared entry is an arbitrary fn and hands back no socket — so an
-      ;; address it wants offered has to be declared. Absent rather than nil
-      ;; because a worker genuinely has no address, and a key that is always
-      ;; present but usually nil trains a reader to skip the one time it is
-      ;; not.
-      (let [addressed (assoc-in st [:config "dev" :values "run.app.url"]
-                                "http://127.0.0.1:8080")]
-        (is (= "http://127.0.0.1:8080" (get-in (dev/runnables addressed) ["app" :url])))
-        (is (not (contains? (get (dev/runnables addressed) "worker") :url))
-            "the worker has no url and should not carry the key")))
-
-    (testing "a declared PORT rides along as a number, and an undeclared one is ABSENT"
-      ;; the dev port of a declared entry is the run config's business, not
-      ;; `http.port`'s: that key is the PRODUCTION address, and for slopp's own
-      ;; store it is the machine daemon's port — which is exactly the one the
-      ;; in-progress daemon must not take
-      (let [ported (assoc-in st [:config "dev" :values "run.app.port"] "7358")]
-        (is (= 7358 (get-in (dev/runnables ported) ["app" :port])))
-        (is (not (contains? (get (dev/runnables ported) "worker") :port)))))
-
-    (testing "a key the registry does not govern is ignored, not guessed at"
-      ;; `run.app.typo` matches no pattern, so `find-entry` answers nil and
-      ;; the entry is unaffected — a typo must not silently become a field
-      (let [typo (assoc-in st [:config "dev" :values "run.app.prot"] "9999")]
-        (is (= (dev/runnables st) (dev/runnables typo)))))))
+               (assoc-in [:config "dev" :values "http.port"] "7358"))]
+    (testing "the dev value, parsed to the capability's declared type"
+      (is (= 7358 (dev/override st "http.port"))))
+    (testing "nil when the dev file does not override the key"
+      (is (nil? (dev/override st "http.host"))))
+    (testing "nil when there is no dev config at all"
+      (is (nil? (dev/override (store/empty-store) "http.port"))))
+    (testing "a bad dev value is ignored (nil), not thrown — it must not break the boot"
+      (is (nil? (dev/override (assoc-in (store/empty-store) [:config "dev" :values "http.port"] "nope")
+                             "http.port"))))))

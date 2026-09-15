@@ -1514,43 +1514,32 @@
       (finally (.close conn)))))
 
 (deftest ^:external dev-config-validates-at-write
-  ;; `dev` has a registry, so it gets the same bar `capabilities` and `rules`
-  ;; get. Without this the registry would be documentation: `config_file`
-  ;; only refuses on paths it is told to check, so an unregistered path
-  ;; records whatever it is handed and a typo'd key governs nothing, silently
-  ;; — the exact hole the `rules` registry was wired in to close.
+  ;; `dev` validates at the write like `capabilities` and `rules`. Its keys ARE
+  ;; capability keys — `dev.http.port` overrides `http.port` for the dev
+  ;; instance — so an unknown key or a bad value is refused with the same
+  ;; teaching, against the capabilities registry.
   (let [sess (external/open!)]
     (try
       (testing "an unknown dev key is refused, and the refusal names it"
-        (let [r (ops/config-file! sess "dev" :key "run.app.prot" :value "8080"
+        (let [r (ops/config-file! sess "dev" :key "http.prot" :value "8080"
                                   :prompt "typo'd field")]
-          (is (re-find #"run\.app\.prot" (str (:error r))) (pr-str r))
-          (is (nil? (get-in (:store @sess) [:config "dev" :values "run.app.prot"]))
+          (is (re-find #"http\.prot" (str (:error r))) (pr-str r))
+          (is (nil? (get-in (:store @sess) [:config "dev" :values "http.prot"]))
               "the refused key landed anyway")))
 
-      (testing "a value that fails its type is refused with the teaching"
-        (let [r (ops/config-file! sess "dev" :key "run.app.main" :value "unqualified"
-                                  :prompt "not an entry point")]
-          (is (re-find #"qualified symbol" (str (:error r))) (pr-str r))))
+      (testing "a value that fails the capability's type is refused with the teaching"
+        (let [r (ops/config-file! sess "dev" :key "http.port" :value "notaport"
+                                  :prompt "not a port")]
+          (is (re-find #"integer" (str (:error r))) (pr-str r))))
 
-      (testing "a good declaration lands and reads back as a runnable"
-        (is (nil? (:error (ops/config-file! sess "dev" :key "run.app.main"
-                                            :value "shop.core/-main"
-                                            :prompt "the app"))))
-        (is (nil? (:error (ops/config-file! sess "dev" :key "run.app.args"
-                                            :value "--port,8080"
-                                            :prompt "on this port"))))
-        (let [runs (dev/runnables (:store @sess))]
-          (is (= 'shop.core/-main (get-in runs ["app" :main])) (pr-str runs))
-          (is (= ["--port" "8080"] (get-in runs ["app" :args])) (pr-str runs))))
+      (testing "a good dev override lands and reads back through dev/override"
+        (is (nil? (:error (ops/config-file! sess "dev" :key "http.port"
+                                            :value "7358" :prompt "the dev port"))))
+        (is (= 7358 (dev/override (:store @sess) "http.port")) (pr-str (:store @sess))))
 
       (testing "and the write reports that a registry stood behind it"
-        ;; D-surface-honesty: an unchecked write records what it is handed, so
-        ;; a caller cannot tell the two apart unless the result says which
-        ;; happened. `dev` must not report itself as unverified now that it
-        ;; has a registry.
-        (let [r (ops/config-file! sess "dev" :key "run.worker.main"
-                                  :value "shop.jobs/-main" :prompt "a worker")]
+        (let [r (ops/config-file! sess "dev" :key "http.host"
+                                  :value "0.0.0.0" :prompt "a dev host")]
           (is (not-any? #{:schema} (:unverified r)) (pr-str r))))
 
       (finally (ops/close! sess)))))

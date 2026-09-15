@@ -865,140 +865,82 @@
             (pr-str bare))))))
 
 (deftest a-DECLARED-runnable-is-reason-enough-to-serve
-  ;; `http.enabled` is the master web opt-in and it answers "is this a web
-  ;; project". It cannot answer "does this project want a worker running",
-  ;; and a project that declares one has said so as plainly as a config can.
-  ;;
-  ;; So the plan's gate becomes: this store serves HTTP, or it declared
-  ;; something to run. Neither implies the other — a CLI project with a
-  ;; declared worker is not a web project, and a web project that declares
-  ;; nothing still gets its derived server.
+  ;; `http.enabled` is the master web opt-in and answers "is this a web
+  ;; project". It cannot answer "does this project want a custom entry
+  ;; running", and a project that declares `app.main` has said so. So the
+  ;; plan's gate becomes: this store serves HTTP, or it declared an entry.
+  ;; Neither implies the other.
   (let [declared (-> (store/empty-store)
-                     (assoc-in [:config "dev" :values "run.worker.main"]
-                               "shop.jobs/-main"))
-        silenced (assoc-in declared [:config "dev" :values "run.worker.enabled"]
-                           "false")]
-
-    (testing "a declared runnable enables the plan with http.enabled UNSET"
-      ;; the case that matters: a worker is not a web project
+                     (assoc-in [:config "capabilities" :values "app.main"]
+                               "shop.jobs/-main"))]
+    (testing "a declared entry enables the plan with http.enabled UNSET"
       (let [plan (live/serve-plan declared "/tmp/x")]
         (is (:enabled? plan) (pr-str plan))
-        (is (= 'shop.jobs/-main (get-in plan [:runnables "worker" :main]))
-            (pr-str plan))))
-
-    (testing "a SILENCED entry is not in the plan"
-      ;; `runnables` keeps it so a reader can see it was asked for; the PLAN
-      ;; is what gets launched, and launching something declared-off is the
-      ;; one reading of `:enabled? false` that would be wrong
-      (let [plan (live/serve-plan silenced "/tmp/x")]
-        (is (empty? (:runnables plan)) (pr-str plan))))
-
+        (is (= 'shop.jobs/-main (:main plan)) (pr-str plan))))
     (testing "and with nothing declared and no http, the plan still declines"
-      ;; the guard on the guard: if a declared runnable enabled the plan, an
-      ;; absent one must not — most stores are not web projects and must not
-      ;; acquire a server by this change
       (let [plan (live/serve-plan (store/empty-store) "/tmp/x")]
         (is (not (:enabled? plan)) (pr-str plan))
         (is (re-find #"http\.enabled" (str (:reason plan))) (pr-str plan))))
-
-    (testing "a web project with nothing declared carries no runnables"
-      ;; the derived server is unchanged by this, which is what keeps every
-      ;; existing store working
+    (testing "a web project with nothing declared carries no :main"
       (let [web  (assoc-in (store/empty-store)
                            [:config "capabilities" :values "http.enabled"] "true")
             plan (live/serve-plan web "/tmp/x")]
         (is (:enabled? plan) (pr-str plan))
-        (is (empty? (:runnables plan)) (pr-str plan))))))
+        (is (nil? (:main plan)) (pr-str plan))))))
 
 (deftest what-the-child-EVALUATES-is-decided-by-the-plan
-  ;; `serve-in!` used to have one answer: evaluate the generated `serve!`
-  ;; call. With declared entries there are two, and which one applies is a
-  ;; property of the PLAN — so it is decided here, purely, rather than inside
-  ;; the function that also spawns a JVM and binds a socket.
-  ;;
-  ;; That split is the same one `serve-plan` already makes and for the same
-  ;; reason: everything worth getting wrong is decidable from the store.
+  ;; `serve-in!` used to have one answer: the generated `serve!` call. With a
+  ;; declared entry there are two, and which applies is a property of the PLAN
+  ;; — decided here, purely, rather than inside the function that also spawns a
+  ;; JVM and binds a socket.
   (let [derived  {:namespaces ['demo.app] :host "127.0.0.1" :port 1234
-                  :adapter :http-kit :runnables {}}
+                  :adapter :http-kit :main nil}
         declared {:namespaces ['demo.app] :host "127.0.0.1" :port 1234
-                  :adapter :http-kit
-                  :runnables {"app"    {:main 'shop.core/-main
-                                        :args ["--port" "8080"] :enabled? true}
-                              "worker" {:main 'shop.jobs/-main
-                                        :args [] :enabled? true}}}]
-
-    (testing "with nothing declared, the child evaluates the GENERATED serve! call"
-      ;; unchanged for every store that predates this
+                  :adapter :http-kit :main 'shop.core/-main}]
+    (testing "with no entry declared, the child evaluates the GENERATED serve! call"
       (let [code (live/startup-code derived)]
         (is (= 1 (count code)) (pr-str code))
         (is (str/includes? (first code) "slopp.http/serve!") (pr-str code))))
-
-    (testing "with entries declared, it evaluates THOSE and not the generated call"
-      ;; "declared replaces the call" — a derived `serve!` beside a declared
-      ;; entry would bind a port the project never asked for, and the reader
-      ;; would have two servers where they asked for one
-      (let [code (live/startup-code declared)]
-        (is (= 2 (count code)) (pr-str code))
-        (is (not-any? #(str/includes? % "slopp.http/serve!") code)
-            (str "the derived server is still generated beside the declared"
-                 " entries: " (pr-str code)))))
-
-    (testing "one expression per declared entry, each naming its own fn"
+    (testing "with an entry declared, it evaluates THAT and not the generated call"
       (let [code (live/startup-code declared)]
         (is (some #(str/includes? % "shop.core/-main") code) (pr-str code))
-        (is (some #(str/includes? % "shop.jobs/-main") code) (pr-str code))))))
+        (is (not-any? #(str/includes? % "slopp.http/serve!") code)
+            (str "the derived server is still generated beside the declared"
+                 " entry: " (pr-str code)))))))
 
 (deftest ^:external a-DECLARED-entry-actually-RUNS-in-the-child
-  ;; Everything above this decides what SHOULD happen: `runnables` reads the
-  ;; config, `serve-plan` gates on it, `startup-code` picks the expression.
-  ;; All three are pure and all three can be right while nothing starts —
-  ;; which is the shape that cost this store a day when a filter was correct
-  ;; and never called.
-  ;;
-  ;; So this one crosses the wire. A real child image, the store's own code,
-  ;; a declared entry that leaves EVIDENCE it ran.
+  ;; The pure tests above decide what SHOULD happen; this one crosses the
+  ;; wire. A real child image, the store's own code, a declared entry
+  ;; (`app.main`) that leaves EVIDENCE it ran.
   (let [dir  (str (java.nio.file.Files/createTempDirectory
                    "slopp-declared"
                    (make-array java.nio.file.attribute.FileAttribute 0)))
-        ;; the entry writes a file, because a return value proves nothing here
-        ;; — `run-code` answers :started whatever the fn does, deliberately,
-        ;; and this test exists to check the fn was actually CALLED
         marker (str dir "/ran.txt")
         s    (-> (store/empty-store)
                  (store/ingest 'worker.core
                                (str "(ns worker.core)\n\n"
-                                    "(defn -main \"Runs.\" [& args]\n"
-                                    "  (spit \"" marker "\" (str \"ran:\" (vec args))))\n"))
-                 (#(first (store/record-config-put % "dev" :manifest
-                                                   "run.worker.main" "worker.core/-main")))
-                 (#(first (store/record-config-put % "dev" :manifest
-                                                   "run.worker.args" "--once,now"))))
+                                    "(defn -main \"Runs.\" [& _]\n"
+                                    "  (spit \"" marker "\" \"ran\"))\n"))
+                 (#(first (store/record-config-put % "capabilities" :manifest
+                                                   "app.main" "worker.core/-main"))))
         sess (atom {})
         r    (live/start! sess s dir)]
     (try
       (testing "it comes up on a declared entry alone — no http.enabled anywhere"
-        ;; a worker is not a web project, and needing the web opt-in to run one
-        ;; would be the derivation answering a question it cannot see
         (is (:serving? r) (str "start! did not serve: " (:reason r))))
 
-      (testing "and it names WHICH entries it is carrying"
-        (is (= ["worker"] (:started r)) (pr-str r)))
+      (testing "and it names the entry it is carrying"
+        (is (= ['worker.core/-main] (:started r)) (pr-str r)))
 
-      (testing "no url is invented for an entry that declared none"
-        ;; slopp reads a bound port back from the call it GENERATES; it has
-        ;; nothing to read here, and a plausible url nobody can be sure
-        ;; answers is worse than none
+      (testing "no url is invented for an entry that does not serve HTTP"
         (is (not (contains? r :url)) (pr-str r)))
 
-      (testing "the declared fn RAN, with its declared arguments in order"
-        ;; the assertion the pure tests above cannot make
+      (testing "the declared fn RAN"
         (let [ran? (loop [n 0]
                      (cond (.exists (io/file marker)) true
                            (> n 100) false
                            :else (do (Thread/sleep 100) (recur (inc n)))))]
-          (is ran? "the entry never ran — :started reported a thread that did nothing")
-          (is (= "ran:[\"--once\" \"now\"]" (slurp marker))
-              "the arguments did not arrive in order")))
+          (is ran? "the entry never ran — :started reported a thread that did nothing")))
 
       (finally (live/stop! r)))))
 
@@ -1237,13 +1179,12 @@
       (finally (live/stop! r)))))
 
 (deftest a-declared-entry-is-reason-enough-to-be-managed
-  ;; `managed?` gated on http.enabled alone, so a store whose dev instance
-  ;; is a declared entry — a worker, a daemon, a main — was never started
-  ;; by slopp at all: `serve-plan` knew the entry was reason enough and the
-  ;; gate in front of it did not. slopp's own store is the case: its HTTP
-  ;; surface is self-served, and its dev instance is a daemon.
-  (let [st (first (store/record-config-put (store/empty-store) "dev" :manifest
-                                            "run.worker.main" "w.core/-main"))]
+  ;; `managed?` gated on http.enabled alone, so a store whose dev instance is a
+  ;; declared entry (`app.main`) — a worker, a daemon, a main — was never
+  ;; started by slopp at all. slopp's own store is the case: its HTTP surface
+  ;; is self-served, and its dev instance is a daemon.
+  (let [st (assoc-in (store/empty-store) [:config "capabilities" :values "app.main"]
+                     "w.core/-main")]
     (is (live/managed? st []) "a declared entry, no HTTP: managed")
     (is (live/managed? st ['w.core]) "self-served HTTP does not silence a declared entry")
     (is (not (live/managed? (store/empty-store) [])) "nothing declared, no HTTP: not managed")))
@@ -1252,21 +1193,19 @@
   ;; A generated `serve!` call carries the materialized dir inside its static
   ;; mount. A declared entry assembles its own server, and nothing told it
   ;; where the bytes went — slopp's own dev instance 404'd its own bundle. So
-  ;; the child is told FIRST, as a system property, before any entry runs;
-  ;; and only when there is a dir to name, because a property naming nothing
-  ;; is a lie the entry would act on.
+  ;; the child is told FIRST, as a system property, before the entry runs; and
+  ;; only when there is a dir to name.
   (let [declared {:namespaces ['demo.app] :host "127.0.0.1" :port 1234
-                  :adapter :http-kit
-                  :runnables {"app" {:main 'shop.core/-main :args [] :enabled? true}}}]
-    (testing "the property precedes every entry and names the dir"
+                  :adapter :http-kit :main 'shop.core/-main}]
+    (testing "the property precedes the entry and names the dir"
       (let [code (live/startup-code (assoc declared :static-dir "/tmp/x"))]
-        (is (= 2 (count code)) (pr-str code))
-        (is (str/includes? (first code) "\"slopp.static-dir\"") (pr-str code))
-        (is (str/includes? (first code) "\"/tmp/x\"") (pr-str code))
-        (is (str/includes? (second code) "shop.core/-main") (pr-str code))))
+        (is (some #(and (str/includes? % "\"slopp.static-dir\"")
+                        (str/includes? % "\"/tmp/x\"")) code) (pr-str code))
+        (is (< (first (keep-indexed (fn [i c] (when (str/includes? c "slopp.static-dir") i)) code))
+               (first (keep-indexed (fn [i c] (when (str/includes? c "shop.core/-main") i)) code)))
+            (pr-str code))))
     (testing "no dir, no property"
       (let [code (live/startup-code declared)]
-        (is (= 1 (count code)) (pr-str code))
         (is (not-any? #(str/includes? % "slopp.static-dir") code) (pr-str code))))))
 
 (deftest stopping-an-app-server-removes-what-it-materialized
@@ -1282,16 +1221,12 @@
     (is (not (.exists (java.io.File. (str d)))) "the materialized dir is gone with the server")))
 
 (deftest a-declared-entry-is-told-its-role-and-its-port
-  ;; The manager decided the port and it knows which store the child is the
-  ;; declared entry of; the entry could learn neither. So both are told as
-  ;; properties before any entry runs, the way the static dir already is —
-  ;; and the ROLE is what stops slopp's in-progress daemon from managing its
-  ;; own project's app server, which would be a child of itself on its own
-  ;; port.
-  (let [plan {:dir "/proj" :namespaces ['demo.app] :host "127.0.0.1" :port 1234
-              :adapter :http-kit
-              :runnables {"app"    {:main 'shop.core/-main :args [] :enabled? true :port 7358}
-                          "worker" {:main 'shop.jobs/-main :args [] :enabled? true}}}
+  ;; The manager decided the port and knows which store the child is the
+  ;; declared entry of; the entry could learn neither. Both are told as
+  ;; properties before the entry runs — and the ROLE is what stops slopp's
+  ;; in-progress daemon from managing its own project's app server.
+  (let [plan {:dir "/proj" :namespaces ['demo.app] :host "127.0.0.1" :port 7358
+              :adapter :http-kit :main 'shop.core/-main :serves-http? true}
         code (live/startup-code plan)
         told (fn [k] (some #(when (and (str/includes? % "System/setProperty")
                                          (str/includes? % (str "\"" k "\"")))
@@ -1299,24 +1234,16 @@
                             code))]
     (testing "the role: which store this child is the declared entry of"
       (is (str/includes? (str (told "slopp.managed-for")) "\"/proj\"") (pr-str code)))
-    (testing "each ported entry's port under its own name, and the one port as the app's"
-      (is (str/includes? (str (told "slopp.run.app.port")) "\"7358\"") (pr-str code))
-      (is (nil? (told "slopp.run.worker.port")) "a worker declares no port and is told none")
+    (testing "the manager's port, as the app's listen port"
       (is (str/includes? (str (told "slopp.app-port")) "\"7358\"") (pr-str code)))
-    (testing "every property precedes every entry"
+    (testing "every property precedes the entry"
       (let [i (fn [pred] (first (keep-indexed (fn [i c] (when (pred c) i)) code)))]
         (is (< (i #(str/includes? % "slopp.app-port"))
                (i #(str/includes? % "shop.core/-main"))))))
-    (testing "two ported entries: each is told its own, and no one is 'the app'"
-      (let [two (assoc-in plan [:runnables "worker" :port] 9999)
-            code2 (live/startup-code two)]
-        (is (some #(str/includes? % "slopp.run.worker.port") code2))
-        (is (not-any? #(str/includes? % "\"slopp.app-port\"") code2) (pr-str code2))))
-    (testing "a ported entry's url is DERIVED; a declared url still wins"
-      (is (= "http://127.0.0.1:7358/" (live/declared-url plan)))
-      (is (= "http://x/" (live/declared-url (assoc-in plan [:runnables "app" :url] "http://x/"))))
-      (is (nil? (live/declared-url (update plan :runnables dissoc "app")))
-          "a worker alone has no address to offer"))
+    (testing "a ported HTTP entry's url is DERIVED from host + the told port"
+      (is (= "http://127.0.0.1:7358/" (live/declared-url plan))))
+    (testing "a non-HTTP worker has no address to offer"
+      (is (nil? (live/declared-url (assoc plan :serves-http? false)))))
     (testing "and a process can ask whether it IS a store's declared entry"
       (let [was (System/getProperty "slopp.managed-for")]
         (try

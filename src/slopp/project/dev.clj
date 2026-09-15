@@ -18,96 +18,52 @@
   per-project on/off switch once let a bug masquerade as a preference and the
   capability that did it was deleted for that reason. This namespace answers
   what to run and how, which derivation cannot know."
-  (:require [clojure.string :as str]
-            [slopp.project.capabilities :as capabilities]))
-
-(def ^{:export "slopp.project"} registry
-  "The `dev` config keys — the same `{:key :type :default :doc}` shape as
-  `capabilities/registry`, read through the same `check-value`, so a runnable
-  is validated AT THE WRITE rather than discovered when nothing starts.
-
-  `run.*.main` uses the trailing-`*` pattern the registry machinery already
-  understands (`http.auth.groups.*.members` is the same shape), so the NAME of
-  a runnable is a SEGMENT OF ITS KEY rather than a value to be parsed. Two
-  entries cannot then collide by spelling, and each key validates on its own."
-  [{:key "run.*.main" :type [:qualified-symbol] :default nil
-    :doc "The entry fn to run under this name (shop.core/-main). The name is the key's own segment: run.admin.main declares `admin`."}
-   {:key "run.*.args" :type [:csv-list] :default nil
-    :doc "Arguments handed to the entry fn, comma-separated and IN ORDER — --port,8080 arrives as [\"--port\" \"8080\"]. Ordered because arguments are positional, which is why this is :csv-list and not :csv."}
-   {:key "run.*.url" :type [:string] :default nil
-    :doc "Where a human should open this entry (http://127.0.0.1:8080). DECLARED, not observed: slopp generates the serve! call for a derived dev server and reads the bound port back from it, but a declared entry is an arbitrary fn and hands back no socket. Absent = slopp has no address to offer for it, which is the honest answer for a worker."}
-   {:key "run.*.enabled" :type [:boolean] :default true
-    :doc "Whether to start this entry. Default true, because declaring a runnable IS asking for it; set false to silence one for an afternoon without deleting its entry point."}
-   {:key "run.*.port" :type [:int {:min 1 :max 65535}] :default nil
-    :doc "The port this entry should listen on IN DEVELOPMENT. The manager tells the child before the entry runs (the slopp.run.<name>.port system property, and slopp.app-port when this is the only ported entry), and reports http://<host>:<port>/ as the entry's url unless run.<name>.url says otherwise. A dev setting rather than http.port because that is the PRODUCTION address — for slopp's own store the machine daemon's — and the in-progress copy must not take it."}])
-
-(defn ^:export runnables
-  "What `store` declares it wants RUN while somebody is working on it:
-  `{\"app\" {:main shop.core/-main :args [\"--port\" \"8080\"] :enabled? true}}`.
-
-  Named, because a project grows a second process — a worker, an admin port —
-  and a single anonymous entry would have to be redesigned the day it does.
-
-  Each field resolves highest precedence first: a per-process env override
-  ([[slopp.project.capabilities/env-config]], e.g. `SLOPP_DEV_RUN_DAEMON_PORT`
-  for this daemon's dev-instance port), else the stored `dev` value, else the
-  registry default. The override is what lets two daemons on one store run
-  their dev instances on different ports.
-
-  **An entry with no `:main` is dropped.** Arguments alone cannot start
-  anything, and reporting one would hand the supervisor something it could
-  only refuse. `:enabled? false` is a different thing and stays in the map: a
-  declared entry deliberately silenced is still something a reader should see
-  was asked for."
-  [store]
-  (let [values (get-in store [:config "dev" :values])
-        read   (fn [k]
-                 (when-let [entry (capabilities/find-entry registry k)]
-                   (capabilities/resolve-config entry
-                                                (capabilities/env-config "dev" k)
-                                                (get values k))))
-        ;; the name is the MIDDLE segment of `run.<name>.<field>`, so the set
-        ;; of declared names comes from the keys rather than from a list
-        ;; somebody has to keep in step with them
-        names  (into (sorted-set)
-                     (keep (fn [k]
-                             (let [segs (str/split (str k) #"\.")]
-                               (when (and (= 3 (count segs)) (= "run" (first segs)))
-                                 (second segs)))))
-                     (keys values))]
-    (into {}
-          (keep (fn [nm]
-                  (when-let [main (read (str "run." nm ".main"))]
-                    [nm (cond-> {:main     main
-                                 :args     (or (read (str "run." nm ".args")) [])
-                                 :enabled? (read (str "run." nm ".enabled"))}
-                          (read (str "run." nm ".url"))
-                          (assoc :url (read (str "run." nm ".url")))
-                          (read (str "run." nm ".port"))
-                          (assoc :port (read (str "run." nm ".port"))))])))
-          names)))
+  (:require [slopp.project.capabilities :as capabilities]))
 
 (defn ^:export config-refusal
-  "The `dev` config write gate: a teaching error for a key the registry does
-  not govern or a value that fails its declared type — nil when the write may
-  land.
+  "The `dev` config write gate: a teaching error for a key that is not a
+  capability or a value that fails its type — nil when the write may land.
+
+  The `dev` file OVERRIDES capabilities for the dev instance, so its keys ARE
+  capability keys (`dev.http.port` overrides `http.port`) and validate against
+  the SAME registry and the same `check-value` — a mistyped dev key and a
+  mistyped capability are the same error, caught the same way.
 
   An unknown key MUST refuse, for the reason the `rules` registry was wired
   in: with nothing to disagree with, a renamed field and a MISTYPED one are
   the same event — both accepted, both governing nothing, neither reported.
-  `run.app.prot` is not a port; it is silence.
 
   No credential clause, unlike `capabilities/config-refusal`. That one exists
   because capability config is tracked and git-projected, so a literal secret
   in it travels; `dev` is in `slopp.store/local-config-paths` and reaches no
-  tree at all. The reasoning is worth stating rather than leaving as an
-  absence, because the two gates otherwise look like one gate with a piece
-  missing."
+  tree at all."
   [k v]
   (let [k (str k) v (str v)]
-    (if-let [entry (capabilities/find-entry registry k)]
+    (if-let [entry (capabilities/find-entry k)]
       (capabilities/check-value entry v)
-      (str k " is not a dev setting — known keys: "
-           (str/join ", " (map :key registry))
-           ". The name of a runnable is the key's own middle segment, so"
-           " run.admin.main declares `admin`."))))
+      (str k " is not a capability key — the dev file OVERRIDES capabilities for"
+           " the dev instance (dev.http.port overrides http.port), so its keys"
+           " are capability keys."))))
+
+(defn ^:export override
+  "The `dev` overlay's value for capability key `k`, or nil when the dev file
+  does not override it (and nil for a value that fails the key's type, so a bad
+  override falls through to the capability's own effective value rather than
+  breaking the boot).
+
+  The `dev` file mirrors the CAPABILITY keys — `dev.http.port` overrides
+  `http.port` for the dev instance — so `k` is validated and parsed against the
+  capabilities registry, the same keys and the same `check-value` every config
+  goes through. A per-process `SLOPP_DEV_<KEY>` env override wins over the
+  stored value, which is what lets two daemons on one store run their dev
+  instances on different ports.
+
+  A dev SETTING rather than overriding `http.port` directly because `http.port`
+  is the PRODUCTION address — for slopp's own store the machine daemon's — and
+  the in-progress copy must not take it."
+  [store k]
+  (let [entry  (capabilities/find-entry k)
+        stored (get-in store [:config "dev" :values k])
+        raw    (or (capabilities/env-config "dev" k) stored)]
+    (when (and entry raw (nil? (capabilities/check-value entry raw)))
+      (capabilities/resolve-config entry raw nil))))
