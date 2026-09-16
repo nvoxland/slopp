@@ -1983,7 +1983,7 @@
              boundary? (dissoc :external-pending))]
     (assoc r :ms (- (System/currentTimeMillis) t0))))
 
-(defn ^{:export "slopp.mcp"} refresh-cache!
+(defn ^{:export "slopp-server.mcp"} refresh-cache!
   "Advance the cached store from the journal (the record of truth in a
   durable session): INCREMENTALLY when every foreign delta in the suffix
   replays (the common case — no full re-parse), falling back to a full
@@ -2017,7 +2017,7 @@
   graded — and once a session sits on its own thread rather than the trunk,
   that is not a hypothetical.
 
-  Exposed to `slopp.mcp` for one caller: a project's app OWNER under the
+  Exposed to `slopp-server.mcp` for one caller: a project's app OWNER under the
   daemon has to hold the branch's current value before its server is
   re-served from it, and `sync-with-journal!` is gated on an image the
   owner may still be booting."

@@ -51,7 +51,7 @@
                                         'y "(ns y (:require [x :as x]))"}))))))
 
 (deftest parse-args-trampolines-main-args
-  (let [daemon-main (symbol "slopp.daemon" "-main")
+  (let [daemon-main (symbol "slopp-server.daemon" "-main")
         sync-main   (symbol "slopp.sync" "-main")]
     (testing "default: the DAEMON, with no args — the dir is what boot loads, not the port"
       (is (= {:dir "." :main daemon-main :args []}

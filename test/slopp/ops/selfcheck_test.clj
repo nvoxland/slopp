@@ -65,7 +65,7 @@
                             m))
                         {} (refs/refs st))
         ;; every var the OUTSIDE can start at: the wire dispatch and the mains
-        roots   (into #{'slopp.mcp/call-tool!}
+        roots   (into #{'slopp-server.mcp/call-tool!}
                       (for [nsx  prod
                             e    (store/forms st nsx)
                             :let [nm (store/form-symbol (:node e))
@@ -307,7 +307,7 @@
            named after its own file suffix"))))
 
 (deftest ^:external
-  ^{:correspondence "the descriptor vectors slopp.mcp.tools/classified composes vs the shape its classifier requires — related by nothing but the assumption that every entry is a map, and the load failure it causes is invisible to a running image"}
+  ^{:correspondence "the descriptor vectors slopp-server.mcp.tools/classified composes vs the shape its classifier requires — related by nothing but the assumption that every entry is a map, and the load failure it causes is invisible to a running image"}
   every-tool-descriptor-is-a-map-with-a-name
   ;; `classified` resolves a classification onto EVERY entry of the descriptor
   ;; groups, so an entry that is not a map takes the whole namespace down at
@@ -325,7 +325,7 @@
   ;; the thing that hid it — and take the groups from `classified`'s own
   ;; source, so a seventh group added later is covered without being listed.
   (let [st     (external/built-store)
-        forms  (store/forms st 'slopp.mcp.tools)
+        forms  (store/forms st 'slopp-server.mcp.tools)
         sexpr  (fn [nm] (some (fn [e] (when (= nm (store/form-symbol (:node e)))
                                         (store/form-sexpr (:node e))))
                               forms))

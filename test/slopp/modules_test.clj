@@ -1253,7 +1253,7 @@
 (deftest ^:external a-build-carries-its-purity-tiers-as-a-resource
   ;; friction 2. A purity tier is a DECLARATION in the producer's store, not
   ;; anything in the code — so a published jar carries the code and leaves the
-  ;; tiers behind. Measured: `slopp.ui.hub` moved into the slopp-ui project
+  ;; tiers behind. Measured: `slopp-server.ui.hub` moved into the slopp-ui project
   ;; unchanged and immediately drew four effect warnings it never drew at home,
   ;; because `slopp.http.html` is declared :pure at home and undeclared (hence
   ;; :external) in the consumer.
@@ -1752,7 +1752,7 @@
       ;; tooling on purpose (it is the transport, the one declared exception),
       ;; so if the pattern stops matching THERE it has stopped matching
       ;; anywhere and the assertion below is measuring an empty search.
-      (is (seq (re-seq pat (store.render/render-ns st 'slopp.mcp)))
+      (is (seq (re-seq pat (store.render/render-ns st 'slopp-server.mcp)))
           "the pattern no longer matches the tooling's own consumer — retarget it"))
     (testing "the whole-store check names no web-tooling namespace, by any path"
       ;; require, qualified ref and prose all read the same here on purpose

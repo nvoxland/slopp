@@ -6,7 +6,7 @@
   branch snapshots, and merges for free."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.store :as store]
-            [slopp.mcp]
+            [slopp-server.mcp]
             [slopp.ops :as ops] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history] [slopp.ops.branch :as branch]))
 
 (def seed
@@ -111,7 +111,7 @@
       (swap! sess assoc :require-turns? true)
       (ops/ingest! sess 'cm.core seed)
       (let [call (fn [tool args]
-                   (get-in (slopp.mcp/handle! sess
+                   (get-in (slopp-server.mcp/handle! sess
                                              {:id 1 :method "tools/call"
                                               :params {:name tool :arguments args}})
                            [:result :content 0 :text]))]

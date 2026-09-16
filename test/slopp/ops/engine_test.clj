@@ -798,7 +798,7 @@
       (finally (ops/close! a)))))
 
 (deftest ^:external a-checkout-reads-its-framework-from-source-when-no-jar-manifest-is-on-the-classpath
-  ;; A checkout run — CI's native-proof lanes, `clojure -M -m slopp.daemon` —
+  ;; A checkout run — CI's native-proof lanes, `clojure -M -m slopp-server.daemon` —
   ;; had no framework to vendor: the kernel's reader answered nil without the
   ;; jar's generated manifest, and a web app's first namespace could not
   ;; resolve slopp.http. The source tree that build.clj reads to GENERATE that

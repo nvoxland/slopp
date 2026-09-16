@@ -2,7 +2,7 @@
   "Run a slopp store's program directly from the db — no exported source.
   Renders every namespace's source from `<dir>/.slopp/store.db` (the
   `elements` table) and loads it into the CURRENT JVM in dependency order, then
-  invokes the entry point (default `slopp.daemon/-main`: one slopp for the
+  invokes the entry point (default `slopp-server.daemon/-main`: one slopp for the
   machine). This is the in-process analogue of `slopp.image/load-ns!`, and
   the general counterpart to `build!` (which spits files): the store is RUN,
   not materialized.
@@ -142,7 +142,7 @@
   "Parse boot's CLI: <dir> [--main ns/fn arg...]. Everything after the --main
   symbol passes through to it verbatim (:args); with no explicit args the main
   receives [dir] (the app convention). With no --main at all the entry is the
-  DAEMON, `slopp.daemon/-main`, with no args: the dir is what boot loads
+  DAEMON, `slopp-server.daemon/-main`, with no args: the dir is what boot loads
   slopp's code from and never the port, so a bare `java -jar slopp.jar <dir>`
   is one slopp for the machine on the default port.
 
@@ -166,7 +166,7 @@
        :main  (symbol (second post))
        :args  (if (seq extra) extra [dir])}
       {:dir   dir
-       :main  'slopp.daemon/-main
+       :main  'slopp-server.daemon/-main
        :args  []})))
 
 (defonce ^:export boot-info
@@ -832,7 +832,7 @@
   "clojure -M -m slopp.kernel.boot <dir> [--main ns/fn arg...]
 
   Load the store's program into THIS jvm and run its entry point (default
-  slopp.daemon/-main with no args: one slopp for the machine, on the default
+  slopp-server.daemon/-main with no args: one slopp for the machine, on the default
   port — the dir is what is loaded, never the port). --main trampolines any
   store CLI — in a fileless tree this is THE entry point: e.g.
     clojure -M -m slopp.kernel.boot . --main slopp.sync/-main push . <url>
@@ -848,7 +848,7 @@
   rather than treating the working directory as a project to adopt."
   [& args]
   (let [{:keys [dir main args]} (parse-args args)
-        daemon? (= main 'slopp.daemon/-main)]
+        daemon? (= main 'slopp-server.daemon/-main)]
     (reset! boot-info {:dir dir
                        :mode :snapshot
                        :booted-at (System/currentTimeMillis)})

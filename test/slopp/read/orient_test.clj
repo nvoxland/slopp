@@ -519,11 +519,11 @@
   ;; `host-warning` are one producer aimed at two audiences, and this repo's
   ;; most repeated defect is an improvement landing on one of a pair.
   (let [info  {:mode :live :booted-at 100 :last-reload-at 200}
-        drift '[{:ns slopp.mcp :form env-handlers! :why :derived-stale
-                 :behind slopp.mcp.tools/cheat-sheet
+        drift '[{:ns slopp-server.mcp :form env-handlers! :why :derived-stale
+                 :behind slopp-server.mcp.tools/cheat-sheet
                  :behind-edit {:delta "d25795" :prompt "say what where now does"}}
-                {:ns slopp.mcp :form tail-handlers! :why :derived-stale
-                 :behind slopp.mcp.tools/cheat-sheet
+                {:ns slopp-server.mcp :form tail-handlers! :why :derived-stale
+                 :behind slopp-server.mcp.tools/cheat-sheet
                  :behind-edit {:delta "d25795" :prompt "say what where now does"}}]]
     (doseq [[who note] [["verdict" (:verdict-note (orient/host-warning info 0 drift))]
                         ["brief"   (:note (orient/host-brief info 0 false drift))]]]

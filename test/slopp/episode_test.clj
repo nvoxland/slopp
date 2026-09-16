@@ -4,8 +4,8 @@
   collapse into one braid, with a shared-form guard on revert."
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.java.shell]
-            [slopp.mcp.turn]
-            [slopp.mcp]
+            [slopp-server.mcp.turn]
+            [slopp-server.mcp]
             [slopp.ops :as ops] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history]))
 
 (def seed
@@ -172,11 +172,11 @@
     (try
       (ops/ingest! sess 'ep.core seed)
       ;; simulate the UserPromptSubmit hook (separate process in production)
-      (slopp.mcp.turn/-main dir "begin" "alice" "fix" "the" "flaky" "test")
+      (slopp-server.mcp.turn/-main dir "begin" "alice" "fix" "the" "flaky" "test")
       (ops/sync-with-journal! sess)
       (ops/edit-replace! sess 'ep.core 'f "(defn f [x] (* x 2))"
                          :prompt "the fix" :agent "alice")
-      (slopp.mcp.turn/-main dir "end" "alice")
+      (slopp-server.mcp.turn/-main dir "end" "alice")
       (ops/sync-with-journal! sess)
       (let [turn (first (keep :turn (history/query-history (ops/with-history sess) :collapse true)))]
         (is (= "fix the flaky test" (:intent turn)))
@@ -191,7 +191,7 @@
       (swap! sess assoc :require-turns? true)   ; transport policy (real servers set this)
       (ops/ingest! sess 'ep.core seed)          ; api-level stays ungated
       (let [call (fn [tool args]
-                   (get-in (slopp.mcp/handle! sess
+                   (get-in (slopp-server.mcp/handle! sess
                                              {:id 1 :method "tools/call"
                                               :params {:name tool :arguments args}})
                            [:result :content 0 :text]))]
@@ -234,13 +234,13 @@
       (ops/ingest! sess 'ep.core seed)
       ;; UserPromptSubmit pipes {"prompt": "..."} on stdin
       (with-in-str "{\"prompt\":\"please add rush orders — exactly these words\",\"session_id\":\"x\"}"
-        (slopp.mcp.turn/-main dir "hook-begin" "alice"))
+        (slopp-server.mcp.turn/-main dir "hook-begin" "alice"))
       (ops/sync-with-journal! sess)
       (is (ops/turn-open? sess "alice"))
       (ops/edit-replace! sess 'ep.core 'f "(defn f [x] (* x 4))"
                          :prompt "work" :agent "alice")
       (with-in-str "{}"
-        (slopp.mcp.turn/-main dir "hook-end" "alice"))
+        (slopp-server.mcp.turn/-main dir "hook-end" "alice"))
       (ops/sync-with-journal! sess)
       (is (not (ops/turn-open? sess "alice")))
       (let [turn (first (keep :turn (history/query-history (ops/with-history sess) :collapse true)))]
@@ -953,7 +953,7 @@
       (swap! sess assoc :require-turns? true)
       (ops/ingest! sess 'tc.core "(ns tc.core)\n(defn f [x] x)\n")
       (let [call (fn [tool args]
-                   (get-in (slopp.mcp/handle! sess
+                   (get-in (slopp-server.mcp/handle! sess
                                               {:id 1 :method "tools/call"
                                                :params {:name tool :arguments args}})
                            [:result :content 0 :text]))
@@ -973,7 +973,7 @@
         ;; this assertion passed vacuously — `(re-pattern "")` matches
         ;; everything.)
         (swap! sess assoc :dir "/w/the-other-store")
-        (let [r (get-in (slopp.mcp/handle! sess
+        (let [r (get-in (slopp-server.mcp/handle! sess
                                            {:id 1 :method "tools/call"
                                             :params {:name "edit_add_form"
                                                      :arguments {:ns "tc.core"
@@ -1104,7 +1104,7 @@
     (try
       (swap! sess assoc :require-turns? true)
       (ops/ingest! sess 'tc.core "(ns tc.core)\n(defn f [x] x)\n")
-      (let [r (get-in (slopp.mcp/handle! sess
+      (let [r (get-in (slopp-server.mcp/handle! sess
                                          {:id 1 :method "tools/call"
                                           :params {:name "edit_add_form"
                                                    :arguments {:ns "tc.core"
@@ -1219,7 +1219,7 @@
       (swap! sess assoc :require-turns? true)
       (ops/ingest! sess 'ep2.core seed)
       (let [call (fn [tool args]
-                   (get-in (slopp.mcp/handle! sess
+                   (get-in (slopp-server.mcp/handle! sess
                                              {:id 1 :method "tools/call"
                                               :params {:name tool :arguments args}})
                            [:result :content 0 :text]))]

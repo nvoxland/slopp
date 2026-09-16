@@ -6,8 +6,8 @@
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [slopp.ops :as ops]
-            [slopp.mcp]
-            [slopp.ops.external :as external] [slopp.read.history :as history] [slopp.store.db :as db] [slopp.api.reads :as api.reads]))
+            [slopp-server.mcp]
+            [slopp.ops.external :as external] [slopp.read.history :as history] [slopp.store.db :as db] [slopp-server.api.reads :as api.reads]))
 
 (deftest ^:external form-history-is-reconstructible
   (let [sess (external/open!)]
@@ -141,7 +141,7 @@
             _  (ops/edit-replace! sess 'hi.core 'f "(defn f [x] (+ x 100))"
                                   :prompt "bump" :agent "a")
             call (fn [args]
-                   (get-in (slopp.mcp/handle!
+                   (get-in (slopp-server.mcp/handle!
                             sess {:id 1 :method "tools/call"
                                   :params {:name "query_history" :arguments args}})
                            [:result :content 0 :text]))]
@@ -192,7 +192,7 @@
       (ops/ingest! sess 'hi.core seed)
       (ops/edit-replace! sess 'hi.core 'f "(defn f [x] (+ x 9))"
                          :prompt "harden auth path" :agent "a")
-      (let [r (get-in (slopp.mcp/handle!
+      (let [r (get-in (slopp-server.mcp/handle!
                        sess {:id 1 :method "tools/call"
                              :params {:name "query_history"
                                       :arguments {:contains "auth"}}})
@@ -221,7 +221,7 @@
           (is (str/includes? txt "- (defn f [x] (+ x 2))"))
           (is (str/includes? txt "+ (defn f [x] (- x 9))"))))
       (testing "the same story rides the MCP surface via :format"
-        (let [r (get-in (slopp.mcp/handle!
+        (let [r (get-in (slopp-server.mcp/handle!
                          sess {:id 1 :method "tools/call"
                                :params {:name "query_history"
                                         :arguments {:ns "hi.core" :name "f"

@@ -167,7 +167,7 @@
                         "(defn helper [x] (inc x))\n"
                         "(defn ^:unused-ok use-it [x] (helper x))\n"))
       (testing "a live caller in the SAME namespace blocks it — 3f's actual shape"
-        ;; the delete that bricked the store was slopp.ui.pages/form-doc, used
+        ;; the delete that bricked the store was slopp-server.ui.pages/form-doc, used
         ;; by read performers in its OWN namespace; a cross-ns-only check would
         ;; have missed it entirely
         (let [r (ops/delete-form! sess 'dl.core 'helper)]

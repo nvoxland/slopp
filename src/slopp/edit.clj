@@ -944,7 +944,7 @@
   \"would recurse\" is false, and reasoning from it makes the process boundary
   look more fundamental than it is."
   '#{slopp.ops/external-test-run!
-     slopp.daemon/-main slopp.daemon/start!
+     slopp-server.daemon/-main slopp-server.daemon/start!
      slopp.kernel.boot/-main slopp.lab.benchmark/-main})
 
 (def image-spawning-vars

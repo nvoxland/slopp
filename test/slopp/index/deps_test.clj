@@ -7,7 +7,7 @@
             [slopp.ops :as ops]
             [slopp.build :as build]
             [slopp.index.deps :as index.deps]
-            [slopp.mcp]
+            [slopp-server.mcp]
             [slopp.store :as store]
             [slopp.store.db :as db] [slopp.store.merge :as merge] [slopp.ops.branch :as branch] [clojure.edn :as edn] [clojure.java.io :as io] [slopp.ops.external :as external])
   (:import [java.nio.file Files]
@@ -248,7 +248,7 @@
   (let [sess (external/open!)]
     (try
       (let [call (fn [tool args]
-                   (get-in (slopp.mcp/handle!
+                   (get-in (slopp-server.mcp/handle!
                             sess {:id 1 :method "tools/call"
                                   :params {:name tool :arguments args}})
                            [:result :content 0 :text]))]
