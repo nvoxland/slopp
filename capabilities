@@ -1,4 +1,4 @@
-app.main: slopp-server.daemon/-main
+app.main: slopp-server.process/-main
 http.enabled: true
 http.port: 7357
 http.static./assets: public

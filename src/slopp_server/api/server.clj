@@ -1,7 +1,7 @@
 (ns slopp-server.api.server
   "The ROUTE TABLE of a project's own read API — what a session serves about
   the store it holds, assembled by [[serving-opts]] and bound by whoever
-  listens. Nothing here binds a port: the daemon (`slopp-server.daemon`) mounts
+  listens. Nothing here binds a port: the daemon (`slopp-server.process`) mounts
   each open project's table at `/api/projects/<slug>/<resource>` — the
   `/api/<resource>` declared here, with the mount replacing that prefix —
   through a declared read that delegates, so one configured port serves

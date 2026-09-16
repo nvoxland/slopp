@@ -175,30 +175,6 @@
     (testing "an unmarked form gains no edge"
       (is (empty? (refs/refs-to st 'w.api/plain))))))
 
-(deftest covered-by-fuses-observed-and-static-with-provenance
-  (let [st (-> (store/empty-store)
-               (store/ingest 'cov.core "(ns cov.core)\n(defn leaf [] 1)\n(defn mid [] (leaf))\n")
-               (store/ingest 'cov.core-test
-                             (str "(ns cov.core-test (:require [clojure.test :refer [deftest is]] [cov.core :as c]))\n"
-                                  "(deftest direct-t (is (= 1 (c/leaf))))\n"
-                                  "(deftest via-mid-t (is (= 1 (c/mid))))\n")))]
-    (testing "static coverage: a deftest reaching the form within depth, with hop distance and :via :static"
-      (let [cb (refs/covered-by st {} 'cov.core/leaf)
-            by (into {} (map (juxt :test identity)) cb)]
-        (is (= #{'cov.core-test/direct-t 'cov.core-test/via-mid-t} (set (map :test cb))) (pr-str cb))
-        (is (= #{:static} (:via (by 'cov.core-test/direct-t))))
-        (is (= 1 (:hops (by 'cov.core-test/direct-t))))
-        (is (= 2 (:hops (by 'cov.core-test/via-mid-t))) "leaf is reached through mid at 2 hops")))
-    (testing "depth bounds the transitive reach"
-      (is (= #{'cov.core-test/direct-t}
-             (set (map :test (refs/covered-by st {} 'cov.core/leaf :depth 1))))
-          "at depth 1 only the direct test covers leaf"))
-    (testing "observed evidence joins as :via :observed, unioned per test"
-      (let [tmap {'cov.core-test/direct-t #{'cov.core/leaf}}
-            cb   (into {} (map (juxt :test :via)) (refs/covered-by st tmap 'cov.core/leaf))]
-        (is (= #{:observed :static} (cb 'cov.core-test/direct-t)) (pr-str cb))
-        (is (= #{:static} (cb 'cov.core-test/via-mid-t)))))))
-
 (deftest covered-by-honours-declared-coverage
   (let [st (-> (store/empty-store)
                (store/ingest 'cov.core "(ns cov.core)\n(defn dispatched [] 1)\n")
@@ -228,6 +204,30 @@
             cb  (into {} (map (juxt :test :via)) (refs/covered-by st2 {} 'cov.core/dispatched))]
         (is (= #{:declared} (cb 'cov.core-test/dispatch-t)) (pr-str cb))
         (is (= #{:static} (cb 'cov.reach-test/static-t)))))))
+
+(deftest covered-by-fuses-observed-and-static-with-provenance
+  (let [st (-> (store/empty-store)
+               (store/ingest 'cov.core "(ns cov.core)\n(defn leaf [] 1)\n(defn mid [] (leaf))\n")
+               (store/ingest 'cov.core-test
+                             (str "(ns cov.core-test (:require [clojure.test :refer [deftest is]] [cov.core :as c]))\n"
+                                  "(deftest direct-t (is (= 1 (c/leaf))))\n"
+                                  "(deftest via-mid-t (is (= 1 (c/mid))))\n")))]
+    (testing "static coverage: a deftest reaching the form within depth, with hop distance and :via :static"
+      (let [cb (refs/covered-by st {} 'cov.core/leaf)
+            by (into {} (map (juxt :test identity)) cb)]
+        (is (= #{'cov.core-test/direct-t 'cov.core-test/via-mid-t} (set (map :test cb))) (pr-str cb))
+        (is (= #{:static} (:via (by 'cov.core-test/direct-t))))
+        (is (= 1 (:hops (by 'cov.core-test/direct-t))))
+        (is (= 2 (:hops (by 'cov.core-test/via-mid-t))) "leaf is reached through mid at 2 hops")))
+    (testing "depth bounds the transitive reach"
+      (is (= #{'cov.core-test/direct-t}
+             (set (map :test (refs/covered-by st {} 'cov.core/leaf :depth 1))))
+          "at depth 1 only the direct test covers leaf"))
+    (testing "observed evidence joins as :via :observed, unioned per test"
+      (let [tmap {'cov.core-test/direct-t #{'cov.core/leaf}}
+            cb   (into {} (map (juxt :test :via)) (refs/covered-by st tmap 'cov.core/leaf))]
+        (is (= #{:observed :static} (cb 'cov.core-test/direct-t)) (pr-str cb))
+        (is (= #{:static} (cb 'cov.core-test/via-mid-t)))))))
 
 (deftest refs-by-target-agrees-with-the-scan-it-replaces
   ;; refs-to filtered the WHOLE reference graph on every call — 7,578 edges in

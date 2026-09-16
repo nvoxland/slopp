@@ -25,6 +25,26 @@
             [malli.transform :as mt]
             [malli.error :as me]))
 
+(def ^:export Command
+  "What a command DECLARES, as a schema — the shape carried in a `defn`'s name
+  metadata and read by everything downstream.
+
+  Named rather than inlined because four separate readers consume it — the
+  parser, the help generator, the runner and the surface report — and a shape
+  described four times is the registry-and-consumer drift this codebase keeps
+  removing.
+
+  `:cli/args` and `:cli/opts` are themselves malli schemas, so they are `:any`
+  here rather than pretending to constrain what a schema looks like: malli has
+  no schema-for-schemas that is cheaper than `m/schema` throwing, and claiming
+  otherwise would be a contract that reports clean about shapes it cannot
+  check."
+  [:map
+   [:cli/command :string]
+   [:cli/doc {:optional true} :string]
+   [:cli/args {:optional true} :any]
+   [:cli/opts {:optional true} :any]])
+
 (defn- split-argv
   "Split `argv` into `[positionals {opt-name raw-value}]`, interpreting nothing.
 
@@ -186,26 +206,6 @@
                                    [k (:default v)]))
                         decoded-opts
                         (when names (zipmap names decoded-pos)))})))))
-
-(def ^:export Command
-  "What a command DECLARES, as a schema — the shape carried in a `defn`'s name
-  metadata and read by everything downstream.
-
-  Named rather than inlined because four separate readers consume it — the
-  parser, the help generator, the runner and the surface report — and a shape
-  described four times is the registry-and-consumer drift this codebase keeps
-  removing.
-
-  `:cli/args` and `:cli/opts` are themselves malli schemas, so they are `:any`
-  here rather than pretending to constrain what a schema looks like: malli has
-  no schema-for-schemas that is cheaper than `m/schema` throwing, and claiming
-  otherwise would be a contract that reports clean about shapes it cannot
-  check."
-  [:map
-   [:cli/command :string]
-   [:cli/doc {:optional true} :string]
-   [:cli/args {:optional true} :any]
-   [:cli/opts {:optional true} :any]])
 
 (defn ^:export schema-entries
   "The `[name props schema]` entries of malli schema form `s`, or nil when `s`

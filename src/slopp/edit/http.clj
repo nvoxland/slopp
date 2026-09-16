@@ -45,6 +45,22 @@
   [e]
   (store/form-name-meta e))
 
+(defn ^:export route-path
+  "The path a route form declares — `:rest/path` (a REST API) or `:http/path`
+  (general HTTP content) — or nil for a form that is neither.
+
+  **One definition, because a gate that reads only one marker leaves the other
+  KIND UNGATED.** For most gates that is a gap; for `http-auth-refusal` it is a
+  hole — default-deny would stop applying to exactly the endpoints most likely
+  to carry data. Every gate that asks \"is this a route\" asks it here.
+
+  The split itself is `web-endpoint-rows`: an API types out a contract, is
+  published and gets a generated client; content does none of those. What does
+  NOT differ is everything about being reachable — auth, route uniqueness,
+  safe-GET, declared effects — so those gates take both and this is how."
+  [m]
+  (or (:rest/path m) (:http/path m)))
+
 (defn ^:export web-endpoint-rows
   "Every route form in `store`: `{:ns :name :form-id :meta :kind :path}` rows —
   the single route traversal; the collision gate and `slopp.rules.http` both
@@ -99,81 +115,6 @@
               :when kind]
           [kind (symbol (str nsx) (str (:name e)))])))
 
-(defn ^:export web-context-builders
-  "Every `^{:http/context true}` fn in the store, as qsyms, sorted — the
-  app-declared sources of `:http/perform-ctx`, the map a handler receives as
-  `:http/deps` and every performer receives as its first argument.
-
-  PLURAL although exactly one is legal, because the SCAN and the singleton
-  POLICY are different jobs and the two callers ask different questions: the
-  `http-undeclared-context` write gate asks whether ANY exists,
-  `slopp.rules.web/context-builder` asks for THE one and refuses two. Splitting
-  them keeps a single definition of who builds the context — the alternative
-  is two scans that agree until one gains a case."
-  [store]
-  (vec (for [nsx (sort (keys (:namespaces store)))
-             e   (store/forms store nsx)
-             :when (and (:name e) (get (web-name-meta e) :http/context))]
-         (symbol (str nsx) (str (:name e))))))
-
-(defn ^:export ^{:rule/capability :any} http-generated-ns
-  "The generated-client protection gate (D-web-contracts part 2): a form marked
-  `^{:generated \"<endpoint>\"}` is OUTPUT of generate_client and must not be
-  hand-edited. Regeneration rewrites the whole client namespace (through
-  store/ingest, BELOW this gate layer — so the generator itself is unaffected;
-  only edit-tool writes reach here). Returns a teaching string naming the source
-  endpoint + generate_client, or nil. To take manual ownership of a generated
-  form, strip its ^:generated marker first.
-
-  **`^{:rule/capability :any}` — armed by the MARKER, not by the store's
-  configuration**, which is why it carries the opt-out that no sibling in this
-  namespace needs. A store holding generated code holds it whether or not it
-  currently serves HTTP, so gating this on `http.enabled` makes a generated form
-  quietly hand-editable. The docstring said \"not web-gated\" from the start and
-  the capability derivation silenced it anyway: prose is not a thing dispatch
-  can read."
-  [candidate ns-sym form-name]
-  (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
-    (when-let [g (:generated (web-name-meta e))]
-      (str ns-sym "/" form-name " is GENERATED (from endpoint " g
-           ") and must not be hand-edited — generate_client rewrites the whole"
-           " client namespace from the endpoint schemas, so an edit here is lost"
-           " on the next generate. Change the ENDPOINT's :rest/request/:rest/response"
-           " and re-run generate_client; to take manual ownership, strip the"
-           " ^:generated marker first."))))
-
-(defn http-react-attrs
-  "Per-form write gate (D-web-html): a literal hiccup element carrying a
-  React attribute name — `:className`, `:htmlFor`, an `:onClick`-style
-  handler, `:dangerouslySetInnerHTML`. Browsers silently IGNORE unknown
-  attributes, so the mistake ships and does nothing. Scoped to maps in
-  position 2 of a keyword-tag vector (a JSON-ish payload map is not an
-  element); inert until `http.enabled`, which `edit.gates/gate-check` decides —
-  not this gate. Returns a teaching string, or nil."
-  [candidate ns-sym form-name]
-  (when-let [e (store/form-named candidate ns-sym form-name)]
-    (let [react->fix {:className ":class"
-                      :htmlFor ":for"
-                      :dangerouslySetInnerHTML "[:html/raw \"…\"] (string literal only)"}
-          handler? (fn [k] (re-matches #"on[A-Z].*" (name k)))
-          sx (try (n/sexpr (:node e)) (catch Exception _ nil))
-          hit (first (for [v (tree-seq coll? seq sx)
-                           :when (and (vector? v)
-                                      (keyword? (first v))
-                                      (map? (second v)))
-                           k (keys (second v))
-                           :when (and (keyword? k) (nil? (namespace k))
-                                      (or (react->fix k) (handler? k)))]
-                       k))]
-      (when hit
-        (str "React attribute " hit " in a hiccup element — "
-             (if-let [fix (react->fix hit)]
-               (str "use " fix)
-               (str "server-rendered pages have no event handlers; "
-                    "a link or form targeting an endpoint replaces it"))
-             ". Browsers silently ignore unknown attributes, so this would "
-             "ship and do nothing.")))))
-
 (defn ^:export retired-sibling
   "The RETIRED marker present on `m` that maps to `live` — or nil.
 
@@ -198,22 +139,6 @@
                :when (= live (get crossings/retired-markers
                                   (str (namespace k) "/" (name k))))]
            k)))
-
-(defn ^:export route-path
-  "The path a route form declares — `:rest/path` (a REST API) or `:http/path`
-  (general HTTP content) — or nil for a form that is neither.
-
-  **One definition, because a gate that reads only one marker leaves the other
-  KIND UNGATED.** For most gates that is a gap; for `http-auth-refusal` it is a
-  hole — default-deny would stop applying to exactly the endpoints most likely
-  to carry data. Every gate that asks \"is this a route\" asks it here.
-
-  The split itself is `web-endpoint-rows`: an API types out a contract, is
-  published and gets a generated client; content does none of those. What does
-  NOT differ is everything about being reachable — auth, route uniqueness,
-  safe-GET, declared effects — so those gates take both and this is how."
-  [m]
-  (or (:rest/path m) (:http/path m)))
 
 (defn ^:export ^{:rule/applies-to :production} http-auth-refusal
   "The default-deny auth gate (D-web): a `:http/path` endpoint with NO
@@ -259,165 +184,6 @@
                " (default-deny): add :http/auth :public (deliberately open),"
                " :authenticated, or [:group \"<name>\"] to the name metadata;"
                " groups live in the capabilities config (query_capabilities)"))))))
-
-(defn ^:export ^{:rule/applies-to :production} http-undeclared-effect
-  "The effect-vocabulary gate (D-web): an endpoint declaring `:http/effects`
-  kinds may only name kinds some `^{:http/effect <kind>}` performer provides
-  — the dispatcher can only run effects the app defined, and a typo'd kind
-  must fail at the write, not at the first request. Inert until
-  `http.enabled`, which `edit.gates/gate-check` decides — not this gate.
-  Returns a teaching string, or nil when clean."
-  [candidate ns-sym form-name]
-  (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
-    (let [m (web-name-meta e)
-          kinds (seq (:http/effects m))]
-      (when (and (route-path m) kinds)
-        (let [known (set (keys (web-performers candidate :http/effect)))
-              missing (remove known kinds)]
-          (when (seq missing)
-            (str ns-sym "/" form-name " declares :http/effects "
-                 (pr-str (vec missing)) " but no performer provides "
-                 (if (= 1 (count missing)) "it" "them")
-                 " — define one per kind: (defn ^{:http/effect "
-                 (pr-str (first missing)) "} <name>! [ctx …] …), or reuse an"
-                 " existing kind (query_surface lists the vocabulary)")))))))
-
-(defn ^:export ^{:rule/applies-to :production} http-unsafe-get
-  "The HTTP-safety gate (D-web): a `:get`/`:head` endpoint must be SAFE in
-  the RFC sense — it may neither declare `:http/effects` kinds
-  (effects-as-data must not launder a mutating GET) nor reach a mutation
-  directly (the D6 mutation set: `effectful-vars` with no external
-  boundary, the same read `:internal`'s tier check uses). Inert until
-  `http.enabled`, which `edit.gates/gate-check` decides — not this gate.
-  Returns a teaching string, or nil when clean."
-  [candidate ns-sym form-name]
-  (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
-    (let [m (web-name-meta e)]
-      (when (and (route-path m) (#{:get :head} (:http/method m)))
-        (cond
-          (seq (:http/effects m))
-          (str ns-sym "/" form-name " is a GET/HEAD endpoint but declares"
-               " :http/effects " (pr-str (vec (:http/effects m))) " — a safe"
-               " method must not mutate: make it :post/:put/:delete, or drop"
-               " the effects")
-
-          (contains? (derive/effectful-vars
-                      (analyze/analyze (store.render/render-ns candidate ns-sym))
-                      nil nil)
-                     (symbol (str ns-sym) (str form-name)))
-          (str ns-sym "/" form-name " is a GET/HEAD endpoint but reaches a"
-               " mutation — a safe method must not mutate: move the write"
-               " behind a :post/:put/:delete endpoint's :http/effects, or"
-               " return the change as data"))))))
-
-(defn ^:export ^{:rule/applies-to :production} http-unknown-group
-  "The policy-vocabulary gate (D-web): an endpoint's `:http/auth` may only
-  name groups the `capabilities` config defines
-  (`http.auth.groups.<name>.…` keys) — a typo'd group would silently deny
-  every request forever, the authz twin of the nil-pun. Walks composite
-  policies ([:any …]/[:all …]). Inert until `http.enabled`, which
-  `edit.gates/gate-check` decides — not this gate. Returns a
-  teaching string, or nil when clean."
-  [candidate ns-sym form-name]
-  (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
-    (let [m (web-name-meta e)]
-      (when (route-path m)
-        (let [known (into #{}
-                          (keep #(second (re-matches #"http\.auth\.groups\.([^.]+)\..*" (str %))))
-                          (keys (get-in candidate [:config "capabilities" :values] {})))
-              named (fn named [p]
-                      (cond
-                        (and (vector? p) (= :group (first p))) [(second p)]
-                        (and (vector? p) (#{:any :all} (first p))) (mapcat named (rest p))
-                        :else nil))
-              missing (remove known (named (:http/auth m)))]
-          (when (seq missing)
-            (str ns-sym "/" form-name " grants by group "
-                 (pr-str (vec missing)) " but the capabilities config"
-                 " defines no such group"
-                 (when (seq known)
-                   (str " (configured: " (str/join ", " (sort known)) ")"))
-                 " — config_file {path \"capabilities\" key \"http.auth.groups."
-                 (first missing) ".members\" value \"…\"} defines it, or fix"
-                 " the name")))))))
-
-(defn ^:export client-signature
-  "A deterministic fingerprint of the store's REST endpoint CONTRACTS — the raw
-   {:ns :name :method :path :rest/request :rest/response} of every `:rest` row
-   — so a done-advisory can tell whether the generated typed client
-   (generate_client) is stale WITHOUT re-rendering or parsing it. generate_client
-   records this on the `client`/`generated-sig` config at generation; the
-   staleness advisory compares the recorded value with the current one. A pure
-   function of the store value.
-
-   `:rest` rows ONLY, because that is what the client is generated from: a
-   `:http/path` document is content, not contract, and hashing it too meant a
-   new stylesheet staled the client and nothing but a regenerate that changed
-   nothing could clear it."
-  [store]
-  (str (hash (mapv (fn [{:keys [ns name meta]}]
-                     [(str ns) (str name) (:http/method meta) (route-path meta)
-                      (pr-str (:rest/request meta)) (pr-str (:rest/response meta))])
-                   (filter #(= :rest (:kind %)) (web-endpoint-rows store))))))
-
-(defn ^:export ^{:rule/applies-to :production} http-undeclared-context
-  "The context-SOURCE gate (D-web): an endpoint whose body reads `:http/deps`
-  may only do so in a store that declares where those deps come from — one
-  `^{:http/context true}` zero-arg fn. The sibling of `http-undeclared-effect`:
-  an effect kind needs a marked performer, and the context needs a marked
-  builder. Inert until `http.enabled`, which `edit.gates/gate-check` decides —
-  not this gate. Returns a teaching string, or nil.
-
-  This gate is the reason the context is a MARKER rather than a capability
-  naming a qualified symbol. With the declaration in the store, both halves
-  are visible statically — the handlers that read `:http/deps`, and whether
-  anything claims to build it — so the failure moves to the write that caused
-  it. A capability is a string in config, checkable at boot at the earliest,
-  which is after the browser has already seen the 500.
-
-  Scoped to `:http/path` ENDPOINTS, not to every form naming the keyword: the
-  framework's own dispatcher assigns `:http/deps` onto the request, and gating
-  that would refuse writes to slopp's `slopp.http.dispatch/handle!`.
-
-  **The teaching is three clauses and stops** — what, the consequence, and the
-  fix as a LITERAL FORM. A cold read (slopp-ui, hitting this unprepared and
-  deliberately not opening the SKILL first) reported the literal form as the
-  decisive part: the marker spelling, the arity, `defn`-not-`def` and the
-  return shape all come off it at once, so no step sends the reader looking.
-  Two clauses were CUT on that evidence and should not come back:
-
-  - **\"it cannot be a performer\"** — the right sentence in the wrong room. It
-    answers a DESIGN question to a reader in fix-it mode who has already been
-    handed the form, and it is the only clause that requires knowing what a
-    performer is. It lives in `slopp.rules.web/context-builder`'s docstring and
-    the SKILL, where someone deciding meets it.
-  - **the lifecycle framed around done points and the managed server** — this
-    gate fires on any `http.enabled` store, including one with `dev.server`
-    false where no managed server boots at all. Told to that reader it
-    asserts a behaviour that does not happen to them: a general truth
-    delivered in this store's voice, which is a check reporting on a PROXY one
-  notch down. What is
-    left says the same thing unconditionally — anything the builder allocates
-    is new each time it RUNS.
-
-  The lifecycle clause STAYS, though, and the test is why: it changes what
-  someone writes rather than what they understand. The obvious builder is
-  whatever the app's own `serve!` already constructs, moved — which is exactly
-  the shape that silently empties."
-  [candidate ns-sym form-name]
-  (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
-    (when (and (route-path (web-name-meta e))
-               (empty? (web-context-builders candidate)))
-      (let [sx    (try (n/sexpr (:node e)) (catch Exception _ nil))
-            nodes (tree-seq coll? seq sx)]
-        (when (or (some #(= :http/deps %) nodes)
-                  (some #(and (map? %) (some #{'deps} (:http/keys %))) nodes))
-          (str ns-sym "/" form-name " reads :http/deps, but this store declares"
-               " no context builder — so the map would arrive nil, which either"
-               " 500s or, worse, answers 200 with an empty body. Declare exactly"
-               " ONE zero-arg builder: (defn ^{:http/context true} app-context []"
-               " {…}). Anything it allocates is new each time it runs, so keep"
-               " live state outside it."))))))
 
 (defn ^:export ^{:rule/applies-to :production} http-content-shape
   "The content gate (D-content-value): `:http/path` names a stored VALUE, so it
@@ -576,6 +342,240 @@
                  " with both wildcards ANONYMOUS and at the END only —"
                  " a named splat like *path is now `**`, read from :path-params"
                  " under :*, and there is no partial-segment globbing")))))))
+
+(defn ^:export web-context-builders
+  "Every `^{:http/context true}` fn in the store, as qsyms, sorted — the
+  app-declared sources of `:http/perform-ctx`, the map a handler receives as
+  `:http/deps` and every performer receives as its first argument.
+
+  PLURAL although exactly one is legal, because the SCAN and the singleton
+  POLICY are different jobs and the two callers ask different questions: the
+  `http-undeclared-context` write gate asks whether ANY exists,
+  `slopp.rules.web/context-builder` asks for THE one and refuses two. Splitting
+  them keeps a single definition of who builds the context — the alternative
+  is two scans that agree until one gains a case."
+  [store]
+  (vec (for [nsx (sort (keys (:namespaces store)))
+             e   (store/forms store nsx)
+             :when (and (:name e) (get (web-name-meta e) :http/context))]
+         (symbol (str nsx) (str (:name e))))))
+
+(defn ^:export ^{:rule/applies-to :production} http-undeclared-effect
+  "The effect-vocabulary gate (D-web): an endpoint declaring `:http/effects`
+  kinds may only name kinds some `^{:http/effect <kind>}` performer provides
+  — the dispatcher can only run effects the app defined, and a typo'd kind
+  must fail at the write, not at the first request. Inert until
+  `http.enabled`, which `edit.gates/gate-check` decides — not this gate.
+  Returns a teaching string, or nil when clean."
+  [candidate ns-sym form-name]
+  (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
+    (let [m (web-name-meta e)
+          kinds (seq (:http/effects m))]
+      (when (and (route-path m) kinds)
+        (let [known (set (keys (web-performers candidate :http/effect)))
+              missing (remove known kinds)]
+          (when (seq missing)
+            (str ns-sym "/" form-name " declares :http/effects "
+                 (pr-str (vec missing)) " but no performer provides "
+                 (if (= 1 (count missing)) "it" "them")
+                 " — define one per kind: (defn ^{:http/effect "
+                 (pr-str (first missing)) "} <name>! [ctx …] …), or reuse an"
+                 " existing kind (query_surface lists the vocabulary)")))))))
+
+(defn ^:export ^{:rule/applies-to :production} http-unsafe-get
+  "The HTTP-safety gate (D-web): a `:get`/`:head` endpoint must be SAFE in
+  the RFC sense — it may neither declare `:http/effects` kinds
+  (effects-as-data must not launder a mutating GET) nor reach a mutation
+  directly (the D6 mutation set: `effectful-vars` with no external
+  boundary, the same read `:internal`'s tier check uses). Inert until
+  `http.enabled`, which `edit.gates/gate-check` decides — not this gate.
+  Returns a teaching string, or nil when clean."
+  [candidate ns-sym form-name]
+  (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
+    (let [m (web-name-meta e)]
+      (when (and (route-path m) (#{:get :head} (:http/method m)))
+        (cond
+          (seq (:http/effects m))
+          (str ns-sym "/" form-name " is a GET/HEAD endpoint but declares"
+               " :http/effects " (pr-str (vec (:http/effects m))) " — a safe"
+               " method must not mutate: make it :post/:put/:delete, or drop"
+               " the effects")
+
+          (contains? (derive/effectful-vars
+                      (analyze/analyze (store.render/render-ns candidate ns-sym))
+                      nil nil)
+                     (symbol (str ns-sym) (str form-name)))
+          (str ns-sym "/" form-name " is a GET/HEAD endpoint but reaches a"
+               " mutation — a safe method must not mutate: move the write"
+               " behind a :post/:put/:delete endpoint's :http/effects, or"
+               " return the change as data"))))))
+
+(defn ^:export ^{:rule/applies-to :production} http-unknown-group
+  "The policy-vocabulary gate (D-web): an endpoint's `:http/auth` may only
+  name groups the `capabilities` config defines
+  (`http.auth.groups.<name>.…` keys) — a typo'd group would silently deny
+  every request forever, the authz twin of the nil-pun. Walks composite
+  policies ([:any …]/[:all …]). Inert until `http.enabled`, which
+  `edit.gates/gate-check` decides — not this gate. Returns a
+  teaching string, or nil when clean."
+  [candidate ns-sym form-name]
+  (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
+    (let [m (web-name-meta e)]
+      (when (route-path m)
+        (let [known (into #{}
+                          (keep #(second (re-matches #"http\.auth\.groups\.([^.]+)\..*" (str %))))
+                          (keys (get-in candidate [:config "capabilities" :values] {})))
+              named (fn named [p]
+                      (cond
+                        (and (vector? p) (= :group (first p))) [(second p)]
+                        (and (vector? p) (#{:any :all} (first p))) (mapcat named (rest p))
+                        :else nil))
+              missing (remove known (named (:http/auth m)))]
+          (when (seq missing)
+            (str ns-sym "/" form-name " grants by group "
+                 (pr-str (vec missing)) " but the capabilities config"
+                 " defines no such group"
+                 (when (seq known)
+                   (str " (configured: " (str/join ", " (sort known)) ")"))
+                 " — config_file {path \"capabilities\" key \"http.auth.groups."
+                 (first missing) ".members\" value \"…\"} defines it, or fix"
+                 " the name")))))))
+
+(defn ^:export ^{:rule/capability :any} http-generated-ns
+  "The generated-client protection gate (D-web-contracts part 2): a form marked
+  `^{:generated \"<endpoint>\"}` is OUTPUT of generate_client and must not be
+  hand-edited. Regeneration rewrites the whole client namespace (through
+  store/ingest, BELOW this gate layer — so the generator itself is unaffected;
+  only edit-tool writes reach here). Returns a teaching string naming the source
+  endpoint + generate_client, or nil. To take manual ownership of a generated
+  form, strip its ^:generated marker first.
+
+  **`^{:rule/capability :any}` — armed by the MARKER, not by the store's
+  configuration**, which is why it carries the opt-out that no sibling in this
+  namespace needs. A store holding generated code holds it whether or not it
+  currently serves HTTP, so gating this on `http.enabled` makes a generated form
+  quietly hand-editable. The docstring said \"not web-gated\" from the start and
+  the capability derivation silenced it anyway: prose is not a thing dispatch
+  can read."
+  [candidate ns-sym form-name]
+  (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
+    (when-let [g (:generated (web-name-meta e))]
+      (str ns-sym "/" form-name " is GENERATED (from endpoint " g
+           ") and must not be hand-edited — generate_client rewrites the whole"
+           " client namespace from the endpoint schemas, so an edit here is lost"
+           " on the next generate. Change the ENDPOINT's :rest/request/:rest/response"
+           " and re-run generate_client; to take manual ownership, strip the"
+           " ^:generated marker first."))))
+
+(defn ^:export client-signature
+  "A deterministic fingerprint of the store's REST endpoint CONTRACTS — the raw
+   {:ns :name :method :path :rest/request :rest/response} of every `:rest` row
+   — so a done-advisory can tell whether the generated typed client
+   (generate_client) is stale WITHOUT re-rendering or parsing it. generate_client
+   records this on the `client`/`generated-sig` config at generation; the
+   staleness advisory compares the recorded value with the current one. A pure
+   function of the store value.
+
+   `:rest` rows ONLY, because that is what the client is generated from: a
+   `:http/path` document is content, not contract, and hashing it too meant a
+   new stylesheet staled the client and nothing but a regenerate that changed
+   nothing could clear it."
+  [store]
+  (str (hash (mapv (fn [{:keys [ns name meta]}]
+                     [(str ns) (str name) (:http/method meta) (route-path meta)
+                      (pr-str (:rest/request meta)) (pr-str (:rest/response meta))])
+                   (filter #(= :rest (:kind %)) (web-endpoint-rows store))))))
+
+(defn http-react-attrs
+  "Per-form write gate (D-web-html): a literal hiccup element carrying a
+  React attribute name — `:className`, `:htmlFor`, an `:onClick`-style
+  handler, `:dangerouslySetInnerHTML`. Browsers silently IGNORE unknown
+  attributes, so the mistake ships and does nothing. Scoped to maps in
+  position 2 of a keyword-tag vector (a JSON-ish payload map is not an
+  element); inert until `http.enabled`, which `edit.gates/gate-check` decides —
+  not this gate. Returns a teaching string, or nil."
+  [candidate ns-sym form-name]
+  (when-let [e (store/form-named candidate ns-sym form-name)]
+    (let [react->fix {:className ":class"
+                      :htmlFor ":for"
+                      :dangerouslySetInnerHTML "[:html/raw \"…\"] (string literal only)"}
+          handler? (fn [k] (re-matches #"on[A-Z].*" (name k)))
+          sx (try (n/sexpr (:node e)) (catch Exception _ nil))
+          hit (first (for [v (tree-seq coll? seq sx)
+                           :when (and (vector? v)
+                                      (keyword? (first v))
+                                      (map? (second v)))
+                           k (keys (second v))
+                           :when (and (keyword? k) (nil? (namespace k))
+                                      (or (react->fix k) (handler? k)))]
+                       k))]
+      (when hit
+        (str "React attribute " hit " in a hiccup element — "
+             (if-let [fix (react->fix hit)]
+               (str "use " fix)
+               (str "server-rendered pages have no event handlers; "
+                    "a link or form targeting an endpoint replaces it"))
+             ". Browsers silently ignore unknown attributes, so this would "
+             "ship and do nothing.")))))
+
+(defn ^:export ^{:rule/applies-to :production} http-undeclared-context
+  "The context-SOURCE gate (D-web): an endpoint whose body reads `:http/deps`
+  may only do so in a store that declares where those deps come from — one
+  `^{:http/context true}` zero-arg fn. The sibling of `http-undeclared-effect`:
+  an effect kind needs a marked performer, and the context needs a marked
+  builder. Inert until `http.enabled`, which `edit.gates/gate-check` decides —
+  not this gate. Returns a teaching string, or nil.
+
+  This gate is the reason the context is a MARKER rather than a capability
+  naming a qualified symbol. With the declaration in the store, both halves
+  are visible statically — the handlers that read `:http/deps`, and whether
+  anything claims to build it — so the failure moves to the write that caused
+  it. A capability is a string in config, checkable at boot at the earliest,
+  which is after the browser has already seen the 500.
+
+  Scoped to `:http/path` ENDPOINTS, not to every form naming the keyword: the
+  framework's own dispatcher assigns `:http/deps` onto the request, and gating
+  that would refuse writes to slopp's `slopp.http.dispatch/handle!`.
+
+  **The teaching is three clauses and stops** — what, the consequence, and the
+  fix as a LITERAL FORM. A cold read (slopp-ui, hitting this unprepared and
+  deliberately not opening the SKILL first) reported the literal form as the
+  decisive part: the marker spelling, the arity, `defn`-not-`def` and the
+  return shape all come off it at once, so no step sends the reader looking.
+  Two clauses were CUT on that evidence and should not come back:
+
+  - **\"it cannot be a performer\"** — the right sentence in the wrong room. It
+    answers a DESIGN question to a reader in fix-it mode who has already been
+    handed the form, and it is the only clause that requires knowing what a
+    performer is. It lives in `slopp.rules.web/context-builder`'s docstring and
+    the SKILL, where someone deciding meets it.
+  - **the lifecycle framed around done points and the managed server** — this
+    gate fires on any `http.enabled` store, including one with `dev.server`
+    false where no managed server boots at all. Told to that reader it
+    asserts a behaviour that does not happen to them: a general truth
+    delivered in this store's voice, which is a check reporting on a PROXY one
+  notch down. What is
+    left says the same thing unconditionally — anything the builder allocates
+    is new each time it RUNS.
+
+  The lifecycle clause STAYS, though, and the test is why: it changes what
+  someone writes rather than what they understand. The obvious builder is
+  whatever the app's own `serve!` already constructs, moved — which is exactly
+  the shape that silently empties."
+  [candidate ns-sym form-name]
+  (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
+    (when (and (route-path (web-name-meta e))
+               (empty? (web-context-builders candidate)))
+      (let [sx    (try (n/sexpr (:node e)) (catch Exception _ nil))
+            nodes (tree-seq coll? seq sx)]
+        (when (or (some #(= :http/deps %) nodes)
+                  (some #(and (map? %) (some #{'deps} (:http/keys %))) nodes))
+          (str ns-sym "/" form-name " reads :http/deps, but this store declares"
+               " no context builder — so the map would arrive nil, which either"
+               " 500s or, worse, answers 200 with an empty body. Declare exactly"
+               " ONE zero-arg builder: (defn ^{:http/context true} app-context []"
+               " {…}). Anything it allocates is new each time it runs, so keep"
+               " live state outside it."))))))
 
 (defn ^:export route-shape
   "What the router SEES in a path pattern: its non-blank segments, every

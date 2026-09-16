@@ -81,6 +81,24 @@
   earlier run's set."
   (atom nil))
 
+^:unsafe (defn ^:export restore!
+  "Put back what `instrument!` wrapped — var roots AND multimethod table
+  entries — and hand the `touched-sink` back to whatever run was collecting
+  before it (nil at the outermost). Call from a `finally` — an image whose vars
+  stay wrapped reports every later run through a stale closure, and a sink left
+  pointing at a finished run's atom would attribute later child-image calls to
+  a test that already ended.
+
+  A method a test itself registered mid-run (a defmethod in a test body) is not
+  in the originals and survives restore — the same tolerance var wrapping has
+  always had for vars a test defines."
+  [originals]
+  (reset! touched-sink (::prev-sink (meta originals)))
+  (doseq [[v orig] (:vars originals)]
+    (alter-var-root v (constantly orig)))
+  (doseq [[^clojure.lang.MultiFn mf k orig] (:methods originals)]
+    (.addMethod mf k orig)))
+
 ^:unsafe ^:reads (defn ^:export instrument!
   "Wrap every instrumentable fn var of `target-nses` so each call conjes its
   qualified symbol onto `touched` (an atom holding a set). Returns the
@@ -140,24 +158,6 @@
                              (when form-key (swap! touched conj form-key))
                              (apply orig args))))))))
      (with-meta {:vars @vars :methods @methods} {::prev-sink prev}))))
-
-^:unsafe (defn ^:export restore!
-  "Put back what `instrument!` wrapped — var roots AND multimethod table
-  entries — and hand the `touched-sink` back to whatever run was collecting
-  before it (nil at the outermost). Call from a `finally` — an image whose vars
-  stay wrapped reports every later run through a stale closure, and a sink left
-  pointing at a finished run's atom would attribute later child-image calls to
-  a test that already ended.
-
-  A method a test itself registered mid-run (a defmethod in a test body) is not
-  in the originals and survives restore — the same tolerance var wrapping has
-  always had for vars a test defines."
-  [originals]
-  (reset! touched-sink (::prev-sink (meta originals)))
-  (doseq [[v orig] (:vars originals)]
-    (alter-var-root v (constantly orig)))
-  (doseq [[^clojure.lang.MultiFn mf k orig] (:methods originals)]
-    (.addMethod mf k orig)))
 
 ^:unsafe ^:reads (defn ^{:entry-point "every verified write runs through it, but the call is built as SOURCE and evaluated in the image rt was injected into (slopp.image/traced-test-run, drain-child-rt!) — measured: zero static callers, 386 covering tests"} traced-run
   "Run `test-ns`'s test vars (all of them, or just those named in `only`),

@@ -79,6 +79,51 @@
                           :cljs cljs})))))
                changed))))
 
+(defn ^:export page-routes
+  "Every PAGE this store declares, as `[{:path :page :doc} …]` sorted by
+  address — `[]` when it has no browser app.
+
+  A page is a form carrying `^{:webapp/path \"/things/:id\"}`: the address the
+  BROWSER routes to, in the same grammar and the same coordinate system as
+  `:http/path`.
+
+  **The marker is on the form that renders the page**, which is where
+  `:rest/path`, `:http/path` and `:cli/command` already are, and everything
+  follows from that one placement: write gates, `query_surface`, a published
+  document, and a reference graph that answers *which endpoints does this page
+  call*.
+
+  **It replaces reading a `:webapp/routes` VECTOR out of the entry fn**, and
+  the difference is not stylistic. A table inside a fn body is a value, so a
+  big app builds it in pieces and names a var among them — and a reader that
+  only understands literals reports a partial table as the whole one. That is
+  what `:unreadable` existed to say. Metadata on a name is readable by
+  construction, so a store cannot half-declare its pages and there is nothing
+  left for that key to report.
+
+  `[]` and never nil, so a caller joining against it does not have to tell
+  \"no browser app\" from \"a browser app that routes nothing\"."
+  [st]
+  (vec (sort-by :path
+                (for [nsx  (keys (:namespaces st))
+                      ;; a fixture page is not surface — the rule
+                      ;; `app-namespaces` states for every other publisher,
+                      ;; and the one this traversal was written without. A
+                      ;; consumer fetching /api/webapp/paths against slopp's
+                      ;; own store was handed a page written that morning to
+                      ;; prove the router finds one. The published document is
+                      ;; the mild half: the BUILD reads this to generate a
+                      ;; browser app's route table, so a fixture would ship an
+                      ;; address into a real application
+                      :when (not (store.render/test-ns? nsx))
+                      e    (store/forms st nsx)
+                      :when (:name e)
+                      :let [p (:webapp/path (store/form-name-meta e))]
+                      :when (string? p)]
+                  {:path p
+                   :page (symbol (str nsx) (str (:name e)))
+                   :doc  (store/form-docstring (:node e))}))))
+
 (defn ^:export request-paths
   "Every endpoint DESCRIPTOR path this store declares, as `[{:path :method
   :form}]` (plus `:base` when the descriptor names its own `:webapp/base`)
@@ -143,362 +188,6 @@
                      ;; descriptor names one: that is the join's escape
                      (string? (get node :webapp/base))
                      (assoc :base (get node :webapp/base))))))))
-
-(defn ^:export request-paths-unserved
-  "The [[request-paths]] no endpoint in this store declares, sorted — `[]` when
-  every screen asks for something that exists.
-
-  **The join is EQUALITY, not a route match.** A request path is a PATTERN in
-  the same grammar as `:http/path` — `/api/things/:id`, with its captures
-  supplied separately as `:webapp/path-params` — so asking the router to match
-  it as though it were a concrete url would answer nil for every parameterized
-  endpoint in the store and report a working app as entirely broken. The two
-  sides are the same kind of string and compare directly.
-
-  **An ABSOLUTE url is left alone.** An app calling a third-party API declares a
-  whole url, and reporting those would make this noise on every store that talks
-  to anything. Same discipline `:http/external-path` states for links: this
-  answers for what THIS store serves and says nothing about anyone else's
-  server.
-
-  **A request naming its own `:webapp/base` is left alone for the same
-  reason**, and it is the form of that statement a MOUNTED app can actually
-  write: it cannot spell an absolute url, because the origin is only known at
-  runtime. A path measured from a base it names is addressed at whatever sits
-  THERE, which is not this store or the declaration would be saying nothing.
-  (This paragraph was true of the docstring for a while before it was true of
-  the code, which skipped only the absolute urls.)
-
-  A base of `\"\"` is the empty case of that — the origin — which is what the
-  retired `:webapp/from-origin` boolean used to say. Nothing reads that flag
-  now: it was an escape from a field that could not hold two values, and once
-  the field holds any base the escape has no cause. A request still carrying it
-  is joined like any other and reported, which is the correct answer for a
-  marker that waives nothing.
-
-  Every escape here is a DECLARATION rather than a silence, which is what keeps
-  the finding list clearable — and a list nobody can clear is a list everybody
-  skims.
-
-  Reads `edit.http/web-endpoint-rows` — the store's single route traversal —
-  rather than `rules.http/endpoints`, which is the same rows one layer up.
-  `rules.http` already depends on this namespace for the client route table, so
-  the join has to be made from here or not at all."
-  [st]
-  ;; BOTH route kinds, through the one accessor. The question is whether this
-  ;; store SERVES what a screen asks for, and serving does not care whether the
-  ;; route is a typed api or an asset — a screen fetching a served stylesheet is
-  ;; ordinary. Reading `:http/path` alone reported every `:rest/path` endpoint
-  ;; as missing: a finding nobody can discharge, in a report whose whole value
-  ;; is that its findings can be.
-  (let [served (into #{} (keep #(edit.http/route-path (:meta %)))
-                     (edit.http/web-endpoint-rows st))]
-    (vec (remove (fn [{:keys [path base]}]
-                   (or (contains? served path)
-                       (str/includes? path "://")
-                       ;; protocol-relative is the same statement one hop along
-                       (str/starts-with? path "//")
-                       ;; measured from a base it names: addressed elsewhere
-                       (some? base)))
-                 (request-paths st)))))
-
-(defn webapp-request-paths-are-served-check
-  "Done-advisory: screens whose request names a path this store does not serve.
-  Inert until the store opts into `webapp`.
-
-  **The gap wave 4d created, and it was written into the boundary inventory the
-  day it appeared rather than found later.** A literal `:href` is resolved
-  against the served table by `http-dangling-route-refs`. The `:webapp/path`
-  inside a screen's request is the same kind of claim about the same table, made
-  in a different key, and nothing read it — so moving the fetch out of the
-  browser and into a declaration bought verifiability everywhere except here.
-
-  The failure is quiet in the way this capability keeps naming: the url routes,
-  the screen renders, chrome and nav are fine, and one pane says it could not
-  load. Every other pane works, so the reader's report is *the thing pages are
-  slow* rather than *this endpoint does not exist*.
-
-  **The finding names what the store DOES serve**, because a typo is nearly
-  always one of them and a complaint an author cannot act on is one they learn
-  to skim.
-
-  Advisory rather than a refusal, and whole-store rather than episode-scoped,
-  for the same two reasons its `webapp-client-routes-are-served` neighbour has:
-  a store mid-migration is exactly the state this fires on, and the two
-  declarations that drift apart are usually not edited together."
-  [_session st* _changed]
-  (when (capabilities/enabled? st* "webapp")
-    ;; both kinds, matching the join above — the "this store serves …" list in
-    ;; the teach string has to be the same set the finding was computed from,
-    ;; or an author is handed a remedy that does not contain their path
-    (let [served (sort (distinct (keep #(edit.http/route-path (:meta %))
-                                       (edit.http/web-endpoint-rows st*))))]
-      (vec (for [{:keys [path form]} (request-paths-unserved st*)]
-             {:path path
-              :form form
-              :serves (vec served)
-              :teach (str form " requests " (pr-str path) ", which no endpoint"
-                          " in this store declares. The url will route and the"
-                          " screen will render — one pane just always fails to"
-                          " load, while everything around it works, so this gets"
-                          " reported as slowness rather than as a missing"
-                          " endpoint."
-                          (when (seq served)
-                            (str " This store serves "
-                                 (apply str (interpose ", " (map pr-str served)))
-                                 "."))
-                          " Two ways it is not a typo, and both are declarations"
-                          " rather than silences: a THIRD-PARTY api is a whole"
-                          " url, scheme and all; and a path something OUTSIDE"
-                          " this store serves — a proxied API under this app's"
-                          " own mount point, which cannot be written in full"
-                          " because the prefix is known only at runtime — is"
-                          " ^{:http/external-path \"why\"} on the form, the same"
-                          " marker a link takes.")})))))
-
-(defn webapp-client-code-check
-  "Done-advisory: the `:cljs` namespaces this store still hand-writes. Inert
-  until the store opts into `webapp`, and silent at zero.
-
-  **This is the capability's own goal, arriving instead of waiting to be
-  asked.** \"An app that opts into `webapp` writes NO ClojureScript\" became
-  readable when [[webapp-report]] gained `:cljs`, and readable is not reported:
-  nobody opens a surface report on an ordinary day, so a store drifting from
-  zero to five drifts silently and the number is consulted only by whoever
-  already suspects.
-
-  What a `:cljs` namespace costs, which is what the finding says rather than
-  implies: it cannot load into the JVM oracle, so it is outside the fast loop
-  and every edit costs a compile to learn anything — and its only verification
-  is that it COMPILED, which is a proxy for correctness and a weak one. The only
-  real webapp's two worst bugs both lived in exactly such a namespace.
-
-  **Advisory and never a refusal.** Sketching in ClojureScript is legitimate; a
-  browser-only library binding may have no portable form at all; and an app
-  mid-migration is precisely the state this fires on. What is not legitimate is
-  not knowing.
-
-  Whole-store rather than episode-scoped, for its neighbours' reason: a
-  namespace becomes `:cljs` by a `module_platform` declaration that touches no
-  form, so the episode that adds one has nothing for an episode-scoped rule to
-  hang a finding on."
-  [_session st* _changed]
-  (when (capabilities/enabled? st* "webapp")
-    (vec (for [n (sort (filter #(= :cljs (store/platform-for st* %))
-                               (keys (:namespaces st*))))]
-           {:ns n
-            :teach (str n " is :cljs, so it never loads into the image — it is"
-                        " outside the fast loop, every edit costs a compile to"
-                        " learn anything, and its only verification is that it"
-                        " COMPILED. `webapp` exists so an app needs none of it:"
-                        " routing, the render loop, the listeners, load states,"
-                        " the performer and session loads are all declarations"
-                        " now. If this namespace is a browser-only binding with"
-                        " no portable form, that is a real answer — and worth"
-                        " being a deliberate one rather than a leftover.")}))))
-
-(defn ^:export page-rows
-  "Every `^:app/entry` entry in `st`, as `[{:ns :name :page :closure} …]` sorted —
-  `[]` when nothing declares one.
-
-  `:page` is the qualified symbol a generated browser entry CALLS, and
-  `:closure` is `ns` plus everything it transitively requires, which is what
-  that entry must REQUIRE. Naming a page without requiring what it reaches
-  produces a call to a var that does not exist — which reaches a reader as a
-  blank page and reads like a rendering bug rather than a wiring one.
-
-  One traversal, because four sites had inlined it — the page-unreachable gate,
-  the page-reach advisory, its whole-store face, and now the build. A fifth copy
-  is how the answers start to differ."
-  [st]
-  (vec (sort-by (comp str :page)
-                (for [n     (keys (:namespaces st))
-                      f     (store/forms st n)
-                      :when (and (:name f) (:app/entry (store/form-name-meta f)))]
-                  {:ns      n
-                   :name    (:name f)
-                   :page    (symbol (str n) (str (:name f)))
-                   :closure (vec (sort (store/ns-closure st n)))}))))
-
-(defn ^:export stranded-pages
-  "Every `^:app/entry` in `st` whose namespace closure reaches `:cljs`, as
-  `[{:page ns/name :cljs [namespaces]} …]` — empty when every page opens.
-
-  This is the whole-store face of [[page-cljs-reach]], and it exists for the
-  surface the done-advisory structurally cannot serve: declaring a namespace
-  `:cljs` strands a page WITHOUT any write to the page, so the done that
-  follows has no changed form to hang the finding on. `module_platform` is
-  the write that does the stranding, so `module_platform` is where this
-  report belongs — the reader who broke the reach is told at the moment they
-  broke it, not at the next full_check."
-  [st]
-  (vec (for [{:keys [ns page]} (page-rows st)
-             :let  [cljs (page-cljs-reach st ns)]
-             :when (seq cljs)]
-         {:page page :cljs cljs})))
-
-(defn ^:export own-mount-nses
-  "The store namespaces that MOUNT this app themselves — every namespace
-  containing a call to `slopp.webapp.dom/mount!` — sorted, `[]` when none.
-
-  This is what decides whether `build!` generates a browser entry: generating
-  one beside a store's own produces a bundle that mounts twice over the same
-  element, and a double mount compiles exactly as clean as a single one, so
-  nothing downstream can report it. The only symptom is a page that renders
-  twice.
-
-  **The signal is the CALL, and the two cheaper answers are both wrong.** By
-  namespace NAME — the guard this replaced, which asked whether the store had
-  a namespace called `native.client` — only ever caught the generator
-  colliding with itself; a store's own entry is named whatever the store names
-  it, so every other name passed clean. By REQUIRE, it would be wrong the
-  other way: `slopp.webapp.dom` also publishes `click-data` and `typed-value`,
-  which an event handler reads without mounting anything, and that store would
-  silently lose the generation the capability exists to give it.
-
-  So aliases are resolved by the ANALYZER rather than matched as text, and the
-  string test is only a prefilter — a namespace that never names
-  `slopp.webapp.dom` cannot resolve a call to it, so it is skipped before the
-  analysis it would only fail."
-  [st]
-  (vec (sort (for [n     (keys (:namespaces st))
-                   :let  [src (store.render/render-ns st n)]
-                   :when (str/includes? src "slopp.webapp.dom")
-                   :when (some (fn [u]
-                                 (and (= 'slopp.webapp.dom (:to u))
-                                      (= 'mount! (:name u))))
-                               (:var-usages (analyze/analyze src)))]
-               n))))
-
-(defn ^{:export "slopp.rules"} self-prefixed-links
-  "The forms in which this store's APP calls `slopp.webapp/prefix-links`
-  itself, sorted — `[]` when it does not.
-
-  **This is the fact that decides whether a literal `:href` can be joined
-  against the served table at all.** `prefix-links` rewrites links at render,
-  so a store that calls it writes hrefs in APP space while the route table is
-  in SERVER space. The two are the same only when the prefix is empty, and the
-  check has no way to know the prefix — it is route state, not configuration.
-
-  Measured in the consuming store: 23 literal links, every one correct at
-  runtime, every one reported as dangling. Both available answers were wrong.
-  Reporting them as broken spends the credibility of every other finding in a
-  list whose whole value is that its findings can be cleared; passing them
-  silently turns the guarantee off with nothing saying so. Naming the cause is
-  the third answer, and it is the one this makes possible.
-
-  **The alias is RESOLVED rather than matched by name.** A symbol called
-  `prefix-links` in somebody else's namespace is a coincidence; a call that
-  resolves to slopp's own fn is a declaration. That distinction is the
-  difference between a rule and a guess, and this rule exists to stop a report
-  from being a guess.
-
-  **A -test namespace's call is not the app's.** Because one caller anywhere
-  parks every literal link in the store as :unresolved, a fixture exercising
-  `prefix-links` — slopp's own `webapp-test` does — switched the join off for
-  the whole store: every finding permanent, none of them dangling, nothing
-  saying so.
-
-  Answers the FORMS rather than a boolean, so a reader is told where to look —
-  and so this can grow into \"which links\" without changing its shape."
-  [st]
-  (vec (sort-by str
-                (distinct
-                 (for [nsx  (remove store.render/test-ns? (keys (:namespaces st)))
-                       :let [aliases (edit/require-aliases st nsx)]
-                       e    (store/forms st nsx)
-                       :let [sx (try (store/form-sexpr (:node e))
-                                     (catch Exception _ nil))]
-                       node (tree-seq coll? seq sx)
-                       :when (and (symbol? node)
-                                  (= "prefix-links" (name node))
-                                  (when-let [q (some-> (namespace node) symbol)]
-                                    (= 'slopp.webapp (get aliases q q))))]
-                   (symbol (str nsx) (str (:name e))))))))
-
-(defn ^:export page-routes
-  "Every PAGE this store declares, as `[{:path :page :doc} …]` sorted by
-  address — `[]` when it has no browser app.
-
-  A page is a form carrying `^{:webapp/path \"/things/:id\"}`: the address the
-  BROWSER routes to, in the same grammar and the same coordinate system as
-  `:http/path`.
-
-  **The marker is on the form that renders the page**, which is where
-  `:rest/path`, `:http/path` and `:cli/command` already are, and everything
-  follows from that one placement: write gates, `query_surface`, a published
-  document, and a reference graph that answers *which endpoints does this page
-  call*.
-
-  **It replaces reading a `:webapp/routes` VECTOR out of the entry fn**, and
-  the difference is not stylistic. A table inside a fn body is a value, so a
-  big app builds it in pieces and names a var among them — and a reader that
-  only understands literals reports a partial table as the whole one. That is
-  what `:unreadable` existed to say. Metadata on a name is readable by
-  construction, so a store cannot half-declare its pages and there is nothing
-  left for that key to report.
-
-  `[]` and never nil, so a caller joining against it does not have to tell
-  \"no browser app\" from \"a browser app that routes nothing\"."
-  [st]
-  (vec (sort-by :path
-                (for [nsx  (keys (:namespaces st))
-                      ;; a fixture page is not surface — the rule
-                      ;; `app-namespaces` states for every other publisher,
-                      ;; and the one this traversal was written without. A
-                      ;; consumer fetching /api/webapp/paths against slopp's
-                      ;; own store was handed a page written that morning to
-                      ;; prove the router finds one. The published document is
-                      ;; the mild half: the BUILD reads this to generate a
-                      ;; browser app's route table, so a fixture would ship an
-                      ;; address into a real application
-                      :when (not (store.render/test-ns? nsx))
-                      e    (store/forms st nsx)
-                      :when (:name e)
-                      :let [p (:webapp/path (store/form-name-meta e))]
-                      :when (string? p)]
-                  {:path p
-                   :page (symbol (str nsx) (str (:name e)))
-                   :doc  (store/form-docstring (:node e))}))))
-
-(defn ^{:export "slopp.rules"} pages-unserved
-  "The [[page-routes]] no SHELL in this store answers on a hard load, sorted —
-  `[]` when every page is covered.
-
-  **The join `:webapp/client-routing` records as its blind spot**, in the
-  inventory's own words: *nothing compares the client's route table to the
-  server's.* The failure is the one the only real webapp hit, with eight
-  routes at once — every in-app CLICK keeps working, because that is client
-  routing, and only a refresh or a shared link 404s. So the app is fine for
-  whoever is already inside it and broken for whoever was sent a url, which is
-  the population that never reports it because they assume the link was bad.
-
-  **Asked with `router/match`, against the shell routes themselves.** That is
-  the whole simplification this replaces: the old join compared a page path in
-  APP space against a hand-written prefix in SERVER space, so it could not
-  tell where app space began and tried EVERY suffix split of the prefix. A
-  page declares its address the way a document declares its own, so both sides
-  are one coordinate system and the question is just whether a shell's pattern
-  covers this one.
-
-  A shell's `**` matches zero segments, so a section's own root is covered by
-  the same declaration that covers everything below it. That used to need a
-  second explicit server route per section — a rule that lived in three
-  docstrings and reached no author.
-
-  Advisory rather than a refusal, for the reason a store mid-migration always
-  gets: the state this fires on is a page and a shell that have not been
-  reconciled, and refusing the writes would block the reconciliation."
-  [st]
-  (let [shells (vec (for [nsx (keys (:namespaces st))
-                          e   (store/forms st nsx)
-                          :when (:name e)
-                          :let [m (store/form-name-meta e)]
-                          :when (and (:webapp/shell m) (:http/path m))]
-                      {:method :get
-                       :path (str (:http/path m))
-                       :handler (symbol (str nsx) (str (:name e)))}))]
-    (vec (remove #(router/match shells :get (:path %)) (page-routes st)))))
 
 (defn ^:export page-calls
   "Every ENDPOINT each page reaches, as `{page-symbol [{:endpoint :method
@@ -734,3 +423,314 @@
        :unreadable unreadable
        :cljs       (count (filter #(= :cljs (store/platform-for store %))
                                   (keys (:namespaces store))))})))
+
+(defn ^:export request-paths-unserved
+  "The [[request-paths]] no endpoint in this store declares, sorted — `[]` when
+  every screen asks for something that exists.
+
+  **The join is EQUALITY, not a route match.** A request path is a PATTERN in
+  the same grammar as `:http/path` — `/api/things/:id`, with its captures
+  supplied separately as `:webapp/path-params` — so asking the router to match
+  it as though it were a concrete url would answer nil for every parameterized
+  endpoint in the store and report a working app as entirely broken. The two
+  sides are the same kind of string and compare directly.
+
+  **An ABSOLUTE url is left alone.** An app calling a third-party API declares a
+  whole url, and reporting those would make this noise on every store that talks
+  to anything. Same discipline `:http/external-path` states for links: this
+  answers for what THIS store serves and says nothing about anyone else's
+  server.
+
+  **A request naming its own `:webapp/base` is left alone for the same
+  reason**, and it is the form of that statement a MOUNTED app can actually
+  write: it cannot spell an absolute url, because the origin is only known at
+  runtime. A path measured from a base it names is addressed at whatever sits
+  THERE, which is not this store or the declaration would be saying nothing.
+  (This paragraph was true of the docstring for a while before it was true of
+  the code, which skipped only the absolute urls.)
+
+  A base of `\"\"` is the empty case of that — the origin — which is what the
+  retired `:webapp/from-origin` boolean used to say. Nothing reads that flag
+  now: it was an escape from a field that could not hold two values, and once
+  the field holds any base the escape has no cause. A request still carrying it
+  is joined like any other and reported, which is the correct answer for a
+  marker that waives nothing.
+
+  Every escape here is a DECLARATION rather than a silence, which is what keeps
+  the finding list clearable — and a list nobody can clear is a list everybody
+  skims.
+
+  Reads `edit.http/web-endpoint-rows` — the store's single route traversal —
+  rather than `rules.http/endpoints`, which is the same rows one layer up.
+  `rules.http` already depends on this namespace for the client route table, so
+  the join has to be made from here or not at all."
+  [st]
+  ;; BOTH route kinds, through the one accessor. The question is whether this
+  ;; store SERVES what a screen asks for, and serving does not care whether the
+  ;; route is a typed api or an asset — a screen fetching a served stylesheet is
+  ;; ordinary. Reading `:http/path` alone reported every `:rest/path` endpoint
+  ;; as missing: a finding nobody can discharge, in a report whose whole value
+  ;; is that its findings can be.
+  (let [served (into #{} (keep #(edit.http/route-path (:meta %)))
+                     (edit.http/web-endpoint-rows st))]
+    (vec (remove (fn [{:keys [path base]}]
+                   (or (contains? served path)
+                       (str/includes? path "://")
+                       ;; protocol-relative is the same statement one hop along
+                       (str/starts-with? path "//")
+                       ;; measured from a base it names: addressed elsewhere
+                       (some? base)))
+                 (request-paths st)))))
+
+(defn webapp-request-paths-are-served-check
+  "Done-advisory: screens whose request names a path this store does not serve.
+  Inert until the store opts into `webapp`.
+
+  **The gap wave 4d created, and it was written into the boundary inventory the
+  day it appeared rather than found later.** A literal `:href` is resolved
+  against the served table by `http-dangling-route-refs`. The `:webapp/path`
+  inside a screen's request is the same kind of claim about the same table, made
+  in a different key, and nothing read it — so moving the fetch out of the
+  browser and into a declaration bought verifiability everywhere except here.
+
+  The failure is quiet in the way this capability keeps naming: the url routes,
+  the screen renders, chrome and nav are fine, and one pane says it could not
+  load. Every other pane works, so the reader's report is *the thing pages are
+  slow* rather than *this endpoint does not exist*.
+
+  **The finding names what the store DOES serve**, because a typo is nearly
+  always one of them and a complaint an author cannot act on is one they learn
+  to skim.
+
+  Advisory rather than a refusal, and whole-store rather than episode-scoped,
+  for the same two reasons its `webapp-client-routes-are-served` neighbour has:
+  a store mid-migration is exactly the state this fires on, and the two
+  declarations that drift apart are usually not edited together."
+  [_session st* _changed]
+  (when (capabilities/enabled? st* "webapp")
+    ;; both kinds, matching the join above — the "this store serves …" list in
+    ;; the teach string has to be the same set the finding was computed from,
+    ;; or an author is handed a remedy that does not contain their path
+    (let [served (sort (distinct (keep #(edit.http/route-path (:meta %))
+                                       (edit.http/web-endpoint-rows st*))))]
+      (vec (for [{:keys [path form]} (request-paths-unserved st*)]
+             {:path path
+              :form form
+              :serves (vec served)
+              :teach (str form " requests " (pr-str path) ", which no endpoint"
+                          " in this store declares. The url will route and the"
+                          " screen will render — one pane just always fails to"
+                          " load, while everything around it works, so this gets"
+                          " reported as slowness rather than as a missing"
+                          " endpoint."
+                          (when (seq served)
+                            (str " This store serves "
+                                 (apply str (interpose ", " (map pr-str served)))
+                                 "."))
+                          " Two ways it is not a typo, and both are declarations"
+                          " rather than silences: a THIRD-PARTY api is a whole"
+                          " url, scheme and all; and a path something OUTSIDE"
+                          " this store serves — a proxied API under this app's"
+                          " own mount point, which cannot be written in full"
+                          " because the prefix is known only at runtime — is"
+                          " ^{:http/external-path \"why\"} on the form, the same"
+                          " marker a link takes.")})))))
+
+(defn webapp-client-code-check
+  "Done-advisory: the `:cljs` namespaces this store still hand-writes. Inert
+  until the store opts into `webapp`, and silent at zero.
+
+  **This is the capability's own goal, arriving instead of waiting to be
+  asked.** \"An app that opts into `webapp` writes NO ClojureScript\" became
+  readable when [[webapp-report]] gained `:cljs`, and readable is not reported:
+  nobody opens a surface report on an ordinary day, so a store drifting from
+  zero to five drifts silently and the number is consulted only by whoever
+  already suspects.
+
+  What a `:cljs` namespace costs, which is what the finding says rather than
+  implies: it cannot load into the JVM oracle, so it is outside the fast loop
+  and every edit costs a compile to learn anything — and its only verification
+  is that it COMPILED, which is a proxy for correctness and a weak one. The only
+  real webapp's two worst bugs both lived in exactly such a namespace.
+
+  **Advisory and never a refusal.** Sketching in ClojureScript is legitimate; a
+  browser-only library binding may have no portable form at all; and an app
+  mid-migration is precisely the state this fires on. What is not legitimate is
+  not knowing.
+
+  Whole-store rather than episode-scoped, for its neighbours' reason: a
+  namespace becomes `:cljs` by a `module_platform` declaration that touches no
+  form, so the episode that adds one has nothing for an episode-scoped rule to
+  hang a finding on."
+  [_session st* _changed]
+  (when (capabilities/enabled? st* "webapp")
+    (vec (for [n (sort (filter #(= :cljs (store/platform-for st* %))
+                               (keys (:namespaces st*))))]
+           {:ns n
+            :teach (str n " is :cljs, so it never loads into the image — it is"
+                        " outside the fast loop, every edit costs a compile to"
+                        " learn anything, and its only verification is that it"
+                        " COMPILED. `webapp` exists so an app needs none of it:"
+                        " routing, the render loop, the listeners, load states,"
+                        " the performer and session loads are all declarations"
+                        " now. If this namespace is a browser-only binding with"
+                        " no portable form, that is a real answer — and worth"
+                        " being a deliberate one rather than a leftover.")}))))
+
+(defn ^:export own-mount-nses
+  "The store namespaces that MOUNT this app themselves — every namespace
+  containing a call to `slopp.webapp.dom/mount!` — sorted, `[]` when none.
+
+  This is what decides whether `build!` generates a browser entry: generating
+  one beside a store's own produces a bundle that mounts twice over the same
+  element, and a double mount compiles exactly as clean as a single one, so
+  nothing downstream can report it. The only symptom is a page that renders
+  twice.
+
+  **The signal is the CALL, and the two cheaper answers are both wrong.** By
+  namespace NAME — the guard this replaced, which asked whether the store had
+  a namespace called `native.client` — only ever caught the generator
+  colliding with itself; a store's own entry is named whatever the store names
+  it, so every other name passed clean. By REQUIRE, it would be wrong the
+  other way: `slopp.webapp.dom` also publishes `click-data` and `typed-value`,
+  which an event handler reads without mounting anything, and that store would
+  silently lose the generation the capability exists to give it.
+
+  So aliases are resolved by the ANALYZER rather than matched as text, and the
+  string test is only a prefilter — a namespace that never names
+  `slopp.webapp.dom` cannot resolve a call to it, so it is skipped before the
+  analysis it would only fail."
+  [st]
+  (vec (sort (for [n     (keys (:namespaces st))
+                   :let  [src (store.render/render-ns st n)]
+                   :when (str/includes? src "slopp.webapp.dom")
+                   :when (some (fn [u]
+                                 (and (= 'slopp.webapp.dom (:to u))
+                                      (= 'mount! (:name u))))
+                               (:var-usages (analyze/analyze src)))]
+               n))))
+
+(defn ^:export page-rows
+  "Every `^:app/entry` entry in `st`, as `[{:ns :name :page :closure} …]` sorted —
+  `[]` when nothing declares one.
+
+  `:page` is the qualified symbol a generated browser entry CALLS, and
+  `:closure` is `ns` plus everything it transitively requires, which is what
+  that entry must REQUIRE. Naming a page without requiring what it reaches
+  produces a call to a var that does not exist — which reaches a reader as a
+  blank page and reads like a rendering bug rather than a wiring one.
+
+  One traversal, because four sites had inlined it — the page-unreachable gate,
+  the page-reach advisory, its whole-store face, and now the build. A fifth copy
+  is how the answers start to differ."
+  [st]
+  (vec (sort-by (comp str :page)
+                (for [n     (keys (:namespaces st))
+                      f     (store/forms st n)
+                      :when (and (:name f) (:app/entry (store/form-name-meta f)))]
+                  {:ns      n
+                   :name    (:name f)
+                   :page    (symbol (str n) (str (:name f)))
+                   :closure (vec (sort (store/ns-closure st n)))}))))
+
+(defn ^:export stranded-pages
+  "Every `^:app/entry` in `st` whose namespace closure reaches `:cljs`, as
+  `[{:page ns/name :cljs [namespaces]} …]` — empty when every page opens.
+
+  This is the whole-store face of [[page-cljs-reach]], and it exists for the
+  surface the done-advisory structurally cannot serve: declaring a namespace
+  `:cljs` strands a page WITHOUT any write to the page, so the done that
+  follows has no changed form to hang the finding on. `module_platform` is
+  the write that does the stranding, so `module_platform` is where this
+  report belongs — the reader who broke the reach is told at the moment they
+  broke it, not at the next full_check."
+  [st]
+  (vec (for [{:keys [ns page]} (page-rows st)
+             :let  [cljs (page-cljs-reach st ns)]
+             :when (seq cljs)]
+         {:page page :cljs cljs})))
+
+(defn ^{:export "slopp.rules"} self-prefixed-links
+  "The forms in which this store's APP calls `slopp.webapp/prefix-links`
+  itself, sorted — `[]` when it does not.
+
+  **This is the fact that decides whether a literal `:href` can be joined
+  against the served table at all.** `prefix-links` rewrites links at render,
+  so a store that calls it writes hrefs in APP space while the route table is
+  in SERVER space. The two are the same only when the prefix is empty, and the
+  check has no way to know the prefix — it is route state, not configuration.
+
+  Measured in the consuming store: 23 literal links, every one correct at
+  runtime, every one reported as dangling. Both available answers were wrong.
+  Reporting them as broken spends the credibility of every other finding in a
+  list whose whole value is that its findings can be cleared; passing them
+  silently turns the guarantee off with nothing saying so. Naming the cause is
+  the third answer, and it is the one this makes possible.
+
+  **The alias is RESOLVED rather than matched by name.** A symbol called
+  `prefix-links` in somebody else's namespace is a coincidence; a call that
+  resolves to slopp's own fn is a declaration. That distinction is the
+  difference between a rule and a guess, and this rule exists to stop a report
+  from being a guess.
+
+  **A -test namespace's call is not the app's.** Because one caller anywhere
+  parks every literal link in the store as :unresolved, a fixture exercising
+  `prefix-links` — slopp's own `webapp-test` does — switched the join off for
+  the whole store: every finding permanent, none of them dangling, nothing
+  saying so.
+
+  Answers the FORMS rather than a boolean, so a reader is told where to look —
+  and so this can grow into \"which links\" without changing its shape."
+  [st]
+  (vec (sort-by str
+                (distinct
+                 (for [nsx  (remove store.render/test-ns? (keys (:namespaces st)))
+                       :let [aliases (edit/require-aliases st nsx)]
+                       e    (store/forms st nsx)
+                       :let [sx (try (store/form-sexpr (:node e))
+                                     (catch Exception _ nil))]
+                       node (tree-seq coll? seq sx)
+                       :when (and (symbol? node)
+                                  (= "prefix-links" (name node))
+                                  (when-let [q (some-> (namespace node) symbol)]
+                                    (= 'slopp.webapp (get aliases q q))))]
+                   (symbol (str nsx) (str (:name e))))))))
+
+(defn ^{:export "slopp.rules"} pages-unserved
+  "The [[page-routes]] no SHELL in this store answers on a hard load, sorted —
+  `[]` when every page is covered.
+
+  **The join `:webapp/client-routing` records as its blind spot**, in the
+  inventory's own words: *nothing compares the client's route table to the
+  server's.* The failure is the one the only real webapp hit, with eight
+  routes at once — every in-app CLICK keeps working, because that is client
+  routing, and only a refresh or a shared link 404s. So the app is fine for
+  whoever is already inside it and broken for whoever was sent a url, which is
+  the population that never reports it because they assume the link was bad.
+
+  **Asked with `router/match`, against the shell routes themselves.** That is
+  the whole simplification this replaces: the old join compared a page path in
+  APP space against a hand-written prefix in SERVER space, so it could not
+  tell where app space began and tried EVERY suffix split of the prefix. A
+  page declares its address the way a document declares its own, so both sides
+  are one coordinate system and the question is just whether a shell's pattern
+  covers this one.
+
+  A shell's `**` matches zero segments, so a section's own root is covered by
+  the same declaration that covers everything below it. That used to need a
+  second explicit server route per section — a rule that lived in three
+  docstrings and reached no author.
+
+  Advisory rather than a refusal, for the reason a store mid-migration always
+  gets: the state this fires on is a page and a shell that have not been
+  reconciled, and refusing the writes would block the reconciliation."
+  [st]
+  (let [shells (vec (for [nsx (keys (:namespaces st))
+                          e   (store/forms st nsx)
+                          :when (:name e)
+                          :let [m (store/form-name-meta e)]
+                          :when (and (:webapp/shell m) (:http/path m))]
+                      {:method :get
+                       :path (str (:http/path m))
+                       :handler (symbol (str nsx) (str (:name e)))}))]
+    (vec (remove #(router/match shells :get (:path %)) (page-routes st)))))

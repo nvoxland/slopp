@@ -242,6 +242,41 @@
     (.finish b)
     (.writeTree dc ins)))
 
+(defn commit-author
+  "The projected commit's author identity for marker `d`: the `:author`
+  captured at commit-point time ({:name :email} — G5 config), else the legacy
+  agent-based identity, so pre-G5 markers re-mint byte-identically."
+  [d]
+  (or (:author d)
+      {:name  (str (or (:agent d) "slopp"))
+       :email (author-email (:agent d))}))
+
+(defn- insert-commit!
+  "Build blobs + tree + commit for marker `d` and return the sha. Pure
+  function of (parent-sha, d, tree-map) — determinism is what makes the
+  projection rebuildable (which is why the author identity, the files
+  manifest, and the structured config live ON the marker, never in ambient
+  state)."
+  [^Repository repo parent-sha d tree-map blob-of]
+  (with-open [ins (.newObjectInserter repo)]
+    (let [tree-id (insert-tree! ins (commit-paths tree-map (:deps d) (:files d) (:config d) blob-of))
+          at      (Instant/ofEpochMilli (long (:at d)))
+          who     (commit-author d)
+            ;; reflection-free ctors matter: reflective JGit calls resolve
+            ;; classes per-thread and break on server dispatch threads
+          cb      (doto (CommitBuilder.)
+                    (.setTreeId tree-id)
+                    (.setAuthor (PersonIdent. ^String (:name who) ^String (:email who)
+                                              at ^java.time.ZoneId ZoneOffset/UTC))
+                    (.setCommitter (PersonIdent. "slopp" "slopp@slopp"
+                                                 at ^java.time.ZoneId ZoneOffset/UTC))
+                    (.setMessage (commit-message d)))]
+      (when parent-sha
+        (.setParentId cb (ObjectId/fromString parent-sha)))
+      (let [cid (.insert ins cb)]
+        (.flush ins)
+        (.name cid)))))
+
 (defn- set-branch-ref!
   "Point refs/heads/<nm> at `sha` (CAS; the journal is authoritative, so a
   lost race is retried against the moved ref — convergence, not failure).
@@ -269,6 +304,25 @@
                   (recur (inc n)))
               :else (throw (ex-info (str "git ref update failed: " res)
                                     {:ref ref-name :result res})))))))))
+
+^:reads (defn source-tree
+  "{path source} for every namespace in `store`, at the paths the projection
+  roots them under — production `src/`, tests `test/`, instruments
+  `instruments/`, cljs `cljs-src/`, the same layout `build!` writes.
+
+  PATHS, not namespace names, and only a folded store can answer: platform and
+  role are both properties of the store as it stood. Extracted from
+  `project-journal!` so that a caller needing this tree WITHOUT a repo — a
+  directory import computing its merge base — cannot resolve paths a second
+  way. Two derivations of one layout is how the mirror and `build!` once
+  produced different jars from the same store."
+  [store]
+  (into (sorted-map)
+        (map (fn [n] [(store.render/source-path n
+                                                (store/platform-for store n)
+                                                (store/role-for store n))
+                      (store.render/render-ns store n)]))
+        (keys (:namespaces store))))
 
 (defn- branch-journals
   "[[name line-id]] for every NAMED line other than main — the branches a
@@ -318,84 +372,6 @@
                                    StandardCharsets/UTF_8)))
             m))))))
 
-^:reads (defn merge-base
-  "The merge base of two commits in `repo`, or nil when the histories are
-  unrelated — standard git ancestry (pull uses it to isolate remote-only
-  changes: diff merge-base→remote-tip, never touching local-only work)."
-  [^Repository repo sha-a sha-b]
-  (with-open [rw (RevWalk. repo)]
-    (.setRevFilter rw RevFilter/MERGE_BASE)
-    (.markStart rw (.parseCommit rw (ObjectId/fromString sha-a)))
-    (.markStart rw (.parseCommit rw (ObjectId/fromString sha-b)))
-    (some-> (.next rw) (.name))))
-
-(defn commit-author
-  "The projected commit's author identity for marker `d`: the `:author`
-  captured at commit-point time ({:name :email} — G5 config), else the legacy
-  agent-based identity, so pre-G5 markers re-mint byte-identically."
-  [d]
-  (or (:author d)
-      {:name  (str (or (:agent d) "slopp"))
-       :email (author-email (:agent d))}))
-
-(defn- insert-commit!
-  "Build blobs + tree + commit for marker `d` and return the sha. Pure
-  function of (parent-sha, d, tree-map) — determinism is what makes the
-  projection rebuildable (which is why the author identity, the files
-  manifest, and the structured config live ON the marker, never in ambient
-  state)."
-  [^Repository repo parent-sha d tree-map blob-of]
-  (with-open [ins (.newObjectInserter repo)]
-    (let [tree-id (insert-tree! ins (commit-paths tree-map (:deps d) (:files d) (:config d) blob-of))
-          at      (Instant/ofEpochMilli (long (:at d)))
-          who     (commit-author d)
-            ;; reflection-free ctors matter: reflective JGit calls resolve
-            ;; classes per-thread and break on server dispatch threads
-          cb      (doto (CommitBuilder.)
-                    (.setTreeId tree-id)
-                    (.setAuthor (PersonIdent. ^String (:name who) ^String (:email who)
-                                              at ^java.time.ZoneId ZoneOffset/UTC))
-                    (.setCommitter (PersonIdent. "slopp" "slopp@slopp"
-                                                 at ^java.time.ZoneId ZoneOffset/UTC))
-                    (.setMessage (commit-message d)))]
-      (when parent-sha
-        (.setParentId cb (ObjectId/fromString parent-sha)))
-      (let [cid (.insert ins cb)]
-        (.flush ins)
-        (.name cid)))))
-
-(defn stamped-commit-point
-  "The commit-point id a projected commit MESSAGE stamps itself with — the
-  `Slopp-Commit:` trailer `commit-message` writes — or nil for a commit this
-  projection did not mint (an ADOPTED remote commit, from a pull, carries no
-  trailer).
-
-  One producer, one reader, deliberately adjacent. It lets a caller ask the
-  COMMIT which commit-point it is rather than trust a sha recorded when the commit
-  was minted, and those are different facts: minting happens whether or not the
-  push that follows it succeeds. On 2026-08-14 a refused push left a pinned sha
-  naming a commit nobody had, and because the pin is first-writer-wins no later
-  projection could correct it. A stamp rides the artifact, so it cannot
-  disagree with the artifact."
-  [message]
-  (when message
-    (second (re-find #"(?m)^Slopp-Commit:[ \t]*(\S+)[ \t]*$" message))))
-
-^:reads (defn message-of
-  "The full message of commit `sha` in `repo`, or nil when the repo does not
-  have that object — which an in-memory projection routinely does not, since
-  it mints its own chain and fetches nothing it was not asked to.
-
-  nil is a real answer here rather than an error: every caller is asking a
-  commit to describe itself, and \"the object is not here\" is one of the
-  outcomes they have to handle."
-  [^Repository repo sha]
-  (when (and repo sha)
-    (let [id (ObjectId/fromString sha)]
-      (when (.has (.getObjectDatabase repo) id)
-        (with-open [rw (RevWalk. repo)]
-          (.getFullMessage (.parseCommit rw id)))))))
-
 (defn- ancestor?
   "Is `sha-a` reachable from `sha-b` in `repo`? Both objects must be present —
   ask `message-of` first when that is in doubt."
@@ -415,6 +391,49 @@
     (when base
       (.markUninteresting rw (.parseCommit rw (ObjectId/fromString base))))
     (loop [n 0] (if (.next rw) (recur (inc n)) n))))
+
+^:reads (defn merge-base
+  "The merge base of two commits in `repo`, or nil when the histories are
+  unrelated — standard git ancestry (pull uses it to isolate remote-only
+  changes: diff merge-base→remote-tip, never touching local-only work)."
+  [^Repository repo sha-a sha-b]
+  (with-open [rw (RevWalk. repo)]
+    (.setRevFilter rw RevFilter/MERGE_BASE)
+    (.markStart rw (.parseCommit rw (ObjectId/fromString sha-a)))
+    (.markStart rw (.parseCommit rw (ObjectId/fromString sha-b)))
+    (some-> (.next rw) (.name))))
+
+^:reads (defn message-of
+  "The full message of commit `sha` in `repo`, or nil when the repo does not
+  have that object — which an in-memory projection routinely does not, since
+  it mints its own chain and fetches nothing it was not asked to.
+
+  nil is a real answer here rather than an error: every caller is asking a
+  commit to describe itself, and \"the object is not here\" is one of the
+  outcomes they have to handle."
+  [^Repository repo sha]
+  (when (and repo sha)
+    (let [id (ObjectId/fromString sha)]
+      (when (.has (.getObjectDatabase repo) id)
+        (with-open [rw (RevWalk. repo)]
+          (.getFullMessage (.parseCommit rw id)))))))
+
+(defn stamped-commit-point
+  "The commit-point id a projected commit MESSAGE stamps itself with — the
+  `Slopp-Commit:` trailer `commit-message` writes — or nil for a commit this
+  projection did not mint (an ADOPTED remote commit, from a pull, carries no
+  trailer).
+
+  One producer, one reader, deliberately adjacent. It lets a caller ask the
+  COMMIT which commit-point it is rather than trust a sha recorded when the commit
+  was minted, and those are different facts: minting happens whether or not the
+  push that follows it succeeds. On 2026-08-14 a refused push left a pinned sha
+  naming a commit nobody had, and because the pin is first-writer-wins no later
+  projection could correct it. A stamp rides the artifact, so it cannot
+  disagree with the artifact."
+  [message]
+  (when message
+    (second (re-find #"(?m)^Slopp-Commit:[ \t]*(\S+)[ \t]*$" message))))
 
 ^:reads (defn divergence
   "Why a fast-forward push was refused, as a VALUE with declared clauses
@@ -469,25 +488,6 @@
        :mirror    {:sha mirror}
        :contains-mirror-tip? false
        :cause :unreadable})))
-
-^:reads (defn source-tree
-  "{path source} for every namespace in `store`, at the paths the projection
-  roots them under — production `src/`, tests `test/`, instruments
-  `instruments/`, cljs `cljs-src/`, the same layout `build!` writes.
-
-  PATHS, not namespace names, and only a folded store can answer: platform and
-  role are both properties of the store as it stood. Extracted from
-  `project-journal!` so that a caller needing this tree WITHOUT a repo — a
-  directory import computing its merge base — cannot resolve paths a second
-  way. Two derivations of one layout is how the mirror and `build!` once
-  produced different jars from the same store."
-  [store]
-  (into (sorted-map)
-        (map (fn [n] [(store.render/source-path n
-                                                (store/platform-for store n)
-                                                (store/role-for store n))
-                      (store.render/render-ns store n)]))
-        (keys (:namespaces store))))
 
 (defn- live-sha!
   "The sha `git_map` pins for marker `d`, when its object is actually in the
@@ -554,6 +554,44 @@
                 (when-let [^bytes bs (:bytes (artifacts/fetch dir store (str path)))]
                   [(str path) bs])))
         (:artifacts store)))
+
+(defn ^:export commit-point-tree
+  "{path content} for the tree the LAST commit-point in `deltas` projects — folded
+  from the journal and rendered, **with no git repo anywhere**. nil when there
+  is no commit-point yet. `deltas` is the line's journal, oldest first
+  (`slopp.store.db/line-deltas`); the value does not carry it, and an import
+  is asked for rarely enough to read it then.
+
+  This is the merge BASE for an import that did not come through git. Export
+  is one-way; import is the narrow case where an external tool changed an
+  export and the change should come back as ordinary tracked form edits, and
+  nothing about that requires the other tool to have used git — it requires a
+  tree of files and a base to diff against. Git supplies a merge-base commit;
+  a directory supplies nothing, and this is the answer the store already had.
+
+  It shares `source-tree` and `commit-paths` with `project-journal!` rather
+  than recomputing them, and that is the whole correctness argument: a base
+  differing from the projection by so much as the generated `deps.edn` would
+  report phantom changes on paths nobody touched, on every import, forever.
+
+  A marker normally targets the delta immediately before it; a retroactive
+  `commit_point {:target …}` names an earlier one, and the fold stops there."
+  [deltas blob-of & {:keys [dir]}]
+  (let [marker (last (filter #(= :commit (:op %)) deltas))]
+    (when marker
+      (let [upto (or (:target marker) (:id marker))
+            st   (reduce (fn [st d]
+                           (let [st' (or (store/replay-delta st d) st)]
+                             (if (= (:id d) upto) (reduced st') st')))
+                         (store/empty-store) deltas)]
+        (commit-paths (cond-> (source-tree (refs/arrange-all st))
+                        ;; the artifacts too, when the caller can name the
+                        ;; store dir whose cache holds them — the projection
+                        ;; carries them, so a base without them would report
+                        ;; the bundle as a change on every import
+                        dir (merge (artifact-paths dir st)))
+                      (:deps marker) (:files marker)
+                      (:config marker) blob-of)))))
 
 ;; ---------------------------------------------------------------------------
 ;; projection
@@ -648,44 +686,6 @@
               {:parent sha :store store' :held held'}))))
       {:parent base :store (store/empty-store) :held {}}
       dv))))
-
-(defn ^:export commit-point-tree
-  "{path content} for the tree the LAST commit-point in `deltas` projects — folded
-  from the journal and rendered, **with no git repo anywhere**. nil when there
-  is no commit-point yet. `deltas` is the line's journal, oldest first
-  (`slopp.store.db/line-deltas`); the value does not carry it, and an import
-  is asked for rarely enough to read it then.
-
-  This is the merge BASE for an import that did not come through git. Export
-  is one-way; import is the narrow case where an external tool changed an
-  export and the change should come back as ordinary tracked form edits, and
-  nothing about that requires the other tool to have used git — it requires a
-  tree of files and a base to diff against. Git supplies a merge-base commit;
-  a directory supplies nothing, and this is the answer the store already had.
-
-  It shares `source-tree` and `commit-paths` with `project-journal!` rather
-  than recomputing them, and that is the whole correctness argument: a base
-  differing from the projection by so much as the generated `deps.edn` would
-  report phantom changes on paths nobody touched, on every import, forever.
-
-  A marker normally targets the delta immediately before it; a retroactive
-  `commit_point {:target …}` names an earlier one, and the fold stops there."
-  [deltas blob-of & {:keys [dir]}]
-  (let [marker (last (filter #(= :commit (:op %)) deltas))]
-    (when marker
-      (let [upto (or (:target marker) (:id marker))
-            st   (reduce (fn [st d]
-                           (let [st' (or (store/replay-delta st d) st)]
-                             (if (= (:id d) upto) (reduced st') st')))
-                         (store/empty-store) deltas)]
-        (commit-paths (cond-> (source-tree (refs/arrange-all st))
-                        ;; the artifacts too, when the caller can name the
-                        ;; store dir whose cache holds them — the projection
-                        ;; carries them, so a base without them would report
-                        ;; the bundle as a change on every import
-                        dir (merge (artifact-paths dir st)))
-                      (:deps marker) (:files marker)
-                      (:config marker) blob-of)))))
 
 (defn- project-line!
   "Bring one line's ref up to date and say HOW: `{:sha :via}` with `:via` one of

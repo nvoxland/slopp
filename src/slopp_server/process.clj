@@ -1,4 +1,4 @@
-(ns slopp-server.daemon
+(ns slopp-server.process
   "ONE slopp per machine. A project is opened on the first agent's attach (an
   MCP session at its endpoint) and closed on the last detach; the daemon
   itself stays up with nothing loaded. It is the registry (`/api/projects`)
@@ -21,7 +21,7 @@
             ;; the stylesheet (the v0.3.0 jar answered 404 everywhere).
             [slopp-server.ui.pages]
             [slopp-server.ui.shell]
-            [slopp-server.ui.styles] [slopp-server.daemon.hooks :as hooks] [slopp.read.history :as history] [slopp.ops.engine :as engine] [clojure.java.io :as io] [slopp.rules.http :as rules.http] [slopp.rules.webapp :as rules.webapp] [slopp.project.capabilities :as capabilities] [slopp-server.api.reads :as api.reads]))
+            [slopp-server.ui.styles] [slopp-server.process.hooks :as hooks] [slopp.read.history :as history] [slopp.ops.engine :as engine] [clojure.java.io :as io] [slopp.rules.http :as rules.http] [slopp.rules.webapp :as rules.webapp] [slopp.project.capabilities :as capabilities] [slopp-server.api.reads :as api.reads]))
 
 (defonce ^:private state
   ;; `:projects` {dir {:slug :dir :opened-at :sessions #{sid}
@@ -867,7 +867,7 @@
       (spit (io/file dir ".slopp" (str "pending-intent." safe)) payload))))
 
 (defn- tail-data
-  "What [[slopp-server.daemon.hooks/tail-context]] prints, read off the project's
+  "What [[slopp-server.process.hooks/tail-context]] prints, read off the project's
   reader on its line: the store's size, the last commit point, the recent
   asks, the whole-store verdict when it still stands, the last done."
   [reader sid]
@@ -950,7 +950,7 @@
   write, so it needs the daemon's token in `X-Slopp-Token` like every
   write from a shell. `X-Slopp-Cli: 1` asks for the CLI voice in the map.
   Any other event is an empty answer. The rules are
-  [[slopp-server.daemon.hooks]]'s; the shell side has none to keep in step."
+  [[slopp-server.process.hooks]]'s; the shell side has none to keep in step."
   [req]
   (let [{:keys [dir error]} (project-dir req)
         b     (or (:hook (:body req)) {})
@@ -982,7 +982,7 @@
                  :rest/response :string}
   cli-endpoint
   "`POST /api/projects/:slug/cli` — `slopp <op>` from a shell: the TEXT
-  frame [[slopp-server.daemon.hooks/cli-frame]] reads (header lines, a blank
+  frame [[slopp-server.process.hooks/cli-frame]] reads (header lines, a blank
   line, the payload — the op's arguments as JSON or EDN, or a verb's raw
   source blob), the token in `X-Slopp-Token`, the project by `X-Slopp-Dir`.
   It is [[call-endpoint]] for a client that builds no JSON and prints what
@@ -1053,7 +1053,7 @@
   capabilities every app's dev server does — or nil, when a released jar booted
   from a neutral dir and serves its BAKED surface from the classpath and the
   loaded image instead. Guarded on the store actually being slopp's (it declares
-  `slopp-server.daemon`) so a jar started inside some OTHER project's dir does not
+  `slopp-server.process`) so a jar started inside some OTHER project's dir does not
   derive this daemon's surface from that project's web namespaces. Reached
   through the daemon's own reader ([[own-reader!]]), synced with the journal on
   each read, so a page or mount a `done` added is served on the next assembly."
@@ -1062,7 +1062,7 @@
                  (catch Throwable _ nil))]
     (when (and dir (store-file? dir))
       (let [st (:store @(own-reader! dir))]
-        (when (contains? (:namespaces st) 'slopp-server.daemon)
+        (when (contains? (:namespaces st) 'slopp-server.process)
           st)))))
 
 (defn- serving-opts
@@ -1097,7 +1097,7 @@
      :webapp/routes     (mapv (juxt :path :page) (rules.webapp/page-routes st))
      :http/perform-ctx  {:open-reader (fn [slug] (some-> (project-by-slug slug) :dir api! :reader))}
      :http/wrap-context (when (capabilities/enabled? st "rest") slopp.rest/validating)}
-    {:http/namespaces   ['slopp-server.daemon 'slopp-server.ui.shell 'slopp-server.ui.styles
+    {:http/namespaces   ['slopp-server.process 'slopp-server.ui.shell 'slopp-server.ui.styles
                          'slopp-server.api.endpoints 'slopp-server.api.reads]
      :http/routes       (static/mount-routes asset-mounts (asset-reader))
      :webapp/bundle     bundle-url

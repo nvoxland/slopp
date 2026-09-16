@@ -1,8 +1,8 @@
-(ns slopp-server.daemon.hooks-test
-  "Tests for slopp-server.daemon.hooks: the system-turn rule, the Bash verdicts and their JSON, the per-session cooldown, the CLI frame and the calls it becomes (JSON and EDN arguments, add/replace/change), the tail context lines and the prompt answer's assembly and cap"
+(ns slopp-server.process.hooks-test
+  "Tests for slopp-server.process.hooks: the system-turn rule, the Bash verdicts and their JSON, the per-session cooldown, the CLI frame and the calls it becomes (JSON and EDN arguments, add/replace/change), the tail context lines and the prompt answer's assembly and cap"
   (:require [clojure.test :refer [deftest is testing]]
             [cheshire.core :as json]
-            [slopp-server.daemon.hooks :as hooks]))
+            [slopp-server.process.hooks :as hooks]))
 
 (deftest a-system-continuation-is-not-an-ask
   ;; a task notification or a hook wake-up fires the prompt hook too; it

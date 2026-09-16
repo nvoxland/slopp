@@ -1,10 +1,10 @@
-(ns slopp-server.daemon-test
+(ns slopp-server.process-test
   "The daemon: one process, every project, attached exactly while some agent
   is. Driven through the socket-free dispatch, so what is tested is the
   envelope and the lifecycle rather than a port."
   (:require [cheshire.core :as json]
             [clojure.test :refer [deftest is testing]]
-            [slopp-server.daemon :as daemon]
+            [slopp-server.process :as daemon]
             [slopp.http :as slopp.http] [slopp.ops.external :as external] [slopp.ops :as ops] [slopp.cache :as cache] [slopp-server.mcp :as mcp] [slopp.http.routes :as routes] [clojure.string :as str] [slopp.sync :as sync] [slopp.store :as store] [clojure.java.shell :as sh] [clojure.java.io :as io] [slopp.store.db :as db] [slopp.ops.engine :as engine]))
 
 (defn- tmp-dir!
@@ -562,7 +562,7 @@
   ;; the 15 `/api/projects/:slug/<resource>` routes are declared by
   ;; `slopp.api.endpoints` and served from this one context, not delegated
   ;; into a per-project mount. So `declared` covers those namespaces too.
-  (let [declared (routes/from-namespaces ['slopp-server.daemon 'slopp-server.ui.shell 'slopp-server.ui.styles
+  (let [declared (routes/from-namespaces ['slopp-server.process 'slopp-server.ui.shell 'slopp-server.ui.styles
                                           'slopp-server.api.endpoints 'slopp-server.api.reads])
         served   (:http/routes (daemon/context))
         mounted  (filter #(str/starts-with? (:path %) "/assets/") served)]
@@ -633,7 +633,7 @@
       (finally (daemon/reset-all!)))))
 
 (deftest ^:external a-managed-child-running-the-daemon-holds-what-it-serves
-  ;; The dev instance is `slopp-server.daemon/-main` DECLARED in slopp's own dev
+  ;; The dev instance is `slopp-server.process/-main` DECLARED in slopp's own dev
   ;; config, so it runs in a managed child that loads the daemon's require
   ;; closure and nothing more, and has no store. Two things the kernel-booted
   ;; daemon gets for free, that child does not — and both were measured on
@@ -651,10 +651,10 @@
       ;; loaded vars. The v0.3.0 jar booted from a neutral dir and answered
       ;; 404 to every page and to /css/style.css; the fix that reached
       ;; slopp-server.ui.pages had stopped one namespace short, twice over
-      (let [closure (store/ns-closure st 'slopp-server.daemon)]
+      (let [closure (store/ns-closure st 'slopp-server.process)]
         (doseq [n '[slopp-server.ui.pages slopp-server.ui.shell slopp-server.ui.styles]]
           (is (contains? closure n)
-              (str "slopp-server.daemon does not require " n " — a process that loads only its closure serves nothing from it"))))))
+              (str "slopp-server.process does not require " n " — a process that loads only its closure serves nothing from it"))))))
   (testing "assets come from the dir a manager materialized, when it says where"
     (let [dir (tmp-dir!)
           f   (java.io.File. ^String dir "public/cljs/main.js")]
@@ -781,13 +781,13 @@
     (is (re-find #"not a port" (:error (daemon/daemon-port "70000" nil nil base))))))
 
 (deftest ^:external a-daemon-that-loads-only-its-closure-still-serves-its-pages
-  ;; The jar's shape, driven for real: a fresh JVM that requires slopp-server.daemon
+  ;; The jar's shape, driven for real: a fresh JVM that requires slopp-server.process
   ;; and nothing else, assembles the context, and asks for the picker, a
   ;; project page and the stylesheet. The unit test above says the closure is
   ;; right; this says the served surface is, which is what a release smoke
   ;; that only asked /api/status could not see.
-  (let [code (str "(require 'slopp-server.daemon 'slopp.http)"
-                  " (let [ctx (slopp-server.daemon/context)"
+  (let [code (str "(require 'slopp-server.process 'slopp.http)"
+                  " (let [ctx (slopp-server.process/context)"
                   "       at (fn [p] (:status (slopp.http/handle! ctx {:request-method :get :uri p :headers {}})))]"
                   "   (println :picker (at \"/\") :page (at \"/p/x\") :css (at \"/css/style.css\") :nope (at \"/nope\")))")
         r    (sh/sh "sh" "-c" (str "( sleep 60 ) | clojure -M -e " (pr-str code)))]

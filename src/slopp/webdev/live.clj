@@ -29,6 +29,58 @@
   (:require [slopp.project.capabilities :as capabilities]
             [slopp.rules.http :as rules.http] [slopp.store :as store] [slopp.ops.engine :as engine] [slopp.image :as image] [slopp.image.repl :as repl] [clojure.string :as str] [clojure.java.io :as io] [slopp.store.artifacts :as artifacts] [slopp.http :as slopp.http] [slopp.project.dev :as dev] [slopp.currency :as currency] [slopp.kernel.boot :as boot] [slopp.store.render :as store.render] [slopp.rules.webapp :as rules.webapp]))
 
+(defn ^:export self-served?
+  "Whether the calling process ALREADY serves everything `store` would —
+  `already-served` being the namespaces it has mounted itself.
+
+  The one true case for not managing a store's app server, and the reason
+  it is derived rather than declared. Managing this store would boot a
+  second image and serve a SNAPSHOT of the very surface you are looking at,
+  one done point behind the page in front of you — not a port conflict, a
+  staler copy. slopp's own store is that case: its web surface is the
+  reviewer API the live session already serves, over the LIVE store.
+
+  It replaced the `dev.server` capability, which asked every project a
+  question only one store on earth should answer. That misfired exactly as
+  a footgun does: the second project to meet it set it false because its
+  static ASSETS were 404ing, and the switch then presented a bug as a
+  preference for a week. Computing it means a project cannot answer wrong,
+  and cannot use the answer to paper over something else.
+
+  **A store serving NOTHING is not self-served**, though every one of its
+  zero namespaces is trivially already served. Vacuous truth here would
+  exempt every non-web project for a reason that has nothing to do with
+  them — the emptiness guard, in the position where it actually bites."
+  [store already-served]
+  (let [nses (set (rules.http/serving-namespaces store))]
+    (boolean (and (seq nses)
+                  (every? (set already-served) nses)))))
+
+(defn ^:export managed?
+  "Whether slopp should run this store's dev instance while someone works on
+  it — `already-served` being what the calling process has mounted itself.
+
+  Two reasons, either sufficient. A DECLARED entry (`app.main`) is the
+  project saying what its dev instance is — a worker, a daemon, a main — and
+  that is reason enough whatever its HTTP surface. Otherwise `http.enabled`
+  says the project SERVES HTTP — that is what makes the web rules and
+  `query_surface` exist, and production reads it — unless this process already
+  serves that surface itself ([[self-served?]]): a store whose surface this
+  process already serves must not get a second, staler copy of it.
+
+  **Nothing a web project configures decides this, and that is the point.** A
+  project under development should not have to think about turning its server
+  on, or keeping it current — those are slopp's job, and a per-project switch
+  is an invitation to answer a question nobody should be asked.
+
+  Deliberately NOT folded into `serve-plan`. That answers \"what would this
+  store serve, and where\", which production asks too, and a dev-only
+  exemption in it would be an answer to a question it was not asked."
+  [store already-served]
+  (boolean (or (capabilities/effective store "app.main")
+               (and (capabilities/effective store "http.enabled")
+                    (not (self-served? store already-served))))))
+
 (defn derived-port
   "A localhost port DERIVED from the store dir for this project's APP server —
   stable across restarts, different for every project on the machine.
@@ -158,136 +210,6 @@
         want    (into #{} (mapcat #(store/ns-closure store %)) seeds)]
     (filterv want (store/ns-dependency-order store))))
 
-(defn serve-code
-  "The expression the app image evaluates to start serving `plan`, as a
-  STRING — it crosses an nREPL wire, which carries text.
-
-  This is where the directive actually lands: the app writes no `serve!`
-  call, so slopp writes it, from the plan. Generating it rather than asking
-  the app for it is what makes `serve-plan`'s derivations binding — a
-  hand-written call could disagree with them, and the running server would be
-  the one that disagreed.
-
-  **It must carry what the app NEEDS, not only where to serve.** The first
-  cut generated four of `serve!`'s options — namespaces, host, port, adapter
-  — and dropped `:http/perform-ctx`, `:http/auth-config`, `:http/routes` and
-  `:http/max-body-bytes`, which is every option describing the application
-  rather than its address. Measured on a real app: handlers taking
-  `:http/deps` received nil, which either 500s (loud) or answers 200 with an
-  empty body (silent, and worse — a client generated against that surface
-  comes back with zero endpoints and looks successful).
-
-  `:http/perform-ctx` is a CALL to the app's `^{:http/context true}` builder,
-  which is why the opts can no longer be one flat quoted map: the address
-  fields stay quoted (a namespace symbol in evaluated position is read as a
-  class name) and the context is evaluated.
-
-  **The context is built ONCE per app image — and the app image is REPLACED
-  at every refresh.** So state accumulated in it does not survive a `done`:
-  an atom the builder creates is a new atom each time, and an app that keeps
-  a registry there will find it empty after any done point, silently. Say so
-  to anyone building one; the alternative — hot-loading a refresh into the
-  RUNNING image instead of booting a new one — is the change that would fix
-  it, and it is not made yet.
-
-  `:http/routes` USED to be dropped for a reason that sounded structural —
-  static mounts need the store's bytes and the child image has no store. It
-  was not structural: `mount-routes` takes a READER, so materializing the
-  bytes and handing the child a file reader serves them without the child
-  ever seeing a store. That is what `materialize-static!` does, and it is why
-  a UI's stylesheet and cljs bundle now reach a managed server.
-
-  **`:http/auth-config` is still dropped, and it is the last one.** An app
-  with auth gets a managed server on which identity does not resolve. There
-  is no switch to turn the managed server off — [[managed?]] is derived — so
-  this is a gap to close, not a case to configure around.
-
-  **It evaluates to the BOUND port — an integer.** `repl/eval!` hands a throw
-  back as a STRING, so an integer is unambiguous evidence a socket is open;
-  anything else is the failure, in its own representation."
-  [plan]
-  (let [builder (:context-builder plan)
-        mounts  (not-empty (:static plan))
-        opts    (cond-> {:http/namespaces (list 'quote (vec (:namespaces plan)))
-                         :http/host       (:host plan)
-                         :http/port       (:port plan)
-                         :http/adapter    (:adapter plan)}
-                  (:max-body-bytes plan)
-                  (assoc :http/max-body-bytes (:max-body-bytes plan))
-                  ;; a shell declares THAT it is one; this is the url it
-                  ;; injects. Dropping it would make every app with a shell
-                  ;; refuse to assemble on the managed server — the loud
-                  ;; failure, but a failure the dev server would own
-                  (:bundle plan)
-                  (assoc :webapp/bundle (:bundle plan))
-                  ;; where `rest.enabled` stops being a line in a config file.
-                  ;; The app writes no serve! call, so the capability switch has
-                  ;; to reach the GENERATED one or the boundary exists and
-                  ;; nothing ever invokes it.
-                  ;;
-                  ;; A symbol rather than the validators inline: the plan stays
-                  ;; data, and the child resolves it — which is why the require
-                  ;; below is not optional.
-                  (:validate? plan)
-                  (assoc :http/wrap-context 'slopp.rest/validating)
-                  builder
-                  (assoc :http/perform-ctx (list builder))
-                  mounts
-                  (assoc :http/routes
-                         (list 'slopp.http.static/mount-routes
-                               mounts
-                               (list 'slopp.http.static/file-or-resource-reader
-                                     (:static-dir plan))))
-                  ;; the client route table, QUOTED — page symbols are
-                  ;; addresses here, not calls; dispatch only matches the
-                  ;; patterns to derive a shell's status (200 on a routed
-                  ;; address, 404 with the same shell bytes on one the
-                  ;; client table does not know)
-                  (seq (:page-routes plan))
-                  (assoc :webapp/routes
-                         (list 'quote (mapv vec (:page-routes plan)))))]
-    (pr-str (list* 'do
-                   (list 'require ''slopp.http)
-                   (concat
-                    (when mounts
-                      [(list 'require ''slopp.http.static)])
-                    ;; the child resolves slopp.rest/validating only if it
-                    ;; REQUIRED the namespace. A qualified symbol in the opts
-                    ;; would look right and throw at serve time — the same trap
-                    ;; the static mount hit, which is why both are asserted as
-                    ;; require FORMS rather than as substrings.
-                    (when (:validate? plan)
-                      [(list 'require ''slopp.rest)])
-                    (when builder
-                      [(list 'require (list 'quote (symbol (namespace builder))))])
-                    [(list :port (list 'slopp.http/serve! opts))])))))
-
-(defn ^:export stop!
-  "Stop a running app server — whatever `start!` returned — and remove the
-  dir its static mounts were materialized into. Idempotent, and safe on a
-  `{:serving? false …}` that never had an image.
-
-  There is exactly ONE process to kill, and that is the point of the
-  dedicated image: the listener, the loaded namespaces and the process are
-  the same object, so there is no half-stopped state where a port stays
-  bound because a handle was dropped. `repl/stop!` already tolerates a
-  partially-built handle and destroys the process before touching the
-  transport.
-
-  The static dir goes here because this is the one place that still holds
-  the plan. `boot!` writes a fresh temp dir per boot, deliberately, and
-  nothing removed the previous one: 1,181 `slopp-static*` dirs, 21 MB, on
-  the machine this was found on."
-  [running]
-  (when-let [img (:image running)]
-    (repl/stop! img))
-  (when-let [sd (get-in running [:plan :static-dir])]
-    (let [root (io/file (str sd))]
-      (when (.exists root)
-        (doseq [f (reverse (file-seq root))]
-          (io/delete-file f true)))))
-  nil)
-
 (def ^:export unserved-options
   "Options `slopp.http/serve!` and `slopp.http/context` accept that the generated
   call deliberately does NOT carry, and why each is missing.
@@ -397,6 +319,154 @@
          (io/delete-file f true))
        (str root)))))
 
+(defn ^:export run-code
+  "The expression the app image evaluates to start a DECLARED entry, as a
+  STRING — it crosses an nREPL wire, which carries text.
+
+  The sibling of [[serve-code]], and the difference is who decides.
+  `serve-code` GENERATES a `slopp.http/serve!` call from the store, which is
+  what makes the plan's derivations binding. This one calls what the project
+  DECLARED, because a derived call cannot know the flags a developer wants
+  and a worker is not a `serve!` call at all.
+
+  Two things about the WIRE rather than the app:
+
+  **The namespace is REQUIRED, as a form.** The child loads the store's
+  namespaces, but a qualified symbol in evaluated position resolves only if
+  its namespace is loaded — the trap `serve-code` hit twice, with
+  `slopp.rest/validating` and the static mount.
+
+  **The call runs on a DAEMON THREAD and this expression answers
+  immediately.** A server's `-main` usually does not return; that is what
+  makes it a server. Called inline it would wedge the nREPL reply that is
+  slopp's only evidence the start happened, and a wedged wire is
+  indistinguishable from a slow image. Daemon, so it cannot outlive the child
+  — which already dies with its parent through the watchdog.
+
+  **What `:started` proves, and what it does not.** It proves the namespace
+  loaded and the thread spawned. It says nothing about whether the app came
+  up: a declared entry that throws on its second line reports `:started` and
+  is dead. That is the cost of calling an arbitrary fn instead of generating
+  one whose return value is a bound socket, and it is why a declared entry's
+  address is DECLARED rather than observed — slopp has nothing to observe it
+  from. Whether it is HEALTHY is the currency stamp's question, not this
+  expression's.
+
+  Positional rather than a map: two fields at a module boundary would buy a
+  schema and a key-naming rule for nothing."
+  [main args]
+  (pr-str
+   (list 'do
+         (list 'require (list 'quote (symbol (namespace main))))
+         (list 'doto (list 'Thread. (list 'fn [] (list* main args)))
+               (list '.setDaemon true)
+               (list '.start))
+         :started)))
+
+(defn serve-code
+  "The expression the app image evaluates to start serving `plan`, as a
+  STRING — it crosses an nREPL wire, which carries text.
+
+  This is where the directive actually lands: the app writes no `serve!`
+  call, so slopp writes it, from the plan. Generating it rather than asking
+  the app for it is what makes `serve-plan`'s derivations binding — a
+  hand-written call could disagree with them, and the running server would be
+  the one that disagreed.
+
+  **It must carry what the app NEEDS, not only where to serve.** The first
+  cut generated four of `serve!`'s options — namespaces, host, port, adapter
+  — and dropped `:http/perform-ctx`, `:http/auth-config`, `:http/routes` and
+  `:http/max-body-bytes`, which is every option describing the application
+  rather than its address. Measured on a real app: handlers taking
+  `:http/deps` received nil, which either 500s (loud) or answers 200 with an
+  empty body (silent, and worse — a client generated against that surface
+  comes back with zero endpoints and looks successful).
+
+  `:http/perform-ctx` is a CALL to the app's `^{:http/context true}` builder,
+  which is why the opts can no longer be one flat quoted map: the address
+  fields stay quoted (a namespace symbol in evaluated position is read as a
+  class name) and the context is evaluated.
+
+  **The context is built ONCE per app image — and the app image is REPLACED
+  at every refresh.** So state accumulated in it does not survive a `done`:
+  an atom the builder creates is a new atom each time, and an app that keeps
+  a registry there will find it empty after any done point, silently. Say so
+  to anyone building one; the alternative — hot-loading a refresh into the
+  RUNNING image instead of booting a new one — is the change that would fix
+  it, and it is not made yet.
+
+  `:http/routes` USED to be dropped for a reason that sounded structural —
+  static mounts need the store's bytes and the child image has no store. It
+  was not structural: `mount-routes` takes a READER, so materializing the
+  bytes and handing the child a file reader serves them without the child
+  ever seeing a store. That is what `materialize-static!` does, and it is why
+  a UI's stylesheet and cljs bundle now reach a managed server.
+
+  **`:http/auth-config` is still dropped, and it is the last one.** An app
+  with auth gets a managed server on which identity does not resolve. There
+  is no switch to turn the managed server off — [[managed?]] is derived — so
+  this is a gap to close, not a case to configure around.
+
+  **It evaluates to the BOUND port — an integer.** `repl/eval!` hands a throw
+  back as a STRING, so an integer is unambiguous evidence a socket is open;
+  anything else is the failure, in its own representation."
+  [plan]
+  (let [builder (:context-builder plan)
+        mounts  (not-empty (:static plan))
+        opts    (cond-> {:http/namespaces (list 'quote (vec (:namespaces plan)))
+                         :http/host       (:host plan)
+                         :http/port       (:port plan)
+                         :http/adapter    (:adapter plan)}
+                  (:max-body-bytes plan)
+                  (assoc :http/max-body-bytes (:max-body-bytes plan))
+                  ;; a shell declares THAT it is one; this is the url it
+                  ;; injects. Dropping it would make every app with a shell
+                  ;; refuse to assemble on the managed server — the loud
+                  ;; failure, but a failure the dev server would own
+                  (:bundle plan)
+                  (assoc :webapp/bundle (:bundle plan))
+                  ;; where `rest.enabled` stops being a line in a config file.
+                  ;; The app writes no serve! call, so the capability switch has
+                  ;; to reach the GENERATED one or the boundary exists and
+                  ;; nothing ever invokes it.
+                  ;;
+                  ;; A symbol rather than the validators inline: the plan stays
+                  ;; data, and the child resolves it — which is why the require
+                  ;; below is not optional.
+                  (:validate? plan)
+                  (assoc :http/wrap-context 'slopp.rest/validating)
+                  builder
+                  (assoc :http/perform-ctx (list builder))
+                  mounts
+                  (assoc :http/routes
+                         (list 'slopp.http.static/mount-routes
+                               mounts
+                               (list 'slopp.http.static/file-or-resource-reader
+                                     (:static-dir plan))))
+                  ;; the client route table, QUOTED — page symbols are
+                  ;; addresses here, not calls; dispatch only matches the
+                  ;; patterns to derive a shell's status (200 on a routed
+                  ;; address, 404 with the same shell bytes on one the
+                  ;; client table does not know)
+                  (seq (:page-routes plan))
+                  (assoc :webapp/routes
+                         (list 'quote (mapv vec (:page-routes plan)))))]
+    (pr-str (list* 'do
+                   (list 'require ''slopp.http)
+                   (concat
+                    (when mounts
+                      [(list 'require ''slopp.http.static)])
+                    ;; the child resolves slopp.rest/validating only if it
+                    ;; REQUIRED the namespace. A qualified symbol in the opts
+                    ;; would look right and throw at serve time — the same trap
+                    ;; the static mount hit, which is why both are asserted as
+                    ;; require FORMS rather than as substrings.
+                    (when (:validate? plan)
+                      [(list 'require ''slopp.rest)])
+                    (when builder
+                      [(list 'require (list 'quote (symbol (namespace builder))))])
+                    [(list :port (list 'slopp.http/serve! opts))])))))
+
 (defn- boot!
   "Bring up an app image for `store` and load its web surface into it —
   WITHOUT serving. `{:image :plan}`, or `{:reason …}` and no live process.
@@ -459,58 +529,6 @@
         (repl/stop! img)
         {:reason (str "the app image did not come up: " (ex-message t))}))))
 
-(defn ^:export self-served?
-  "Whether the calling process ALREADY serves everything `store` would —
-  `already-served` being the namespaces it has mounted itself.
-
-  The one true case for not managing a store's app server, and the reason
-  it is derived rather than declared. Managing this store would boot a
-  second image and serve a SNAPSHOT of the very surface you are looking at,
-  one done point behind the page in front of you — not a port conflict, a
-  staler copy. slopp's own store is that case: its web surface is the
-  reviewer API the live session already serves, over the LIVE store.
-
-  It replaced the `dev.server` capability, which asked every project a
-  question only one store on earth should answer. That misfired exactly as
-  a footgun does: the second project to meet it set it false because its
-  static ASSETS were 404ing, and the switch then presented a bug as a
-  preference for a week. Computing it means a project cannot answer wrong,
-  and cannot use the answer to paper over something else.
-
-  **A store serving NOTHING is not self-served**, though every one of its
-  zero namespaces is trivially already served. Vacuous truth here would
-  exempt every non-web project for a reason that has nothing to do with
-  them — the emptiness guard, in the position where it actually bites."
-  [store already-served]
-  (let [nses (set (rules.http/serving-namespaces store))]
-    (boolean (and (seq nses)
-                  (every? (set already-served) nses)))))
-
-(defn ^:export managed?
-  "Whether slopp should run this store's dev instance while someone works on
-  it — `already-served` being what the calling process has mounted itself.
-
-  Two reasons, either sufficient. A DECLARED entry (`app.main`) is the
-  project saying what its dev instance is — a worker, a daemon, a main — and
-  that is reason enough whatever its HTTP surface. Otherwise `http.enabled`
-  says the project SERVES HTTP — that is what makes the web rules and
-  `query_surface` exist, and production reads it — unless this process already
-  serves that surface itself ([[self-served?]]): a store whose surface this
-  process already serves must not get a second, staler copy of it.
-
-  **Nothing a web project configures decides this, and that is the point.** A
-  project under development should not have to think about turning its server
-  on, or keeping it current — those are slopp's job, and a per-project switch
-  is an invitation to answer a question nobody should be asked.
-
-  Deliberately NOT folded into `serve-plan`. That answers \"what would this
-  store serve, and where\", which production asks too, and a dev-only
-  exemption in it would be an answer to a question it was not asked."
-  [store already-served]
-  (boolean (or (capabilities/effective store "app.main")
-               (and (capabilities/effective store "http.enabled")
-                    (not (self-served? store already-served))))))
-
 (defn- bind-failure
   "The sentence a failed bind should REPORT, given the `port` asked for and
   the `raw` failure the app image handed back.
@@ -549,50 +567,6 @@
     (str d " — free it, or set http.port to another")
     (str "the app image would not serve on port " port ": " raw)))
 
-(defn ^:export run-code
-  "The expression the app image evaluates to start a DECLARED entry, as a
-  STRING — it crosses an nREPL wire, which carries text.
-
-  The sibling of [[serve-code]], and the difference is who decides.
-  `serve-code` GENERATES a `slopp.http/serve!` call from the store, which is
-  what makes the plan's derivations binding. This one calls what the project
-  DECLARED, because a derived call cannot know the flags a developer wants
-  and a worker is not a `serve!` call at all.
-
-  Two things about the WIRE rather than the app:
-
-  **The namespace is REQUIRED, as a form.** The child loads the store's
-  namespaces, but a qualified symbol in evaluated position resolves only if
-  its namespace is loaded — the trap `serve-code` hit twice, with
-  `slopp.rest/validating` and the static mount.
-
-  **The call runs on a DAEMON THREAD and this expression answers
-  immediately.** A server's `-main` usually does not return; that is what
-  makes it a server. Called inline it would wedge the nREPL reply that is
-  slopp's only evidence the start happened, and a wedged wire is
-  indistinguishable from a slow image. Daemon, so it cannot outlive the child
-  — which already dies with its parent through the watchdog.
-
-  **What `:started` proves, and what it does not.** It proves the namespace
-  loaded and the thread spawned. It says nothing about whether the app came
-  up: a declared entry that throws on its second line reports `:started` and
-  is dead. That is the cost of calling an arbitrary fn instead of generating
-  one whose return value is a bound socket, and it is why a declared entry's
-  address is DECLARED rather than observed — slopp has nothing to observe it
-  from. Whether it is HEALTHY is the currency stamp's question, not this
-  expression's.
-
-  Positional rather than a map: two fields at a module boundary would buy a
-  schema and a key-naming rule for nothing."
-  [main args]
-  (pr-str
-   (list 'do
-         (list 'require (list 'quote (symbol (namespace main))))
-         (list 'doto (list 'Thread. (list 'fn [] (list* main args)))
-               (list '.setDaemon true)
-               (list '.start))
-         :started)))
-
 (defn ^:export startup-code
   "The expressions the app image evaluates to come up, in order — a vector of
   STRINGS, because they cross an nREPL wire.
@@ -626,6 +600,32 @@
           (into (when-let [p (:port plan)] [(told "slopp.app-port" p)]))
           (conj (run-code main []))))
     [(serve-code plan)]))
+
+(defn ^:export stop!
+  "Stop a running app server — whatever `start!` returned — and remove the
+  dir its static mounts were materialized into. Idempotent, and safe on a
+  `{:serving? false …}` that never had an image.
+
+  There is exactly ONE process to kill, and that is the point of the
+  dedicated image: the listener, the loaded namespaces and the process are
+  the same object, so there is no half-stopped state where a port stays
+  bound because a handle was dropped. `repl/stop!` already tolerates a
+  partially-built handle and destroys the process before touching the
+  transport.
+
+  The static dir goes here because this is the one place that still holds
+  the plan. `boot!` writes a fresh temp dir per boot, deliberately, and
+  nothing removed the previous one: 1,181 `slopp-static*` dirs, 21 MB, on
+  the machine this was found on."
+  [running]
+  (when-let [img (:image running)]
+    (repl/stop! img))
+  (when-let [sd (get-in running [:plan :static-dir])]
+    (let [root (io/file (str sd))]
+      (when (.exists root)
+        (doseq [f (reverse (file-seq root))]
+          (io/delete-file f true)))))
+  nil)
 
 (defn ^:export currency
   "Whether the app this session is running was started from the store as it

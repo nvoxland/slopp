@@ -107,6 +107,112 @@
      clojure.java.io/copy clojure.java.io/delete-file
      clojure.java.shell/sh})
 
+(def ^:export external-classes
+  "Java classes whose use IS contact with the world outside this process —
+  the interop counterpart of `external-leaves`, which can only see calls to
+  Clojure VARS.
+
+  ENUMERATED, not matched by package prefix, and that is measured rather than
+  timid. Across slopp's own production namespaces the java class vocabulary is
+  128 `java.lang.Exception`, 41 `Throwable`, 31 `String` — catch clauses and
+  type hints. `java.net.` holds `URI` and `URLDecoder` (pure parsing) beside
+  `ServerSocket`; `java.io.` holds `ByteArrayOutputStream` and `BufferedReader`
+  beside `File`. A prefix match would move most of the codebase out of `:pure`
+  to catch a handful of forms.
+
+  Coarse WITHIN a class, deliberately, and consistent with the existing set:
+  `clojure.java.io/file` is already an `external-leaves` anchor even though
+  constructing a `File` touches no disk. The unit slopp can see is the class.
+
+  KNOWN GAP: Java classes from third-party dependencies (`org.eclipse.jgit.*`,
+  a JDBC driver, `com.sun.net.httpserver.*`) are not here. The opaque-dependency
+  mechanism that covers this for Clojure namespaces has no Java equivalent, so
+  an app reaching a database only through a driver CLASS still reads as pure.
+  slopp's own git and jdk-server namespaces are caught anyway — by
+  `clojure.java.shell/sh` and by `InetSocketAddress` respectively — which is
+  luck, not coverage."
+  #{"java.io.File" "java.io.FileInputStream" "java.io.FileOutputStream"
+    "java.io.FileReader" "java.io.FileWriter" "java.io.RandomAccessFile"
+    "java.nio.file.Files"
+    "java.net.Socket" "java.net.ServerSocket" "java.net.DatagramSocket"
+    "java.net.InetAddress" "java.net.InetSocketAddress"
+    "java.net.URL" "java.net.URLConnection" "java.net.HttpURLConnection"
+    "java.net.http.HttpClient"
+    "java.sql.DriverManager" "java.sql.Connection"
+    "java.lang.Process" "java.lang.ProcessBuilder" "java.lang.Runtime"
+    "java.util.jar.JarFile"})
+
+(defn ^:export external-interop-vars
+  "Var nodes reaching an `external-classes` class through INTEROP — the
+  anchors the call graph structurally cannot hold, because `(ServerSocket. p)`
+  and `(HttpServer/create …)` produce no var usage and therefore no edge.
+
+  Attribution is by SOURCE SPAN: kondo's `:java-class-usages` carry no
+  `:from-var`, so a usage belongs to the `var-definition` whose
+  row/col..end-row/end-col enclose it. Top-level defns do not nest, so at most
+  one encloses.
+
+  That span test also does the right thing with the `:import` form itself,
+  which kondo reports as a class usage: it sits at the top of the file inside
+  no var definition, so importing a class is not using one. Worth stating
+  because the alternative — a namespace being external merely for naming a
+  class in its ns form — would make the ns form load-bearing in a way nothing
+  else here is. Both that and the enumerated class set are pinned by guards in
+  `index-test/interop-with-the-world-is-an-effect-even-with-no-var-to-see`,
+  each watched red against the wrong design: a `java.` prefix flags
+  `(String/valueOf x)`, and no span test attributes the `:import` to whatever
+  var happens to be defined below it.
+
+  Only what kondo can attribute to a class is visible: constructors and static
+  calls carry one, an instance call on a local (`(.accept s)`) does not,
+  because the receiver's type is not inferred. So this UNDER-reports and never
+  over-reports, which is the right direction for a set that feeds a refusal."
+  [analysis]
+  (let [defs    (:var-definitions analysis)
+        inside? (fn [{:keys [row col end-row end-col]} u]
+                  (let [ur (:row u) uc (:col u)]
+                    (and (>= ur row) (<= ur end-row)
+                         (or (> ur row) (>= uc col))
+                         (or (< ur end-row) (<= uc end-col)))))]
+    (set (for [u (:java-class-usages analysis)
+               :when (contains? external-classes (:class u))
+               d defs
+               :when (inside? d u)]
+           (node (:ns d) (:name d))))))
+
+(defn ^:export effectful-vars
+  "Set of user var nodes that transitively reach an effectful anchor (D6).
+  An anchor is a `!`-leaf, a bang-named callee, OR (M3) a call into an OPAQUE
+  external dependency — a target whose namespace `external-ns?` accepts and
+  which `pure-vars` does not cover (worst-case: slopp can't see the dep's body,
+  so the call is effectful unless the author asserts it pure). `pure-vars` is
+  matched at TWO granularities: the fully-qualified var (`ext.lib/go`) OR its
+  bare namespace (`ext.lib`) — so a whole pure library can be narrowed without
+  enumerating every var. Monotonic fixpoint — cycle-safe. 1-arg = the pre-M3
+  behavior (no external boundary).
+
+  `external-interop-vars` seeds it too, at every arity: interop produces no var
+  usage and so no call-graph edge, which left a namespace that opens a socket
+  and blocks on `accept` effect-free by every derivation here — and therefore
+  declarable `:pure`. The `!`-naming rule did not catch it either, since that
+  fires when a non-bang fn REACHES an effect and nothing reached one."
+  ([analysis] (effectful-vars analysis nil nil))
+  ([analysis external-ns? pure-vars]
+   (let [edges (call-graph analysis)
+         ext?  (or external-ns? (constantly false))
+         pure  (or pure-vars #{})
+         pure? (fn [t] (or (contains? pure t)
+                           (contains? pure (some-> (namespace t) symbol))))
+         anchor? (fn [t]
+                   (or (effectful-leaves t)
+                       (bang-target? t)
+                       (and (ext? (some-> (namespace t) symbol))
+                            (not (pure? t)))))]
+     (loop [eff (into (external-interop-vars analysis)
+                      (for [[n ts] edges :when (some anchor? ts)] n))]
+       (let [eff' (into eff (for [[n ts] edges :when (some eff ts)] n))]
+         (if (= eff eff') eff (recur eff')))))))
+
 (defn ^:export bang?
   "Does `nm` end in `!` — i.e. does it CLAIM to be effectful? The D6
   soundness bound rests on this: cross-namespace effects are visible to the
@@ -121,6 +227,28 @@
   bang-named by convention."
   [d]
   (= 'clojure.test/deftest (:defined-by d)))
+
+(defn ^:export effect-violations
+  "Vars that are computed effectful (D6) but NOT `!`-named — the one actionable
+  direction: name it `!`. Each {:var node :effectful? true :named-bang? false
+  :suggest name!}. `external-ns?`/`pure-vars` (M3) extend the anchors to
+  opaque-dependency calls. Exemptions:
+  - `deftest` vars (T1) — tests exercise effects but are never banged.
+  - `-main` — an effectful entry point, never banged by convention.
+  - the REVERSE direction (banged but computed pure) is NOT reported: a `!` is a
+    human assertion of effectfulness, and the analyzer can't see interop/opaque
+    effects (`.close`, a socket/JGit write), so it must not demand the `!` be
+    removed. Only a MISSING `!` is a real signal."
+  ([analysis] (effect-violations analysis nil nil))
+  ([analysis external-ns? pure-vars]
+   (let [eff (effectful-vars analysis external-ns? pure-vars)]
+     (for [d (:var-definitions analysis)
+           :when (not (test-definition? d))
+           :when (not= '-main (:name d))
+           :let [n (node (:ns d) (:name d))]
+           :when (and (contains? eff n) (not (bang? (:name d))))]
+       {:var n :effectful? true :named-bang? false
+        :suggest (str (:name d) "!")}))))
 
 (defn ^:export references
   "Usages of `to-ns/to-name` — who references this var."
@@ -166,6 +294,92 @@
   '#{clojure.core/rand clojure.core/rand-int clojure.core/rand-nth
      clojure.core/random-uuid clojure.core/shuffle
      clojure.core/slurp clojure.core/line-seq clojure.core/read-line})
+
+(defn ^:export external-origin-vars
+  "Set of user var nodes where externality ORIGINATES — they call an
+   `external-leaves` anchor, or an OPAQUE external dependency `pure-vars`
+   does not cover, or reach an `external-classes` class through INTEROP,
+   DIRECTLY, before any propagation round.
+
+   The companion question to `externally-effectful-vars`, which returns the
+   fixpoint this set seeds. The fixpoint answers *does this var REACH the
+   world*, and holds the whole call chain — an adapter and every caller of it
+   alike. This answers *is this var the reaching*, and only that distinguishes
+   an adapter from its callers.
+
+   The distinction is load-bearing because only an adapter can be asked for a
+   fake. `slopp.api` is in the fixpoint and can never leave it — it is the
+   whole operation API, and there is no coherent fake of that — so a demand
+   built on the fixpoint could not be discharged, and a gate that cannot be
+   discharged is a nag. Built on the same `anchor?` as the fixpoint, by
+   construction: the fixpoint calls this rather than re-deriving it, so the
+   two cannot disagree about what an anchor is."
+  [analysis external-ns? pure-vars]
+  (let [edges (call-graph analysis)
+        ext?  (or external-ns? (constantly false))
+        pure  (or pure-vars #{})
+        pure? (fn [t] (or (contains? pure t)
+                          (contains? pure (some-> (namespace t) symbol))))
+        anchor? (fn [t]
+                  (or (contains? external-leaves t)
+                      (and (ext? (some-> (namespace t) symbol))
+                           (not (pure? t)))))]
+    (into (external-interop-vars analysis)
+          (for [[n ts] edges :when (some anchor? ts)] n))))
+
+(defn ^:export externally-effectful-vars
+  "Set of user var nodes that transitively reach the world OUTSIDE this
+   process: an `external-leaves` anchor, or a call into an OPAQUE external
+   dependency that `pure-vars` does not cover. In-process mutation
+   (`swap!`, `reset!`, transients, refs) is NOT an anchor here.
+
+   This is what the `:internal` tier enforces. `effectful-vars` answers a
+   different question — did anything change at all — which put a memoized
+   projection in the same class as a subprocess spawn. Monotonic fixpoint,
+   cycle-safe; mirrors `effectful-vars`.
+
+   PROPAGATES FROM `external-origin-vars`, which is its seed, rather than
+   re-deriving one: the pair answers two questions off one definition of an
+   anchor, so they cannot come to disagree about what touching the world
+   means. This one says a var REACHES the world; the seed says a var IS the
+   reaching, and only the second tells an adapter from its callers."
+  [analysis external-ns? pure-vars]
+  (let [edges (call-graph analysis)]
+    (loop [eff (external-origin-vars analysis external-ns? pure-vars)]
+      (let [eff' (into eff (for [[n ts] edges :when (some eff ts)] n))]
+        (if (= eff eff') eff (recur eff'))))))
+
+(def ^:export console-leaves
+  "Core primitives that write to the console (`*out*`/`*err*`). A THIRD axis
+  alongside effects and non-determinism, and deliberately separate from both:
+
+  - NOT in `effectful-leaves`, because `!` means MUTATION by convention and
+    idiomatic Clojure never bang-names a print fn. Putting them there made the
+    D6 advisory demand `run-cli!` of every printing function (the wire-cost
+    benchmark caught it as +53 out-tokens on the one app that prints).
+  - Still forbidden in `:pure`, because printing is an observable side effect —
+    a referentially transparent core cannot do it.
+  - Allowed in `:internal`: capturable and resettable in-process
+    (`with-out-str`), needing no test isolation, so it never reaches
+    `external-leaves` either.
+
+  Exactly the shape `nondeterministic-leaves` already has: blocks `:pure`,
+  demands no bang."
+  '#{clojure.core/println clojure.core/prn clojure.core/print
+     clojure.core/printf clojure.core/pr
+     clojure.core/print-str clojure.core/newline clojure.core/flush})
+
+(defn ^:export console-vars
+  "Set of user var nodes that transitively reach a `console-leaves` anchor —
+   console output — over the call graph (monotonic fixpoint, cycle-safe;
+   mirrors `nondeterministic-vars`). What the `:pure` tier adds on top of the
+   effect and non-determinism checks; NOT consulted by the `!`-naming rule."
+  [analysis]
+  (let [edges   (call-graph analysis)
+        anchor? (fn [t] (contains? console-leaves t))]
+    (loop [cs (set (for [[n ts] edges :when (some anchor? ts)] n))]
+      (let [cs' (into cs (for [[n ts] edges :when (some cs ts)] n))]
+        (if (= cs cs') cs (recur cs'))))))
 
 (defn ^:export nondeterministic-vars
   "Set of user var nodes that transitively reach a `nondeterministic-leaves`
@@ -291,217 +505,3 @@
     :redundant-let                {:level :warning}
     :redundant-expression         {:level :warning}
     :unreachable-code             {:level :warning}}})
-
-(def ^:export console-leaves
-  "Core primitives that write to the console (`*out*`/`*err*`). A THIRD axis
-  alongside effects and non-determinism, and deliberately separate from both:
-
-  - NOT in `effectful-leaves`, because `!` means MUTATION by convention and
-    idiomatic Clojure never bang-names a print fn. Putting them there made the
-    D6 advisory demand `run-cli!` of every printing function (the wire-cost
-    benchmark caught it as +53 out-tokens on the one app that prints).
-  - Still forbidden in `:pure`, because printing is an observable side effect —
-    a referentially transparent core cannot do it.
-  - Allowed in `:internal`: capturable and resettable in-process
-    (`with-out-str`), needing no test isolation, so it never reaches
-    `external-leaves` either.
-
-  Exactly the shape `nondeterministic-leaves` already has: blocks `:pure`,
-  demands no bang."
-  '#{clojure.core/println clojure.core/prn clojure.core/print
-     clojure.core/printf clojure.core/pr
-     clojure.core/print-str clojure.core/newline clojure.core/flush})
-
-(defn ^:export console-vars
-  "Set of user var nodes that transitively reach a `console-leaves` anchor —
-   console output — over the call graph (monotonic fixpoint, cycle-safe;
-   mirrors `nondeterministic-vars`). What the `:pure` tier adds on top of the
-   effect and non-determinism checks; NOT consulted by the `!`-naming rule."
-  [analysis]
-  (let [edges   (call-graph analysis)
-        anchor? (fn [t] (contains? console-leaves t))]
-    (loop [cs (set (for [[n ts] edges :when (some anchor? ts)] n))]
-      (let [cs' (into cs (for [[n ts] edges :when (some cs ts)] n))]
-        (if (= cs cs') cs (recur cs'))))))
-
-(def ^:export external-classes
-  "Java classes whose use IS contact with the world outside this process —
-  the interop counterpart of `external-leaves`, which can only see calls to
-  Clojure VARS.
-
-  ENUMERATED, not matched by package prefix, and that is measured rather than
-  timid. Across slopp's own production namespaces the java class vocabulary is
-  128 `java.lang.Exception`, 41 `Throwable`, 31 `String` — catch clauses and
-  type hints. `java.net.` holds `URI` and `URLDecoder` (pure parsing) beside
-  `ServerSocket`; `java.io.` holds `ByteArrayOutputStream` and `BufferedReader`
-  beside `File`. A prefix match would move most of the codebase out of `:pure`
-  to catch a handful of forms.
-
-  Coarse WITHIN a class, deliberately, and consistent with the existing set:
-  `clojure.java.io/file` is already an `external-leaves` anchor even though
-  constructing a `File` touches no disk. The unit slopp can see is the class.
-
-  KNOWN GAP: Java classes from third-party dependencies (`org.eclipse.jgit.*`,
-  a JDBC driver, `com.sun.net.httpserver.*`) are not here. The opaque-dependency
-  mechanism that covers this for Clojure namespaces has no Java equivalent, so
-  an app reaching a database only through a driver CLASS still reads as pure.
-  slopp's own git and jdk-server namespaces are caught anyway — by
-  `clojure.java.shell/sh` and by `InetSocketAddress` respectively — which is
-  luck, not coverage."
-  #{"java.io.File" "java.io.FileInputStream" "java.io.FileOutputStream"
-    "java.io.FileReader" "java.io.FileWriter" "java.io.RandomAccessFile"
-    "java.nio.file.Files"
-    "java.net.Socket" "java.net.ServerSocket" "java.net.DatagramSocket"
-    "java.net.InetAddress" "java.net.InetSocketAddress"
-    "java.net.URL" "java.net.URLConnection" "java.net.HttpURLConnection"
-    "java.net.http.HttpClient"
-    "java.sql.DriverManager" "java.sql.Connection"
-    "java.lang.Process" "java.lang.ProcessBuilder" "java.lang.Runtime"
-    "java.util.jar.JarFile"})
-
-(defn ^:export external-interop-vars
-  "Var nodes reaching an `external-classes` class through INTEROP — the
-  anchors the call graph structurally cannot hold, because `(ServerSocket. p)`
-  and `(HttpServer/create …)` produce no var usage and therefore no edge.
-
-  Attribution is by SOURCE SPAN: kondo's `:java-class-usages` carry no
-  `:from-var`, so a usage belongs to the `var-definition` whose
-  row/col..end-row/end-col enclose it. Top-level defns do not nest, so at most
-  one encloses.
-
-  That span test also does the right thing with the `:import` form itself,
-  which kondo reports as a class usage: it sits at the top of the file inside
-  no var definition, so importing a class is not using one. Worth stating
-  because the alternative — a namespace being external merely for naming a
-  class in its ns form — would make the ns form load-bearing in a way nothing
-  else here is. Both that and the enumerated class set are pinned by guards in
-  `index-test/interop-with-the-world-is-an-effect-even-with-no-var-to-see`,
-  each watched red against the wrong design: a `java.` prefix flags
-  `(String/valueOf x)`, and no span test attributes the `:import` to whatever
-  var happens to be defined below it.
-
-  Only what kondo can attribute to a class is visible: constructors and static
-  calls carry one, an instance call on a local (`(.accept s)`) does not,
-  because the receiver's type is not inferred. So this UNDER-reports and never
-  over-reports, which is the right direction for a set that feeds a refusal."
-  [analysis]
-  (let [defs    (:var-definitions analysis)
-        inside? (fn [{:keys [row col end-row end-col]} u]
-                  (let [ur (:row u) uc (:col u)]
-                    (and (>= ur row) (<= ur end-row)
-                         (or (> ur row) (>= uc col))
-                         (or (< ur end-row) (<= uc end-col)))))]
-    (set (for [u (:java-class-usages analysis)
-               :when (contains? external-classes (:class u))
-               d defs
-               :when (inside? d u)]
-           (node (:ns d) (:name d))))))
-
-(defn ^:export effectful-vars
-  "Set of user var nodes that transitively reach an effectful anchor (D6).
-  An anchor is a `!`-leaf, a bang-named callee, OR (M3) a call into an OPAQUE
-  external dependency — a target whose namespace `external-ns?` accepts and
-  which `pure-vars` does not cover (worst-case: slopp can't see the dep's body,
-  so the call is effectful unless the author asserts it pure). `pure-vars` is
-  matched at TWO granularities: the fully-qualified var (`ext.lib/go`) OR its
-  bare namespace (`ext.lib`) — so a whole pure library can be narrowed without
-  enumerating every var. Monotonic fixpoint — cycle-safe. 1-arg = the pre-M3
-  behavior (no external boundary).
-
-  `external-interop-vars` seeds it too, at every arity: interop produces no var
-  usage and so no call-graph edge, which left a namespace that opens a socket
-  and blocks on `accept` effect-free by every derivation here — and therefore
-  declarable `:pure`. The `!`-naming rule did not catch it either, since that
-  fires when a non-bang fn REACHES an effect and nothing reached one."
-  ([analysis] (effectful-vars analysis nil nil))
-  ([analysis external-ns? pure-vars]
-   (let [edges (call-graph analysis)
-         ext?  (or external-ns? (constantly false))
-         pure  (or pure-vars #{})
-         pure? (fn [t] (or (contains? pure t)
-                           (contains? pure (some-> (namespace t) symbol))))
-         anchor? (fn [t]
-                   (or (effectful-leaves t)
-                       (bang-target? t)
-                       (and (ext? (some-> (namespace t) symbol))
-                            (not (pure? t)))))]
-     (loop [eff (into (external-interop-vars analysis)
-                      (for [[n ts] edges :when (some anchor? ts)] n))]
-       (let [eff' (into eff (for [[n ts] edges :when (some eff ts)] n))]
-         (if (= eff eff') eff (recur eff')))))))
-
-(defn ^:export effect-violations
-  "Vars that are computed effectful (D6) but NOT `!`-named — the one actionable
-  direction: name it `!`. Each {:var node :effectful? true :named-bang? false
-  :suggest name!}. `external-ns?`/`pure-vars` (M3) extend the anchors to
-  opaque-dependency calls. Exemptions:
-  - `deftest` vars (T1) — tests exercise effects but are never banged.
-  - `-main` — an effectful entry point, never banged by convention.
-  - the REVERSE direction (banged but computed pure) is NOT reported: a `!` is a
-    human assertion of effectfulness, and the analyzer can't see interop/opaque
-    effects (`.close`, a socket/JGit write), so it must not demand the `!` be
-    removed. Only a MISSING `!` is a real signal."
-  ([analysis] (effect-violations analysis nil nil))
-  ([analysis external-ns? pure-vars]
-   (let [eff (effectful-vars analysis external-ns? pure-vars)]
-     (for [d (:var-definitions analysis)
-           :when (not (test-definition? d))
-           :when (not= '-main (:name d))
-           :let [n (node (:ns d) (:name d))]
-           :when (and (contains? eff n) (not (bang? (:name d))))]
-       {:var n :effectful? true :named-bang? false
-        :suggest (str (:name d) "!")}))))
-
-(defn ^:export external-origin-vars
-  "Set of user var nodes where externality ORIGINATES — they call an
-   `external-leaves` anchor, or an OPAQUE external dependency `pure-vars`
-   does not cover, or reach an `external-classes` class through INTEROP,
-   DIRECTLY, before any propagation round.
-
-   The companion question to `externally-effectful-vars`, which returns the
-   fixpoint this set seeds. The fixpoint answers *does this var REACH the
-   world*, and holds the whole call chain — an adapter and every caller of it
-   alike. This answers *is this var the reaching*, and only that distinguishes
-   an adapter from its callers.
-
-   The distinction is load-bearing because only an adapter can be asked for a
-   fake. `slopp.api` is in the fixpoint and can never leave it — it is the
-   whole operation API, and there is no coherent fake of that — so a demand
-   built on the fixpoint could not be discharged, and a gate that cannot be
-   discharged is a nag. Built on the same `anchor?` as the fixpoint, by
-   construction: the fixpoint calls this rather than re-deriving it, so the
-   two cannot disagree about what an anchor is."
-  [analysis external-ns? pure-vars]
-  (let [edges (call-graph analysis)
-        ext?  (or external-ns? (constantly false))
-        pure  (or pure-vars #{})
-        pure? (fn [t] (or (contains? pure t)
-                          (contains? pure (some-> (namespace t) symbol))))
-        anchor? (fn [t]
-                  (or (contains? external-leaves t)
-                      (and (ext? (some-> (namespace t) symbol))
-                           (not (pure? t)))))]
-    (into (external-interop-vars analysis)
-          (for [[n ts] edges :when (some anchor? ts)] n))))
-
-(defn ^:export externally-effectful-vars
-  "Set of user var nodes that transitively reach the world OUTSIDE this
-   process: an `external-leaves` anchor, or a call into an OPAQUE external
-   dependency that `pure-vars` does not cover. In-process mutation
-   (`swap!`, `reset!`, transients, refs) is NOT an anchor here.
-
-   This is what the `:internal` tier enforces. `effectful-vars` answers a
-   different question — did anything change at all — which put a memoized
-   projection in the same class as a subprocess spawn. Monotonic fixpoint,
-   cycle-safe; mirrors `effectful-vars`.
-
-   PROPAGATES FROM `external-origin-vars`, which is its seed, rather than
-   re-deriving one: the pair answers two questions off one definition of an
-   anchor, so they cannot come to disagree about what touching the world
-   means. This one says a var REACHES the world; the seed says a var IS the
-   reaching, and only the second tells an adapter from its callers."
-  [analysis external-ns? pure-vars]
-  (let [edges (call-graph analysis)]
-    (loop [eff (external-origin-vars analysis external-ns? pure-vars)]
-      (let [eff' (into eff (for [[n ts] edges :when (some eff ts)] n))]
-        (if (= eff eff') eff (recur eff'))))))

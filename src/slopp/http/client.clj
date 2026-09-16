@@ -25,6 +25,33 @@
   their own. That is why the callers share one adapter suite."
   (:require [clojure.string :as str]))
 
+(def ^:export default-timeout-ms
+  "The timeout a caller should apply when it has no better number: 10 seconds.
+
+  **Published rather than applied**, and the distinction is the one
+  [[request]]'s docstring defends: that function holds no policy, so it does
+  not reach into a caller's request and add a key the caller did not write.
+  What it can do is stop every call site inventing a number — or, as measured,
+  inventing NONE.
+
+  **Omitting `:http/timeout-ms` means wait forever**, which is a policy chosen
+  by silence rather than a neutral default. That is not a hypothetical: a
+  consuming store's only outbound call site had no timeout, and so did two of
+  slopp's own — including `slopp.http.jwks/fetch-jwks!`, which runs at server
+  startup on the auth path and whose docstring promises to fail LOUDLY at
+  startup. A hang is the loudest failure to experience and the quietest to
+  read: the server never finishes coming up, naming nothing.
+
+  Ten seconds is a judgement rather than a measurement: long enough that a slow
+  but working far side is not cut off, short enough that a hung one is not
+  mistaken for a slow one for minutes. A call on a REQUEST path wants far less;
+  a startup fetch can afford this.
+
+  **Expiry:** if callers keep forgetting it, the answer is to make [[request]]
+  apply it and accept the policy — this exists so that decision can be made
+  once, with the call sites visible, rather than by each of them separately."
+  10000)
+
 (defn ^:export fake-requester
   "An in-memory adapter of the [[request]] port, serving `routes` at `base-url`.
 
@@ -79,33 +106,6 @@
                                    (map (fn [[k v]] [(str/lower-case (str k)) (str v)]))
                                    (:headers r))})
             {:http/status 404 :http/body "" :http/headers {}}))))))
-
-(def ^:export default-timeout-ms
-  "The timeout a caller should apply when it has no better number: 10 seconds.
-
-  **Published rather than applied**, and the distinction is the one
-  [[request]]'s docstring defends: that function holds no policy, so it does
-  not reach into a caller's request and add a key the caller did not write.
-  What it can do is stop every call site inventing a number — or, as measured,
-  inventing NONE.
-
-  **Omitting `:http/timeout-ms` means wait forever**, which is a policy chosen
-  by silence rather than a neutral default. That is not a hypothetical: a
-  consuming store's only outbound call site had no timeout, and so did two of
-  slopp's own — including `slopp.http.jwks/fetch-jwks!`, which runs at server
-  startup on the auth path and whose docstring promises to fail LOUDLY at
-  startup. A hang is the loudest failure to experience and the quietest to
-  read: the server never finishes coming up, naming nothing.
-
-  Ten seconds is a judgement rather than a measurement: long enough that a slow
-  but working far side is not cut off, short enough that a hung one is not
-  mistaken for a slow one for minutes. A call on a REQUEST path wants far less;
-  a startup fetch can afford this.
-
-  **Expiry:** if callers keep forgetting it, the answer is to make [[request]]
-  apply it and accept the policy — this exists so that decision can be made
-  once, with the call sites visible, rather than by each of them separately."
-  10000)
 
 (defonce ^{:private true
            :adapter "http — this IS the reaching. It is the one sanctioned place in the store that builds an HttpClient; every other caller takes a requester as a parameter and gets `fake-requester` plus `requester-contract` for free."

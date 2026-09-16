@@ -1,4 +1,4 @@
-(ns slopp-server.daemon.hooks
+(ns slopp-server.process.hooks
   "What the plugin's hooks decide, as pure functions the daemon's hook
   endpoint calls — so a Claude Code hook is one shell call that posts its
   payload and prints the answer, and the rules live here, tested, rather
