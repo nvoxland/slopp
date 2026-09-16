@@ -213,10 +213,10 @@
                  "(defn e [] {:dir \"loose\"})\n"
                  "(defn f [m] (api/open! m))\n"
                  "(defn g [] (api/open!))\n")
-        out (refactor/requalify-call-args src #{"api/open!"} "dir" "slopp.api")]
+        out (refactor/requalify-call-args src #{"api/open!"} "dir" "slopp.ops")]
     (testing "the target fn's first-arg literals are qualified"
-      (is (re-find #"\(api/open! \{:slopp\.api/dir \"x\"\}\)" out) out)
-      (is (re-find #"\{:slopp\.api/dir \"y\" :warm-spare\? true\}" out) out))
+      (is (re-find #"\(api/open! \{:slopp\.ops/dir \"x\"\}\)" out) out)
+      (is (re-find #"\{:slopp\.ops/dir \"y\" :warm-spare\? true\}" out) out))
     (testing "a SAME-NAMED fn in another namespace is untouched — the bug a
               dry-run caught by reporting 62 forms where the graph said 60"
       (is (re-find #"\(db/open! \{:dir \"z\"\}\)" out) out))

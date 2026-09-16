@@ -851,7 +851,8 @@
                         :handler (fn [_] {:status 200 :body {}})
                         :http/resolve {:session [:project/reader [:path-params :id]]}}]}))))
 
-(deftest a-resolve-failure-maps-through-the-response-pipeline
+(deftest ^{:bare-throw-ok "the generic-500 branch is DEFINED by a throw that is not an ex-info carrying :http/status"}
+  a-resolve-failure-maps-through-the-response-pipeline
   ;; A :http/resolve dependency is fetched through the read-performer
   ;; vocabulary, and a resolver that cannot answer — an unknown tenant, say —
   ;; must refuse the way a read performer does: an ex-info carrying
@@ -873,9 +874,12 @@
         (is (= 404 (:status r)) (pr-str r))
         (is (= "no such tenant" (get-in r [:body :error])))))
     (testing "any other resolver throw is a generic 500, detail not leaked"
+      ;; the bare RuntimeException is the SUBJECT here: the generic-500 branch is
+      ;; defined by a throw that is NOT an ex-info carrying :http/status, so the
+      ;; test has to raise exactly that. Discharged by ^{:bare-throw-ok …} on the
+      ;; deftest name above.
       (let [r (slopp.http/handle!
-               (ctx (fn [_ _] (throw ^{:bare-throw-ok "the generic-500 branch is DEFINED by a throw that is not an ex-info carrying :http/status"}
-                                     (RuntimeException. "boom"))))
+               (ctx (fn [_ _] (throw (RuntimeException. "boom"))))
                {:request-method :get :uri "/t/x"})]
         (is (= 500 (:status r)) (pr-str r))
         (is (= "internal server error" (get-in r [:body :error])))))))

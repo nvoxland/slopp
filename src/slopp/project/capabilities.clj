@@ -105,10 +105,10 @@
   wildcard patterns. nil = no such capability (the unknown-key refusal
   signal; a typo'd key must never silently do nothing).
 
-  Takes the REGISTRY in the 2-arity, because `dev` is governed by its own
-  (`slopp.project.dev/registry`) and the lookup — exact, then pattern — is
-  the same question whichever set of rows is asked. The 1-arity is the
-  capability registry, which is what every existing caller means."
+  Takes an explicit row-set in the 2-arity so the lookup — exact, then
+  pattern — is one implementation whichever registry is asked: `dev` overrides
+  reuse this same machinery against the capability rows. The 1-arity defaults
+  to the capability registry, which is what every existing caller means."
   ([k] (find-entry registry k))
   ([rows k]
    (let [k (str k)]

@@ -1790,10 +1790,11 @@
   ;; pattern has to be replicable for app type #2 without renaming type #1.
   ;; The generic surfaces must therefore not reach into it.
   ;;
-  ;; slopp.mcp is the one exception, BY ROLE rather than by convenience: it is
-  ;; the tool transport, so it wires every module's operations to a tool name
-  ;; and necessarily touches all of them. Spelled at module grain because that
-  ;; is the grain the exception is true at — the transport, not one namespace.
+  ;; The tool transport (slopp-server.mcp) wires every module's operations to a
+  ;; tool name and so necessarily touches all of them — but it lives in the
+  ;; slopp-server.* APPLICATION family, outside the slopp.* framework scope this
+  ;; check walks, so it needs no exception here. Framework code proper has no
+  ;; reason to reach web tooling.
   ;;
   ;; Asserted rather than left to the module gate, which states a weaker thing.
   ;; slopp.read -> slopp.webdev is not a CYCLE, so the gate would only ask for
@@ -1808,8 +1809,7 @@
   ;; violation from the check built to find it, which is the third time that
   ;; shape has been recorded in this restructure.
   (let [webdev?  #(boolean (re-matches #"slopp\.webdev(\..*)?" (str %)))
-        exempt?  #(boolean (or (re-matches #"slopp\.mcp(\..*)?" (str %))
-                               (re-find #"-test$" (str %))))
+        exempt?  #(boolean (re-find #"-test$" (str %)))
         reaching (for [n    (all-ns)
                        :let [nm (ns-name n)]
                        :when (and (re-find #"^slopp\." (str nm))

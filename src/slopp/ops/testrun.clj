@@ -100,9 +100,21 @@
 
 (defn ^{:export "slopp.verification"} auto-parallel
   "Default shard count for an external run over `n` test namespaces on a
-  `cores`-core box. Each shard reloads the WHOLE materialized store, so
-  sharding only pays at real scale: 1 below ~8 test nses (boot overhead
-  beats the gain), then n/8 shards, capped at 4 and at half the cores."
+  `cores`-core box. Each shard reloads the WHOLE materialized store AND spawns
+  the child image JVMs its ^:external tests boot, so sharding only pays at real
+  scale: 1 below ~8 test nses (boot overhead beats the gain), then n/8 shards,
+  capped at 4 and at half the cores.
+
+  **The 4 is a MEMORY cap, not a core cap, and it stays 4 even on a many-core
+  box.** Raising it to 6 on a 14-core/36GB M4 Max cut ~15% off the wall time in
+  isolation — but each shard's child-image fan-out is ~2-4GB, and under normal
+  load (a heavy dev app plus sessions running beside the check) the sixth shard
+  OOM-killed the DAEMON, which takes every session with it. The count must also
+  stay DETERMINISTIC — a shard assignment that varied between runs would make a
+  flake unreproducible — so it cannot be dialed by free memory at runtime. 4 is
+  the value that holds on a loaded dev machine; the lever for a faster tier is
+  FEWER boots (splitting the heaviest namespace so the floor drops), not more
+  shards."
   [n cores]
   (max 1 (min 4 (quot cores 2) (quot n 8))))
 

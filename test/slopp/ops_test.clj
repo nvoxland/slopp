@@ -1042,25 +1042,23 @@
                   " alone to confirm."))))))
 
 (deftest ^:external a-built-cli-app-RUNS-outside-slopp-entirely
-  ;; The cli counterpart of the web run-it test below, and it exists for the
-  ;; same reason: every other build! assertion is about SHAPE — a file is
-  ;; present, deps.edn contains X — and the whole class of bug this wave was
-  ;; about passes every shape assertion and dies on first require.
+  ;; The cli counterpart of the web run-it test, and it exists for the same
+  ;; reason: every other build! assertion is about SHAPE — a file is present,
+  ;; deps.edn contains X — and the whole class of bug this wave was about passes
+  ;; every shape assertion and dies on first require. The SHAPE half, including
+  ;; the negative control that the deps derivation is load-bearing, lives in the
+  ;; fast in-image tier now (a-build-declares-the-vendored-frameworks-deps).
+  ;; This test boots real JVMs only for what a subprocess alone can prove.
   ;;
-  ;; It carries three claims no shape check can make.
+  ;; It carries two runtime claims no shape check can make.
   ;;
-  ;; (1) The framework is the REAL `slopp.cli` / `slopp.cli.spec`, read off the
-  ;; classpath rather than faked, because the property under test is that
-  ;; `slopp.cli.spec` requires malli and a consuming tree must be told so. A
-  ;; hand-written stub would be a stub that happens to agree today.
-  ;;
-  ;; (2) The generated entry is EXECUTED. `build!` writes a launcher the author
+  ;; (1) The generated entry is EXECUTED. `build!` writes a launcher the author
   ;; never wrote; a test asserting that file exists proves nothing about whether
   ;; the program parses argv, sets an exit code, or has any commands at all —
   ;; and `commands-in` finds commands with `find-ns`, so a launcher that failed
   ;; to require its own namespaces would run fine and simply know nothing.
   ;;
-  ;; (3) The vendor boundary holds AT RUNTIME. Two families are declared and one
+  ;; (2) The vendor boundary holds AT RUNTIME. Two families are declared and one
   ;; is USED, so a store that reaches for neither the namespaces nor the markers
   ;; of `http` must not end up able to load `slopp.http`.
   ;;
@@ -1111,13 +1109,6 @@
                 "vendoring every family would make (require 'slopp.http) succeed
                  in a project that never enabled http"))
 
-          (testing "and only the used family's deps are declared"
-            (let [d (edn/read-string (slurp (io/file dir "deps.edn")))]
-              (is (contains? (:deps d) 'metosin/malli)
-                  (str "slopp.cli.spec requires malli: " (pr-str (:deps d))))
-              (is (nil? (get (:deps d) 'garden/garden))
-                  (str "a cli app must not be handed http's deps: " (pr-str (:deps d))))))
-
           (testing "the GENERATED entry runs in a JVM that has never heard of slopp"
             (let [r (sh! "hello" "world")]
               (is (zero? (:exit r))
@@ -1160,27 +1151,6 @@
               (is (not (zero? (:exit r)))
                   (str "a store that never enabled http must not be able to load"
                        " the http framework: " (:out r) (:err r)))))
-
-          (testing "negative control: without the framework's deps the same tree fails"
-            ;; a green run above proves nothing unless the red one is reachable.
-            ;; This is the exact failure the deps half of the mechanism exists
-            ;; for — vendored source whose own requires nobody declared.
-            (let [dir2 (str (Files/createTempDirectory
-                             "slopp-cli-nodeps" (make-array FileAttribute 0)))]
-              (try
-                (with-redefs [boot/framework-deps (constantly nil)]
-                  (external/build! sess dir2))
-                (let [r (clojure.java.shell/sh
-                         "clojure" "-M" "-e" "(require 'native.main)" :dir dir2)]
-                  (is (not (zero? (:exit r)))
-                      "vendored cli source with no deps declared must NOT load")
-                  (is (str/includes? (:err r) "malli")
-                      (str "and it must fail on the framework's own require: "
-                           (:err r))))
-                (finally
-                  (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f)))
-                            (.delete f))]
-                    (rm! (io/file dir2)))))))
           (finally
             (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f))) (.delete f))]
               (rm! (io/file dir)))
@@ -1817,27 +1787,22 @@
           (finally (ops/close! sess)))))))
 
 (deftest ^:external a-built-web-app-RUNS-outside-slopp-entirely
-  ;; SHAPE was never the question. Every build! test here asserted the tree
-  ;; materializes — files present, deps.edn contains X — and all of them passed
-  ;; while a built app died on its first require, because vendoring copies
-  ;; source and the pom that carried garden/hiccup/cheshire/http-kit was
-  ;; discarded with the coord.
+  ;; The irreducible claim no shape check can make: vendored framework source
+  ;; LOADS in a JVM that has never heard of slopp. The bug this exists for —
+  ;; vendored source dying on its first require because the pom that carried
+  ;; garden/hiccup/cheshire was discarded with the coord — passes every "a file
+  ;; is present" assertion; slopp-ui found it by RUNNING the tree, and slopp's
+  ;; correctness should not rest on a consumer happening to look. A fresh
+  ;; `clojure -M` in the tree is what a user's deployment sees.
   ;;
-  ;; The consumer found it, by running the tree. That is the wrong dependency:
-  ;; slopp-ui is ONE app, the next one will not report this well, and slopp's
-  ;; correctness should not rest on a consumer happening to look. So slopp owns
-  ;; a minimal web app of its own and RUNS it.
+  ;; The SHAPE half — source vendored, deps.edn declares what it requires, and
+  ;; the negative control — is in the fast in-image tier now
+  ;; (a-build-declares-the-vendored-frameworks-deps), so this test boots exactly
+  ;; once, for the one thing only a subprocess can prove.
   ;;
-  ;; A fresh JVM with no slopp on the classpath — `clojure -M` in the tree — is
-  ;; the point: an image would prove nothing, since the image is the OTHER path
-  ;; and vendors separately. This is what a user's deployment sees.
-  ;;
-  ;; The framework is FAKED, and the fake requires something external, because
-  ;; this suite runs from a checkout where boot/framework-files is nil. A first
-  ;; cut branched on that and skipped the run — leaving a behaviour test that
-  ;; asserted shape in the only environment it ever executes in, which is the
-  ;; defect it exists to catch. The stand-in has the property under test:
-  ;; requires of its own that the built deps.edn must declare.
+  ;; The framework is FAKED with a require of its own (garden) because this
+  ;; suite runs from a checkout where boot/framework-files is nil. The stand-in
+  ;; has the property under test: a require the generated deps.edn must carry.
   (with-redefs [boot/framework-files
                 (constantly
                  {"http"
@@ -1861,12 +1826,6 @@
                              "(defn ^:export stylesheet \"S.\" []\n"
                              "  (css/css-response [[:body {:color \"red\"}]]))\n"))
         (is (nil? (:error (external/build! sess dir))))
-        (testing "the framework source is IN the tree"
-          (is (.exists (io/file dir "src" "slopp" "http" "css.clj"))))
-        (testing "and what the framework itself requires is declared, or the
-                  tree carries source it cannot load"
-          (is (contains? (:deps (edn/read-string (slurp (io/file dir "deps.edn"))))
-                         'garden/garden)))
         (testing "so it LOADS in a fresh JVM that has never heard of slopp —
                   the assertion shape assertions cannot make"
           (let [r (sh-outside-slopp!
@@ -1877,26 +1836,6 @@
                      "\nout: " (:out r) "\nerr: " (:err r)))
             (is (str/includes? (:out r) ":LOADED-OK")
                 (str "out: " (:out r) "\nerr: " (:err r)))))
-        (testing "and it FIRES — without the framework's deps the same tree
-                  fails, which is the bug slopp-ui hit. A green run here proves
-                  nothing unless the red one is reachable, and every defect this
-                  wave was hidden by a check that could not fail"
-          (let [dir2 (str (Files/createTempDirectory
-                           "slopp-runs-nodeps" (make-array FileAttribute 0)))]
-            (try
-              (with-redefs [boot/framework-deps (constantly nil)]
-                (external/build! sess dir2))
-              (let [r (clojure.java.shell/sh
-                       "clojure" "-M" "-e" "(require 'runs.app)" :dir dir2)]
-                (is (not (zero? (:exit r)))
-                    "vendored source with no deps declared must NOT load")
-                (is (str/includes? (:err r) "garden")
-                    (str "and it must fail on the framework's own require: "
-                         (:err r))))
-              (finally
-                (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f)))
-                          (.delete f))]
-                  (rm! (io/file dir2)))))))
         (finally
           (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f))) (.delete f))]
             (rm! (io/file dir)))
@@ -1958,11 +1897,14 @@
         (finally (ops/close! sess))))))
 
 (deftest ^:external a-built-rest-app-ENFORCES-its-contract-outside-slopp-entirely
-  ;; The third of these, and each one exists because SHAPE assertions cannot
-  ;; make the claim: the web one because vendored source failed inside itself on
-  ;; a missing garden, the cli one because a generated entry can be present and
-  ;; do nothing. This one because a boundary that is not reachable in a
-  ;; consumer's tree is a boundary that protects slopp and nobody else.
+  ;; The third of the run-it tests, and each exists because SHAPE assertions
+  ;; cannot make the claim: the web one because vendored source failed inside
+  ;; itself on a missing garden, the cli one because a generated entry can be
+  ;; present and do nothing. This one because a boundary that is not reachable
+  ;; in a consumer's tree is a boundary that protects slopp and nobody else.
+  ;; The SHAPE half — the family vendored, its deps declared, and the negative
+  ;; control that the deps derivation is load-bearing — is in the fast in-image
+  ;; tier now (a-build-declares-the-vendored-frameworks-deps).
   ;;
   ;; What is NOT re-proved here: the socket. That is the adapter's job and
   ;; `a-built-web-app-RUNS-outside-slopp-entirely` covers it. The claim this
@@ -2048,25 +1990,6 @@
                   (str "a body declaring :sku 42 against [:sku :string] must be"
                        " refused THERE, not only here.\nout: " (:out r)
                        "\nerr: " (:err r)))))
-
-          (testing "negative control: without the framework's deps the same tree fails"
-            ;; a green run above proves nothing unless the red one is reachable
-            (let [dir2 (str (Files/createTempDirectory
-                             "slopp-rest-nodeps" (make-array FileAttribute 0)))]
-              (try
-                (with-redefs [boot/framework-deps (constantly nil)]
-                  (external/build! sess dir2))
-                (let [r (clojure.java.shell/sh
-                         "clojure" "-M" "-e" "(require 'slopp.rest)" :dir dir2)]
-                  (is (not (zero? (:exit r)))
-                      "vendored rest source with no deps declared must NOT load")
-                  (is (str/includes? (:err r) "malli")
-                      (str "and it must fail on the framework's own require: "
-                           (:err r))))
-                (finally
-                  (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f)))
-                            (.delete f))]
-                    (rm! (io/file dir2)))))))
           (finally
             (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f))) (.delete f))]
               (rm! (io/file dir)))
@@ -2750,3 +2673,69 @@
             (ops/close! sess)
             (is (not (.exists (java.io.File. ^String fwd))) "and the dir goes with the session"))))
       (finally (ops/close! sess) (clojure.java.shell/sh "rm" "-rf" dir)))))
+
+(deftest a-build-declares-the-vendored-frameworks-deps
+  ;; The SHAPE half of the built-app claims, in the FAST tier — no subprocess
+  ;; and no child JVM. build! is pure file-materialization: a lazy session
+  ;; (which boots no image) writes the tree and these assertions read its
+  ;; output. What lives in the ^:external tier next door is only the
+  ;; irreducible claim a shape check cannot make — that the tree LOADS and RUNS
+  ;; in a JVM that has never heard of slopp.
+  ;;
+  ;; The claim: vendoring copies framework SOURCE, and the generated deps.edn
+  ;; must ALSO declare what that source requires, or the built app ships code
+  ;; it cannot load — the exact bug slopp-ui hit, invisible to "a file is
+  ;; present".
+  ;;
+  ;; The family's declared dep is a UNIQUE, made-up coord, and that is what
+  ;; makes the check HERMETIC. build! folds the AMBIENT basis into the generated
+  ;; deps.edn (engine/image-deps), so a real lib — garden, malli — can arrive
+  ;; there whether or not framework-deps names it: asserting a real dep is
+  ;; ABSENT is the same non-hermeticity the ^:external negative control had (it
+  ;; depended on ~/.m2, and on the image basis once moved here — it passed
+  ;; in-image and failed in the external re-run of this namespace, whose basis
+  ;; carries garden). A coord no basis has can only reach deps.edn through
+  ;; framework-deps, so its presence proves the derivation ran and its absence
+  ;; proves nothing else put it there.
+  (let [dep    'com.example/framework-only
+        files  {"http" {"slopp/http/css.clj"
+                        (str "(ns slopp.http.css (:require [garden.core :as garden]))\n"
+                             "(defn css-response \"C.\" [rules]\n"
+                             "  {:status 200 :body (garden/css rules)})\n")}}
+        built  (fn [framework-deps-val]
+                 (let [sess (external/open! {:slopp.ops/lazy-image? true})
+                       dir  (str (Files/createTempDirectory "slopp-shape"
+                                                            (make-array FileAttribute 0)))]
+                   (try
+                     (land-unloaded! sess 'runs.app
+                                     (str "(ns runs.app\n"
+                                          "  (:require [slopp.http.css :as css]))\n\n"
+                                          "(defn ^:export stylesheet \"S.\" []\n"
+                                          "  (css/css-response [[:body {:color \"red\"}]]))\n"))
+                     (with-redefs [boot/framework-files (constantly files)
+                                   boot/framework-deps  (constantly framework-deps-val)]
+                       (let [res (external/build! sess dir)]
+                         {:error    (:error res)
+                          :vendored (.exists (io/file dir "src" "slopp" "http" "css.clj"))
+                          :deps     (:deps (edn/read-string (slurp (io/file dir "deps.edn"))))}))
+                     (finally
+                       (letfn [(rm! [f] (when (.isDirectory f) (run! rm! (.listFiles f)))
+                                 (.delete f))]
+                         (rm! (io/file dir)))
+                       (ops/close! sess)))))]
+    (testing "the vendored source is in the tree and the used family's dep is DECLARED"
+      (let [r (built {"http" {dep {:mvn/version "1.0.0"}}})]
+        (is (nil? (:error r)) (:error r))
+        (is (:vendored r) "the vendored framework source must be in the tree")
+        (is (contains? (:deps r) dep)
+            (str "the used family's declared dep must reach the generated deps.edn: "
+                 (pr-str (:deps r))))))
+    (testing "negative control: with no framework deps, the source ships but the dep is OMITTED"
+      ;; a green positive proves nothing unless this is reachable — and every
+      ;; defect this wave was hidden by a check that could not fail
+      (let [r (built nil)]
+        (is (:vendored r)
+            "the source is vendored regardless — that is the shipped-broken shape")
+        (is (nil? (get (:deps r) dep))
+            (str "with no framework deps declared, the family's coord must be"
+                 " ABSENT from deps.edn: " (pr-str (:deps r))))))))

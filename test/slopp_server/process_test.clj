@@ -157,22 +157,23 @@
   ;; Two agents on one project: one app server, owned by the project's
   ;; reader, which both sessions reach through their `:app-owner` — a delay
   ;; each, onto the one reader — so a done in either refreshes the same
-  ;; server. Different projects, different owners.
+  ;; server. Different projects, different owners. The door is slug-free: the
+  ;; project is named by X-Slopp-Dir, so the SAME dir is the same project.
   (let [d1   (tmp-dir!)
         d2   (tmp-dir!)
         ctx  (daemon/context)
-        init (fn [dir slug]
+        init (fn [dir]
                (get-in (slopp.http/handle! ctx {:request-method :post
-                                                :uri (str "/api/projects/" slug "/mcp")
+                                                :uri "/api/mcp"
                                                 :headers {"x-slopp-dir" dir}
                                                 :body {:jsonrpc "2.0" :id 1 :method "initialize"
                                                        :params {:protocolVersion "2025-03-26" :capabilities {}
                                                                 :clientInfo {:name "t" :version "0"}}}})
                        [:headers "Mcp-Session-Id"]))]
     (try
-      (let [a (daemon/lookup! (init d1 "one"))
-            b (daemon/lookup! (init d1 "one"))
-            c (daemon/lookup! (init d2 "two"))]
+      (let [a (daemon/lookup! (init d1))
+            b (daemon/lookup! (init d1))
+            c (daemon/lookup! (init d2))]
         (is (some? (:app-owner @a)) (pr-str (keys @a)))
         (is (identical? (force (:app-owner @a)) (force (:app-owner @b))) "one project, one owner")
         (is (not (identical? (force (:app-owner @a)) (force (:app-owner @c)))) "another project, another owner")
