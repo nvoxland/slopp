@@ -38,16 +38,6 @@
          (some #(when (str/starts-with? % "#") (subs % 1)) tokens)
          (seq (keep #(when (str/starts-with? % ".") (subs % 1)) tokens))]))))
 
-(defn tag
-  "The element's tag with sugar stripped: `[:input.search#q …]` is an `:input`.
-
-  Nil for a non-keyword head (a component vector before [[expand]] has run).
-  Every consumer that switches on \"what kind of element is this\" goes through
-  here, so `:h1.title` and `:h1` are one tag everywhere or nowhere."
-  [node]
-  (when (keyword? (first node))
-    (first (sugar (first node)))))
-
 (defn attrs
   "The attribute map of hiccup `node`, or nil — the second element is attrs
   only when it is a map, and `[:li \"text\"]` is ordinary hiccup.
@@ -69,6 +59,57 @@
             (seq classes) (update :class #(if %
                                             (str (str/join " " classes) " " %)
                                             (str/join " " classes)))))))))
+
+(defn handler
+  "What handles `kind` (`:click`, `:input`, `:change` …) on this element —
+  `[:fn f]`, `[:data d]`, or nil.
+
+  Two idioms, both putting the handler ON THE ELEMENT, and checked against the
+  libraries rather than inferred from one app:
+
+  - **Reagent** — `{:on-click (fn [e] …)}`. A function, translated to React's
+    `onClick`.
+  - **Replicant** — `{:on {:click …}}`, where the value is a function OR DATA.
+    Data goes to one global dispatcher registered with
+    `replicant.dom/set-dispatch!`, which receives `(event-data handler-data)`.
+
+  Neither library asks for document-level delegation, and that is why nothing
+  here emulates `.closest`: an earlier design synthesised an ancestor chain to
+  support a hand-rolled delegation pattern, which turned out to be one app's
+  workaround for a problem Replicant already solves.
+
+  ONE accessor because three readers ask this question — the click-target
+  finder, the renderer that marks `[click]`, and the driver that invokes — and
+  a screen naming a button you cannot press is worse than either half."
+  [node kind]
+  (let [a (attrs node)
+        v (or (get a (keyword (str "on-" (name kind))))
+              (get (:on a) kind))]
+    (cond
+      (nil? v) nil
+      (fn? v)  [:fn v]
+      :else    [:data v])))
+
+(defn input-handler
+  "What handles typing into this element — `[:fn f]`, `[:data d]`, or nil.
+
+  Two event NAMES because the libraries disagree and both are ordinary:
+  Reagent apps overwhelmingly write `:on-change`, and `:input` is the DOM event
+  that actually fires per keystroke, which is what a Replicant `:on` map
+  usually names. Trying one and not the other would make a field inert for half
+  the ecosystem, and inert reads as a bug in the app rather than in the reader."
+  [node]
+  (or (handler node :change) (handler node :input)))
+
+(defn tag
+  "The element's tag with sugar stripped: `[:input.search#q …]` is an `:input`.
+
+  Nil for a non-keyword head (a component vector before [[expand]] has run).
+  Every consumer that switches on \"what kind of element is this\" goes through
+  here, so `:h1.title` and `:h1` are one tag everywhere or nowhere."
+  [node]
+  (when (keyword? (first node))
+    (first (sugar (first node)))))
 
 (defn expand
   "A component vector, called the way its library would call it.
@@ -129,6 +170,86 @@
                      [x])))
          vec)))
 
+(defn nodes
+  "Every ELEMENT in `node`, depth-first, itself included.
+
+  Descends through [[kids]] and never through an attribute map, which is the
+  whole reason this is a function. A naive `(tree-seq coll? seq tree)` walks
+  into attrs, and a map entry IS a vector whose first element is usually a
+  keyword — so `[:on-click f]` comes back looking exactly like a hiccup
+  element, and a click-target search would match handlers."
+  [node]
+  (filter vector? (tree-seq vector? kids node)))
+
+(defn region
+  "The subtree `name` addresses via `:data-region`, or a THROW naming the
+  regions that do exist.
+
+  Cutting the TREE rather than the rendered lines is what makes scoping
+  independent of how the screen is being rendered. Line-based scoping looked
+  equivalent and was not: it searched for the marker the renderer emits, so it
+  worked at one detail level and threw \"no such region\" at another — over a
+  screen where the region was plainly present. It also carried the indent the
+  region happened to sit at, so an assertion about one pane broke when a
+  `<div>` moved around it. Both go away here.
+
+  Refusing is the whole reason this is a function and not a filter. A test
+  scoped to a region is ASSERTING that region is on the screen, and a scope
+  that quietly returns nothing makes every absence assertion downstream of it
+  pass — over a screen that may have rendered nothing at all.
+
+  TWO regions under one name refuse the same way an ambiguous click does. The
+  review caught this as the one addressing surface that silently took the
+  first match — and it is the surface scoped assertions ride on, where a
+  quiet guess makes a test pass against the wrong pane.
+
+  Naming the present regions rather than only the missing one is the courtesy a
+  refusal owes anywhere: the list IS the answer to the question behind the
+  mistake."
+  [node name]
+  (let [matches (filter #(= name (:data-region (attrs %))) (nodes node))]
+    (cond
+      (> (count matches) 1)
+      (throw (ex-info (str (count matches) " regions on this screen are named "
+                           (pr-str name) " — scoping to one of them is a guess,"
+                           " and an assertion against the wrong pane passes over"
+                           " the broken one. Make the names differ")
+                      {:region name :matches (count matches)}))
+
+      (= 1 (count matches))
+      ;; the pane comes back as its OWN screen: it must not re-announce the
+      ;; region the caller just named, or every scoped assertion carries a
+      ;; header saying only what was asked for
+      (let [n (first matches)]
+        (if (map? (second n))
+          (assoc n 1 (dissoc (second n) :data-region))
+          n))
+
+      :else
+      (throw (ex-info (str "no region " (pr-str name) " on this screen — "
+                           (let [have (vec (distinct (keep #(:data-region (attrs %))
+                                                           (nodes node))))]
+                             (if (seq have)
+                               (str "regions present: " (str/join ", " have))
+                               (str "this screen declares NO regions at all;"
+                                    " a pane is addressed by :data-region in"
+                                    " its attrs"))))
+                      {:region name})))))
+
+(defn- node-paths
+  "Every element under `node` (itself included), each paired with its ancestor
+  chain nearest-first: `([el (parent grandparent …)] …)`.
+
+  [[nodes]] deliberately flattens ancestry away; a click cannot. A browser
+  resolves a click on a text span by walking UP to the nearest handler —
+  bubbling — so the finder needs to know what sits above the element a label
+  names."
+  ([node] (node-paths node ()))
+  ([node ancestors]
+   (cons [node ancestors]
+         (mapcat #(when (vector? %) (node-paths % (cons node ancestors)))
+                 (kids node)))))
+
 (def inline-tags
   "Tags whose content belongs on the SAME line as its neighbours — a fact
   about READING hiccup, which is why it lives here and the renderer consumes
@@ -154,16 +275,74 @@
   way is a spurious newline."
   #{:a :span :small :strong :em :code :b :i :abbr :time :sub :sup :kbd})
 
-(defn nodes
-  "Every ELEMENT in `node`, depth-first, itself included.
+(defn form-of
+  "The `<form>` enclosing `el` within `root`, or nil.
 
-  Descends through [[kids]] and never through an attribute map, which is the
-  whole reason this is a function. A naive `(tree-seq coll? seq tree)` walks
-  into attrs, and a map entry IS a vector whose first element is usually a
-  keyword — so `[:on-click f]` comes back looking exactly like a hiccup
-  element, and a click-target search would match handlers."
-  [node]
-  (filter vector? (tree-seq vector? kids node)))
+  The relationship that makes a plain HTML control a control. A field carrying
+  no handler is not inert — its value travels to its form's `action` when the
+  form is SUBMITTED — so the enclosing form is both what a fill remembers
+  against and what a submit serialises.
+
+  Matched STRUCTURALLY rather than by identity: [[kids]] expands component
+  vectors, so two calls to [[nodes]] over one document yield equal elements
+  that are not the same objects. Two genuinely identical forms on one screen
+  would be ambiguous, and that is already refused one level up — a name that
+  answers twice is a guess, whether the duplication is in the field or in the
+  form around it."
+  [root el]
+  (first (for [f     (nodes root)
+               :when (= :form (tag f))
+               :when (some #(= el %) (nodes f))]
+           f)))
+
+(defn field
+  "The one input `name` addresses, or a THROW that says why not.
+
+  A field has no visible TEXT, so it is addressed the way a person names one:
+  its `:placeholder`, `:name`, `:id` or `:aria-label`. Whichever the app
+  happens to have written is the one that works, because requiring a
+  particular attribute would make the framework's testability someone's markup
+  decision.
+
+  Fillable means [[input-handler]] finds one, under either idiom.
+
+  Three outcomes, never one shrug: not found (and the message lists what CAN
+  be filled), found but inert (no handler — a different bug, and the one that
+  wastes an afternoon because the field is visibly right there), or ambiguous."
+  [node name]
+  (let [addressed? (fn [a] (some #{name} [(:placeholder a) (:name a) (:id a) (:aria-label a)]))
+        named      (filter #(addressed? (attrs %)) (nodes node))
+        ;; a NAMED field inside a `<form>` is fillable with no handler at all:
+        ;; its value does not travel on INPUT, it travels on SUBMIT. Refusing
+        ;; it said "typing into it can change nothing", which is a different
+        ;; statement and a false one — and it made the oldest working control
+        ;; on the web the only undrivable thing in an app.
+        fillable   (filter #(or (input-handler %)
+                                (and (:name (attrs %)) (form-of node %)))
+                           named)]
+    (cond
+      (= 1 (count fillable)) (first fillable)
+
+      (seq fillable)
+      (throw (ex-info (str (count fillable) " fields answer to " (pr-str name)
+                           " — filling one of them is a guess")
+                      {:field name :matches (count fillable)}))
+
+      (seq named)
+      (throw (ex-info (str (pr-str name) " is a field on this screen but has"
+                           " no :on-change and no :on {:input …}, so typing"
+                           " into it can change nothing")
+                      {:field name}))
+
+      :else
+      (throw (ex-info (str "no field answers to " (pr-str name)
+                           " — fillable here: "
+                           (pr-str (vec (sort (distinct (keep #(let [a (attrs %)]
+                                                                 (when (input-handler %)
+                                                                   (or (:placeholder a) (:name a)
+                                                                       (:id a) (:aria-label a))))
+                                                              (nodes node)))))))
+                      {:field name})))))
 
 (defn- raw-text
   "Every string under `node`, concatenated, with NOTHING normalized away.
@@ -210,50 +389,6 @@
   (-> (raw-text node)
       (str/replace #"\s+" " ")
       str/trim))
-
-(defn handler
-  "What handles `kind` (`:click`, `:input`, `:change` …) on this element —
-  `[:fn f]`, `[:data d]`, or nil.
-
-  Two idioms, both putting the handler ON THE ELEMENT, and checked against the
-  libraries rather than inferred from one app:
-
-  - **Reagent** — `{:on-click (fn [e] …)}`. A function, translated to React's
-    `onClick`.
-  - **Replicant** — `{:on {:click …}}`, where the value is a function OR DATA.
-    Data goes to one global dispatcher registered with
-    `replicant.dom/set-dispatch!`, which receives `(event-data handler-data)`.
-
-  Neither library asks for document-level delegation, and that is why nothing
-  here emulates `.closest`: an earlier design synthesised an ancestor chain to
-  support a hand-rolled delegation pattern, which turned out to be one app's
-  workaround for a problem Replicant already solves.
-
-  ONE accessor because three readers ask this question — the click-target
-  finder, the renderer that marks `[click]`, and the driver that invokes — and
-  a screen naming a button you cannot press is worse than either half."
-  [node kind]
-  (let [a (attrs node)
-        v (or (get a (keyword (str "on-" (name kind))))
-              (get (:on a) kind))]
-    (cond
-      (nil? v) nil
-      (fn? v)  [:fn v]
-      :else    [:data v])))
-
-(defn- node-paths
-  "Every element under `node` (itself included), each paired with its ancestor
-  chain nearest-first: `([el (parent grandparent …)] …)`.
-
-  [[nodes]] deliberately flattens ancestry away; a click cannot. A browser
-  resolves a click on a text span by walking UP to the nearest handler —
-  bubbling — so the finder needs to know what sits above the element a label
-  names."
-  ([node] (node-paths node ()))
-  ([node ancestors]
-   (cons [node ancestors]
-         (mapcat #(when (vector? %) (node-paths % (cons node ancestors)))
-                 (kids node)))))
 
 (defn locate
   "The one element `target` addresses, resolved exactly as a click resolves —
@@ -420,138 +555,3 @@
                                 (node-paths t)))]
         (or (first (remove #(contains? inline-tags (tag %)) ancestors))
             n)))))
-
-(defn region
-  "The subtree `name` addresses via `:data-region`, or a THROW naming the
-  regions that do exist.
-
-  Cutting the TREE rather than the rendered lines is what makes scoping
-  independent of how the screen is being rendered. Line-based scoping looked
-  equivalent and was not: it searched for the marker the renderer emits, so it
-  worked at one detail level and threw \"no such region\" at another — over a
-  screen where the region was plainly present. It also carried the indent the
-  region happened to sit at, so an assertion about one pane broke when a
-  `<div>` moved around it. Both go away here.
-
-  Refusing is the whole reason this is a function and not a filter. A test
-  scoped to a region is ASSERTING that region is on the screen, and a scope
-  that quietly returns nothing makes every absence assertion downstream of it
-  pass — over a screen that may have rendered nothing at all.
-
-  TWO regions under one name refuse the same way an ambiguous click does. The
-  review caught this as the one addressing surface that silently took the
-  first match — and it is the surface scoped assertions ride on, where a
-  quiet guess makes a test pass against the wrong pane.
-
-  Naming the present regions rather than only the missing one is the courtesy a
-  refusal owes anywhere: the list IS the answer to the question behind the
-  mistake."
-  [node name]
-  (let [matches (filter #(= name (:data-region (attrs %))) (nodes node))]
-    (cond
-      (> (count matches) 1)
-      (throw (ex-info (str (count matches) " regions on this screen are named "
-                           (pr-str name) " — scoping to one of them is a guess,"
-                           " and an assertion against the wrong pane passes over"
-                           " the broken one. Make the names differ")
-                      {:region name :matches (count matches)}))
-
-      (= 1 (count matches))
-      ;; the pane comes back as its OWN screen: it must not re-announce the
-      ;; region the caller just named, or every scoped assertion carries a
-      ;; header saying only what was asked for
-      (let [n (first matches)]
-        (if (map? (second n))
-          (assoc n 1 (dissoc (second n) :data-region))
-          n))
-
-      :else
-      (throw (ex-info (str "no region " (pr-str name) " on this screen — "
-                           (let [have (vec (distinct (keep #(:data-region (attrs %))
-                                                           (nodes node))))]
-                             (if (seq have)
-                               (str "regions present: " (str/join ", " have))
-                               (str "this screen declares NO regions at all;"
-                                    " a pane is addressed by :data-region in"
-                                    " its attrs"))))
-                      {:region name})))))
-
-(defn input-handler
-  "What handles typing into this element — `[:fn f]`, `[:data d]`, or nil.
-
-  Two event NAMES because the libraries disagree and both are ordinary:
-  Reagent apps overwhelmingly write `:on-change`, and `:input` is the DOM event
-  that actually fires per keystroke, which is what a Replicant `:on` map
-  usually names. Trying one and not the other would make a field inert for half
-  the ecosystem, and inert reads as a bug in the app rather than in the reader."
-  [node]
-  (or (handler node :change) (handler node :input)))
-
-(defn form-of
-  "The `<form>` enclosing `el` within `root`, or nil.
-
-  The relationship that makes a plain HTML control a control. A field carrying
-  no handler is not inert — its value travels to its form's `action` when the
-  form is SUBMITTED — so the enclosing form is both what a fill remembers
-  against and what a submit serialises.
-
-  Matched STRUCTURALLY rather than by identity: [[kids]] expands component
-  vectors, so two calls to [[nodes]] over one document yield equal elements
-  that are not the same objects. Two genuinely identical forms on one screen
-  would be ambiguous, and that is already refused one level up — a name that
-  answers twice is a guess, whether the duplication is in the field or in the
-  form around it."
-  [root el]
-  (first (for [f     (nodes root)
-               :when (= :form (tag f))
-               :when (some #(= el %) (nodes f))]
-           f)))
-
-(defn field
-  "The one input `name` addresses, or a THROW that says why not.
-
-  A field has no visible TEXT, so it is addressed the way a person names one:
-  its `:placeholder`, `:name`, `:id` or `:aria-label`. Whichever the app
-  happens to have written is the one that works, because requiring a
-  particular attribute would make the framework's testability someone's markup
-  decision.
-
-  Fillable means [[input-handler]] finds one, under either idiom.
-
-  Three outcomes, never one shrug: not found (and the message lists what CAN
-  be filled), found but inert (no handler — a different bug, and the one that
-  wastes an afternoon because the field is visibly right there), or ambiguous."
-  [node name]
-  (let [addressed? (fn [a] (some #{name} [(:placeholder a) (:name a) (:id a) (:aria-label a)]))
-        named      (filter #(addressed? (attrs %)) (nodes node))
-        ;; a NAMED field inside a `<form>` is fillable with no handler at all:
-        ;; its value does not travel on INPUT, it travels on SUBMIT. Refusing
-        ;; it said "typing into it can change nothing", which is a different
-        ;; statement and a false one — and it made the oldest working control
-        ;; on the web the only undrivable thing in an app.
-        fillable   (filter #(or (input-handler %)
-                                (and (:name (attrs %)) (form-of node %)))
-                           named)]
-    (cond
-      (= 1 (count fillable)) (first fillable)
-
-      (seq fillable)
-      (throw (ex-info (str (count fillable) " fields answer to " (pr-str name)
-                           " — filling one of them is a guess")
-                      {:field name :matches (count fillable)}))
-
-      (seq named)
-      (throw (ex-info (str (pr-str name) " is a field on this screen but has"
-                           " no :on-change and no :on {:input …}, so typing"
-                           " into it can change nothing")
-                      {:field name}))
-
-      :else
-      (throw (ex-info (str "no field answers to " (pr-str name)
-                           " — fillable here: "
-                           (pr-str (vec (sort (distinct (keep #(let [a (attrs %)]
-                                                                 (when (input-handler %)
-                                                                   (or (:placeholder a) (:name a)
-                                                                       (:id a) (:aria-label a))))
-                                                              (nodes node)))))))
-                      {:field name})))))

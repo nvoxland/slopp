@@ -1,8 +1,8 @@
 slopp-server.api: slopp.edit slopp.http slopp.index slopp.ops slopp.project slopp.read slopp.rest slopp.rules slopp.store slopp.webdev
-slopp-server.mcp: slopp-server.api slopp-server.telemetry slopp.edit slopp.ops slopp.project slopp.read slopp.rules slopp.store slopp.sync slopp.webdev slopp.http (test)
-slopp-server.process: slopp-server.api slopp-server.mcp slopp-server.telemetry slopp-server.ui slopp.cache slopp.cljnx slopp.http slopp.kernel slopp.ops slopp.otel slopp.project slopp.read slopp.rest slopp.rules slopp.store slopp.sync slopp.cache (test)
-slopp-server.telemetry: slopp.currency slopp.edit slopp.http slopp.index slopp.ops slopp.otel slopp.project slopp.read slopp.rest slopp.rules slopp.store slopp.webapp slopp.ops (test) slopp.rest (test) slopp.webdev (test)
-slopp-server.ui: slopp.http slopp.lang slopp.rest slopp.webapp slopp.cljnx (test)
+slopp-server.mcp: slopp-server.api slopp.edit slopp.ops slopp.read slopp.rules slopp.store slopp.sync slopp.webdev slopp.http (test)
+slopp-server.process: slopp-server.api slopp-server.mcp slopp-server.telemetry slopp.cache slopp.cljnx slopp.http slopp.kernel slopp.ops slopp.otel slopp.project slopp.read slopp.rest slopp.rules slopp.store slopp.sync slopp.cache (test)
+slopp-server.telemetry: slopp.ops (test) slopp.rest (test) slopp.webdev (test)
+slopp-server.ui: slopp.http slopp.lang slopp.webapp slopp.cljnx (test)
 slopp.addelete: slopp.read slopp.store slopp.ops (test)
 slopp.branch: slopp.read slopp.store slopp.ops (test)
 slopp.build-native: slopp.build slopp.ops (test)
@@ -27,7 +27,7 @@ slopp.git-client: slopp.git slopp.read slopp.ops (test)
 slopp.git-concurrency: slopp.git slopp.ops (test)
 slopp.git-projection: slopp.git slopp.read slopp.store slopp.ops (test)
 slopp.gitauthor: slopp.git
-slopp.history: slopp-server.mcp slopp-server.telemetry slopp.read slopp.store slopp-server.api (test) slopp.ops (test)
+slopp.history: slopp-server.mcp slopp.read slopp.store slopp-server.api (test) slopp.ops (test)
 slopp.http: slopp.lang slopp.rest (test) slopp.webapp (test)
 slopp.image: slopp.kernel slopp.store
 slopp.index: slopp.cache slopp.image slopp.store slopp-server.mcp (test) slopp.build (test) slopp.ops (test) slopp.read (test) slopp.rules (test)

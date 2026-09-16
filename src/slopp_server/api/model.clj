@@ -227,6 +227,109 @@
   silently meant \"whatever the default became\"."
   #{"clojure"})
 
+(defn tests-covering
+  "The test namespaces that require `nsx` directly — what to open when the
+  question is 'what tests this?'.
+
+  This is the other half of taking tests out of the nav. Removing 103 rows
+  from a listing is only an improvement if the names come back where they
+  answer something, and the namespace page is that place.
+
+  DIRECT requires only. A transitive closure on a real store reaches most of
+  the suite and so distinguishes nothing, which is the same reason
+  `covered-by` bounds its static reach. The trade is honest and worth
+  naming: a test that exercises this namespace through an intermediary is
+  not listed here. Form-granular coverage — with observed-versus-static
+  provenance — is `slopp.index.refs/covered-by`'s job, and it answers a
+  narrower question than a namespace page asks."
+  [store nsx]
+  (let [sym   (symbol (str nsx))
+        test? #(str/ends-with? (str %) "-test")]
+    (->> (keys (:namespaces store))
+         (filter test?)
+         (filter #(some #{sym} (store/ns-requires store %)))
+         (map str)
+         sort
+         vec)))
+
+(defn outline-metrics
+  "The per-form facts a consumer needs to RANK a namespace's definitions,
+  keyed by form name: `{:mass :calls :callers-out :callers-out-test
+  :effectful? :exported?}`.
+
+  Facts, not a score. slopp-ui asked for exactly this split and it is the
+  same one `module-index` already makes by shipping layers and not a
+  drawn `:picture`: the call graph and the size of a form have one right
+  answer and only the store can see them; how to weight them into
+  `importance` and how many perceptible steps that becomes is drawing,
+  and a consumer must be able to tune it without a slopp release.
+
+  **`:mass` is a node count over the SEXPR, never the CST.** rewrite-clj
+  nodes carry whitespace and comments, so counting them would put
+  formatting straight back into the metric that node-counting exists to
+  escape — and lines and characters have the same bug, only louder: a
+  40-line docstring over a 30-line body makes the documentation win. Over
+  the sexpr a docstring is ONE node and the body's structure dominates.
+
+  **`:calls` is same-namespace direct EDGES**, from THE reference graph,
+  so a form reached through a carrier position counts as called — a
+  `:calls` built from resolved calls alone draws dispatch targets as
+  leaves, and those are the forms that matter most. Edges rather than
+  the transitive closure because the walk is cheap and reusable, while a
+  closure cannot be taken apart again. Empty rather than absent: a leaf
+  is an answer.
+
+  **Callers outside the namespace are TWO numbers, and this was measured
+  rather than reasoned.** `:callers-out` counts production namespaces and
+  `:callers-out-test` counts test ones. Run against `slopp-ui.views` while
+  it was still a single integer, it was ranking by TEST COUNT: ten of the
+  twelve cross-namespace callers were deftests, the top-ranked form held
+  first place on four of them, and the entry point that IS the render sat
+  fourth on its one production caller. The two add back up; one integer
+  cannot be taken apart again. Outbound fan-in is the half that
+  fan-in-alone gets wrong either way — an entry point is the most
+  important form in its namespace and nothing there calls it.
+
+  `:declared` edges are excluded from both directions. A `^{:covers}`
+  marker is a declaration ABOUT a form, not a call to it, and counting it
+  would make a well-marked helper look load-bearing."
+  [store nsx]
+  (let [sym      (symbol (str nsx))
+        eff      (query/ns-effectful-vars store sym)
+        inward   (refs/refs-by-target store)
+        call?    #(not= :declared (:via %))
+        test-ns? #(not= (str %) (str (edit.modules/fold-test-ns %)))
+        outside  (fn [q from-ns?]
+                   (into #{}
+                         (comp (filter call?)
+                               (filter :from-var)
+                               (remove #(= sym (:from-ns %)))
+                               (filter #(from-ns? (:from-ns %)))
+                               (map (juxt :from-ns :from-var)))
+                         (get inward q)))
+        mass     (fn [node]
+                   (if-some [s (store/form-sexpr node)]
+                     (count (tree-seq coll? seq s))
+                     0))
+        calls    (reduce (fn [m r]
+                           (if (and (call? r) (:from-var r) (= sym (:to-ns r)))
+                             (update m (:from-var r) (fnil conj #{}) (str (:to-name r)))
+                             m))
+                         {}
+                         (refs/ns-refs store sym))]
+    (into {}
+          (for [e (store/forms store sym)
+                :when (:name e)
+                :let [nm (:name e)
+                      q  (symbol (str sym) (str nm))]]
+            [(str nm)
+             {:mass             (mass (:node e))
+              :calls            (vec (sort (get calls nm)))
+              :callers-out      (count (outside q (complement test-ns?)))
+              :callers-out-test (count (outside q test-ns?))
+              :effectful?       (contains? eff q)
+              :exported?        (boolean (edit.modules/export-level store sym nm))}]))))
+
 (def graph-node-cap
   "The most nodes a `neighbourhood` will return before the depth runs out.
 
@@ -465,69 +568,6 @@
                        {:forms 0 :no-doc 0 :no-why 0 :uncovered 0}
                        (filter :name (store/forms store n)))]))))
 
-(defn module-detail
-  "One module from the INSIDE: its production namespaces, the ns→ns edges
-  among them, the layering those edges imply, and the edges crossing its
-  boundary. nil for a module with no production namespaces, so a page can 404
-  rather than render an empty frame.
-
-  The level below `module-index`, and it makes the same split one rung down —
-  `:layers` is analysis only the store can do, placement is the consumer's.
-
-  Edges come from `module-usage-rows`, THE reference graph, which is the same
-  producer `production-manifest` reads. That is the point: the descended view
-  and the module view cannot disagree about what an edge is, and a second
-  derivation here would be free to drift (the `:sig`-had-three-producers bug,
-  one system over).
-
-  An internal edge lands in a namespace's `:deps` and nowhere else. Repeating
-  it under `:boundary` would draw every internal arrow twice, and `:boundary`
-  answers a different question: which namespaces face OUT, and which of them
-  anything outside actually reaches. A module whose `:in` names one namespace
-  has a front door; one where `:in` names six does not, and that is a finding
-  a reader should be able to see without opening anything."
-  [session module]
-  (let [st      (:store @session)
-gaps    (gaps-by-ns st (:test-map @session))
-        module  (str module)
-        test?   #(str/ends-with? (str %) "-test")
-        member? #(and (not (test? %)) (= module (edit.modules/module-of %)))
-        members (into (sorted-set) (filter member?) (keys (:namespaces st)))]
-    (when (seq members)
-      (let [edges  (into #{} (comp (remove #(test? (:from-ns %)))
-                                   (map (juxt :from-ns :to))
-                                   (remove (fn [[f t]] (= f t))))
-                         (edit.modules/module-usage-rows st))
-            inside (filter (fn [[f t]] (and (members f) (members t))) edges)
-            out    (sort-by (juxt :from :to)
-                            (for [[f t] edges :when (and (members f) (not (members t)))]
-                              {:from (str f) :to (str t)
-                               :to-module (edit.modules/module-of t)}))
-            in     (sort-by (juxt :from :to)
-                            (for [[f t] edges :when (and (not (members f)) (members t))]
-                              {:from (str f) :from-module (edit.modules/module-of f)
-                               :to (str t)}))
-            by-ns  (reduce (fn [m [f t]] (update m f (fnil conj #{}) t))
-                           (into {} (map (juxt identity (constantly #{}))) members)
-                           inside)
-            {:keys [layers cycles]}
-            (store/module-layers
-             (into {} (map (fn [[k v]] [(str k) (into #{} (map str) v)])) by-ns))]
-        {:module     module
-         :tier       (name (tiers/tier-for st (symbol module)))
-         :namespaces (vec (for [n members]
-                            {:ns    (str n)
-                             :forms (count (store/forms st n))
-                             :tier  (name (tiers/tier-for st n))
-                             :deps  (vec (sort (map str (get by-ns n))))
-                             ;; so the descend can tint a namespace without an
-                             ;; /api/ns/:ns per box — the N+1 this level exists
-                             ;; to avoid at module grain, avoided here too
-                             :gaps  (get gaps n)}))
-         :boundary   {:out (vec out) :in (vec in)}
-         :layers     (mapv vec layers)
-         :cycles     (mapv vec cycles)}))))
-
 (defn module-index
   "The Code landing model: the architecture as FACTS a consumer can draw.
 
@@ -599,108 +639,68 @@ gaps    (gaps-by-ns st (:test-map @session))
      :layers  (mapv vec layers)
      :cycles  (mapv vec cycles)}))
 
-(defn tests-covering
-  "The test namespaces that require `nsx` directly — what to open when the
-  question is 'what tests this?'.
+(defn module-detail
+  "One module from the INSIDE: its production namespaces, the ns→ns edges
+  among them, the layering those edges imply, and the edges crossing its
+  boundary. nil for a module with no production namespaces, so a page can 404
+  rather than render an empty frame.
 
-  This is the other half of taking tests out of the nav. Removing 103 rows
-  from a listing is only an improvement if the names come back where they
-  answer something, and the namespace page is that place.
+  The level below `module-index`, and it makes the same split one rung down —
+  `:layers` is analysis only the store can do, placement is the consumer's.
 
-  DIRECT requires only. A transitive closure on a real store reaches most of
-  the suite and so distinguishes nothing, which is the same reason
-  `covered-by` bounds its static reach. The trade is honest and worth
-  naming: a test that exercises this namespace through an intermediary is
-  not listed here. Form-granular coverage — with observed-versus-static
-  provenance — is `slopp.index.refs/covered-by`'s job, and it answers a
-  narrower question than a namespace page asks."
-  [store nsx]
-  (let [sym   (symbol (str nsx))
-        test? #(str/ends-with? (str %) "-test")]
-    (->> (keys (:namespaces store))
-         (filter test?)
-         (filter #(some #{sym} (store/ns-requires store %)))
-         (map str)
-         sort
-         vec)))
+  Edges come from `module-usage-rows`, THE reference graph, which is the same
+  producer `production-manifest` reads. That is the point: the descended view
+  and the module view cannot disagree about what an edge is, and a second
+  derivation here would be free to drift (the `:sig`-had-three-producers bug,
+  one system over).
 
-(defn outline-metrics
-  "The per-form facts a consumer needs to RANK a namespace's definitions,
-  keyed by form name: `{:mass :calls :callers-out :callers-out-test
-  :effectful? :exported?}`.
-
-  Facts, not a score. slopp-ui asked for exactly this split and it is the
-  same one `module-index` already makes by shipping layers and not a
-  drawn `:picture`: the call graph and the size of a form have one right
-  answer and only the store can see them; how to weight them into
-  `importance` and how many perceptible steps that becomes is drawing,
-  and a consumer must be able to tune it without a slopp release.
-
-  **`:mass` is a node count over the SEXPR, never the CST.** rewrite-clj
-  nodes carry whitespace and comments, so counting them would put
-  formatting straight back into the metric that node-counting exists to
-  escape — and lines and characters have the same bug, only louder: a
-  40-line docstring over a 30-line body makes the documentation win. Over
-  the sexpr a docstring is ONE node and the body's structure dominates.
-
-  **`:calls` is same-namespace direct EDGES**, from THE reference graph,
-  so a form reached through a carrier position counts as called — a
-  `:calls` built from resolved calls alone draws dispatch targets as
-  leaves, and those are the forms that matter most. Edges rather than
-  the transitive closure because the walk is cheap and reusable, while a
-  closure cannot be taken apart again. Empty rather than absent: a leaf
-  is an answer.
-
-  **Callers outside the namespace are TWO numbers, and this was measured
-  rather than reasoned.** `:callers-out` counts production namespaces and
-  `:callers-out-test` counts test ones. Run against `slopp-ui.views` while
-  it was still a single integer, it was ranking by TEST COUNT: ten of the
-  twelve cross-namespace callers were deftests, the top-ranked form held
-  first place on four of them, and the entry point that IS the render sat
-  fourth on its one production caller. The two add back up; one integer
-  cannot be taken apart again. Outbound fan-in is the half that
-  fan-in-alone gets wrong either way — an entry point is the most
-  important form in its namespace and nothing there calls it.
-
-  `:declared` edges are excluded from both directions. A `^{:covers}`
-  marker is a declaration ABOUT a form, not a call to it, and counting it
-  would make a well-marked helper look load-bearing."
-  [store nsx]
-  (let [sym      (symbol (str nsx))
-        eff      (query/ns-effectful-vars store sym)
-        inward   (refs/refs-by-target store)
-        call?    #(not= :declared (:via %))
-        test-ns? #(not= (str %) (str (edit.modules/fold-test-ns %)))
-        outside  (fn [q from-ns?]
-                   (into #{}
-                         (comp (filter call?)
-                               (filter :from-var)
-                               (remove #(= sym (:from-ns %)))
-                               (filter #(from-ns? (:from-ns %)))
-                               (map (juxt :from-ns :from-var)))
-                         (get inward q)))
-        mass     (fn [node]
-                   (if-some [s (store/form-sexpr node)]
-                     (count (tree-seq coll? seq s))
-                     0))
-        calls    (reduce (fn [m r]
-                           (if (and (call? r) (:from-var r) (= sym (:to-ns r)))
-                             (update m (:from-var r) (fnil conj #{}) (str (:to-name r)))
-                             m))
-                         {}
-                         (refs/ns-refs store sym))]
-    (into {}
-          (for [e (store/forms store sym)
-                :when (:name e)
-                :let [nm (:name e)
-                      q  (symbol (str sym) (str nm))]]
-            [(str nm)
-             {:mass             (mass (:node e))
-              :calls            (vec (sort (get calls nm)))
-              :callers-out      (count (outside q (complement test-ns?)))
-              :callers-out-test (count (outside q test-ns?))
-              :effectful?       (contains? eff q)
-              :exported?        (boolean (edit.modules/export-level store sym nm))}]))))
+  An internal edge lands in a namespace's `:deps` and nowhere else. Repeating
+  it under `:boundary` would draw every internal arrow twice, and `:boundary`
+  answers a different question: which namespaces face OUT, and which of them
+  anything outside actually reaches. A module whose `:in` names one namespace
+  has a front door; one where `:in` names six does not, and that is a finding
+  a reader should be able to see without opening anything."
+  [session module]
+  (let [st      (:store @session)
+gaps    (gaps-by-ns st (:test-map @session))
+        module  (str module)
+        test?   #(str/ends-with? (str %) "-test")
+        member? #(and (not (test? %)) (= module (edit.modules/module-of %)))
+        members (into (sorted-set) (filter member?) (keys (:namespaces st)))]
+    (when (seq members)
+      (let [edges  (into #{} (comp (remove #(test? (:from-ns %)))
+                                   (map (juxt :from-ns :to))
+                                   (remove (fn [[f t]] (= f t))))
+                         (edit.modules/module-usage-rows st))
+            inside (filter (fn [[f t]] (and (members f) (members t))) edges)
+            out    (sort-by (juxt :from :to)
+                            (for [[f t] edges :when (and (members f) (not (members t)))]
+                              {:from (str f) :to (str t)
+                               :to-module (edit.modules/module-of t)}))
+            in     (sort-by (juxt :from :to)
+                            (for [[f t] edges :when (and (not (members f)) (members t))]
+                              {:from (str f) :from-module (edit.modules/module-of f)
+                               :to (str t)}))
+            by-ns  (reduce (fn [m [f t]] (update m f (fnil conj #{}) t))
+                           (into {} (map (juxt identity (constantly #{}))) members)
+                           inside)
+            {:keys [layers cycles]}
+            (store/module-layers
+             (into {} (map (fn [[k v]] [(str k) (into #{} (map str) v)])) by-ns))]
+        {:module     module
+         :tier       (name (tiers/tier-for st (symbol module)))
+         :namespaces (vec (for [n members]
+                            {:ns    (str n)
+                             :forms (count (store/forms st n))
+                             :tier  (name (tiers/tier-for st n))
+                             :deps  (vec (sort (map str (get by-ns n))))
+                             ;; so the descend can tint a namespace without an
+                             ;; /api/ns/:ns per box — the N+1 this level exists
+                             ;; to avoid at module grain, avoided here too
+                             :gaps  (get gaps n)}))
+         :boundary   {:out (vec out) :in (vec in)}
+         :layers     (mapv vec layers)
+         :cycles     (mapv vec cycles)}))))
 
 (def ^:export search-limits
   "`GET /api/search`'s row budget: the `:default` when a caller sends no

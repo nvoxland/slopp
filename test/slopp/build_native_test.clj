@@ -31,50 +31,6 @@
   (is (re-find #"\(apply calc\.core/run-cli args\)"
                (build/launcher-source 'calc.core/run-cli :apply))))
 
-(deftest cli-launcher-source-t
-  ;; A cli app's entry is GENERATED, which is the whole reason `cli` is a
-  ;; capability rather than a library: the author writes commands and slopp
-  ;; writes the launcher, so argv parsing, stream wiring and the exit code are
-  ;; infrastructure nobody re-implements per app.
-  (let [src (build/cli-launcher-source "greet" '[greet.commands greet.admin])]
-    (is (re-find #"\(ns native\.main" src))
-    (is (re-find #":gen-class" src))
-
-    (testing "every command namespace is REQUIRED, not merely named"
-      ;; `commands-in` finds commands with `find-ns`, and a namespace that is
-      ;; not loaded contributes nothing rather than throwing. So a launcher that
-      ;; passes a namespace it never required produces a program with NO
-      ;; commands and no error — a bare invocation prints an empty command list
-      ;; and every real invocation says "unknown command". The require is what
-      ;; makes the list non-empty, and it has no other job.
-      (is (re-find #"\[greet\.commands\]" src))
-      (is (re-find #"\[greet\.admin\]" src))
-      (is (re-find #"\[slopp\.cli\]" src)))
-
-    (testing "and the same namespaces are what it scans"
-      (is (re-find #"commands-in '\[greet\.commands greet\.admin\]" src)
-          "one list, quoted — two lists could disagree about which namespaces exist"))
-
-    (is (re-find #":cli/name \"greet\"" src)
-        "the program names itself, so usage says `greet ...` and not the ns")
-
-    (testing "the process is the ONE place a status code is acted on"
-      ;; `run` returns {:cli/exit …} rather than exiting, so a test and a
-      ;; process see the same answer. This is where that answer becomes a
-      ;; process's answer, and the flush has to precede it — stdout is buffered
-      ;; and System/exit does not drain it.
-      (is (re-find #"\(flush\)[\s\S]*System/exit" src)))
-
-    (testing "it reads as Clojure"
-      ;; edn rather than the reader: this asserts the generated text PARSES,
-      ;; and the reader would also resolve, which is a different claim and one
-      ;; that cannot be made about namespaces this test never defines.
-      (let [forms (edn/read-string (str "[" src "]"))]
-        (is (= 'ns (ffirst forms)))
-        (is (= 'native.main (second (first forms))))
-        (is (some #(= '-main (second %)) forms)
-            "a gen-class entry with no -main compiles and then does nothing")))))
-
 (deftest recipe-content-t
   (testing "native deps.edn parses and carries the :native alias"
     (let [d (edn/read-string (build/deps-edn true))]
@@ -143,6 +99,75 @@
           (is (= {:paths ["src"]}
                  (edn/read-string (slurp (io/file dir2 "deps.edn")))))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external build-reads-the-app-manifest
+  (let [sess (external/open!)
+        dir  (str (Files/createTempDirectory "slopp-appmain"
+                                             (make-array FileAttribute 0)))]
+    (try
+      (ops/ingest! sess 'calc.core
+                   (str "(ns calc.core)\n"
+                        "(defn run-cli [args]\n"
+                        "  (doseq [a args] (println a)))\n"))
+      (testing "with app.main + app.name set, build! needs no arguments"
+        (ops/config-file! sess "capabilities" :key "app.main" :value "calc.core/run-cli"
+                          :prompt "persist the entry point")
+        (ops/config-file! sess "capabilities" :key "app.name" :value "mycalc"
+                          :prompt "persist the app name")
+        (let [r (external/build! sess dir)]
+          (is (nil? (:error r)) (pr-str r))
+          (is (= "mycalc" (get-in r [:native :binary])) (pr-str r))
+          (is (.exists (io/file dir "src" "native" "main.clj")))))
+      (testing "explicit arguments still override the configured manifest"
+        (let [dir2 (str (Files/createTempDirectory "slopp-appmain2"
+                                                   (make-array FileAttribute 0)))
+              r (external/build! sess dir2 :main 'calc.core/run-cli :name "other")]
+          (is (= "other" (get-in r [:native :binary])) (pr-str r))))
+      (finally (ops/close! sess)))))
+
+(deftest cli-launcher-source-t
+  ;; A cli app's entry is GENERATED, which is the whole reason `cli` is a
+  ;; capability rather than a library: the author writes commands and slopp
+  ;; writes the launcher, so argv parsing, stream wiring and the exit code are
+  ;; infrastructure nobody re-implements per app.
+  (let [src (build/cli-launcher-source "greet" '[greet.commands greet.admin])]
+    (is (re-find #"\(ns native\.main" src))
+    (is (re-find #":gen-class" src))
+
+    (testing "every command namespace is REQUIRED, not merely named"
+      ;; `commands-in` finds commands with `find-ns`, and a namespace that is
+      ;; not loaded contributes nothing rather than throwing. So a launcher that
+      ;; passes a namespace it never required produces a program with NO
+      ;; commands and no error — a bare invocation prints an empty command list
+      ;; and every real invocation says "unknown command". The require is what
+      ;; makes the list non-empty, and it has no other job.
+      (is (re-find #"\[greet\.commands\]" src))
+      (is (re-find #"\[greet\.admin\]" src))
+      (is (re-find #"\[slopp\.cli\]" src)))
+
+    (testing "and the same namespaces are what it scans"
+      (is (re-find #"commands-in '\[greet\.commands greet\.admin\]" src)
+          "one list, quoted — two lists could disagree about which namespaces exist"))
+
+    (is (re-find #":cli/name \"greet\"" src)
+        "the program names itself, so usage says `greet ...` and not the ns")
+
+    (testing "the process is the ONE place a status code is acted on"
+      ;; `run` returns {:cli/exit …} rather than exiting, so a test and a
+      ;; process see the same answer. This is where that answer becomes a
+      ;; process's answer, and the flush has to precede it — stdout is buffered
+      ;; and System/exit does not drain it.
+      (is (re-find #"\(flush\)[\s\S]*System/exit" src)))
+
+    (testing "it reads as Clojure"
+      ;; edn rather than the reader: this asserts the generated text PARSES,
+      ;; and the reader would also resolve, which is a different claim and one
+      ;; that cannot be made about namespaces this test never defines.
+      (let [forms (edn/read-string (str "[" src "]"))]
+        (is (= 'ns (ffirst forms)))
+        (is (= 'native.main (second (first forms))))
+        (is (some #(= '-main (second %)) forms)
+            "a gen-class entry with no -main compiles and then does nothing")))))
 
 (deftest ^:external a-cli-app-gets-a-generated-entry
   ;; Nothing about a cli app names an entry fn. The author writes commands and
@@ -223,31 +248,6 @@
                    (re-find #"cli\.enabled" (:error r)))
               (str "the refusal names BOTH halves, or the reader fixes the wrong one: "
                    (pr-str r)))))
-      (finally (ops/close! sess)))))
-
-(deftest ^:external build-reads-the-app-manifest
-  (let [sess (external/open!)
-        dir  (str (Files/createTempDirectory "slopp-appmain"
-                                             (make-array FileAttribute 0)))]
-    (try
-      (ops/ingest! sess 'calc.core
-                   (str "(ns calc.core)\n"
-                        "(defn run-cli [args]\n"
-                        "  (doseq [a args] (println a)))\n"))
-      (testing "with app.main + app.name set, build! needs no arguments"
-        (ops/config-file! sess "capabilities" :key "app.main" :value "calc.core/run-cli"
-                          :prompt "persist the entry point")
-        (ops/config-file! sess "capabilities" :key "app.name" :value "mycalc"
-                          :prompt "persist the app name")
-        (let [r (external/build! sess dir)]
-          (is (nil? (:error r)) (pr-str r))
-          (is (= "mycalc" (get-in r [:native :binary])) (pr-str r))
-          (is (.exists (io/file dir "src" "native" "main.clj")))))
-      (testing "explicit arguments still override the configured manifest"
-        (let [dir2 (str (Files/createTempDirectory "slopp-appmain2"
-                                                   (make-array FileAttribute 0)))
-              r (external/build! sess dir2 :main 'calc.core/run-cli :name "other")]
-          (is (= "other" (get-in r [:native :binary])) (pr-str r))))
       (finally (ops/close! sess)))))
 
 (deftest webapp-launcher-source-t

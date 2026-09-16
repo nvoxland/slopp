@@ -24,15 +24,16 @@
 
 (deftest ^:external an-agent-attaches-by-dir-and-the-daemon-serves-its-project
   ;; The client names its project by DIR (a header written into .mcp.json
-  ;; before any daemon exists); the slug in the path is the display name. A
-  ;; session is minted on initialize and echoed back by the client; it is
-  ;; the attachment. Two dirs are two projects. The last DELETE closes one.
+  ;; before any daemon exists); the door is slug-free, so the display name is
+  ;; the dir's basename. A session is minted on initialize and echoed back by
+  ;; the client; it is the attachment. Two dirs are two projects. The last
+  ;; DELETE closes one.
   (let [d1   (tmp-dir!)
         d2   (tmp-dir!)
         ctx  (daemon/context)
-        post (fn [dir slug sid msg]
+        post (fn [dir sid msg]
                (slopp.http/handle! ctx {:request-method :post
-                                        :uri (str "/api/projects/" slug "/mcp")
+                                        :uri "/api/mcp"
                                         :headers (cond-> {"x-slopp-dir" dir}
                                                    sid (assoc "mcp-session-id" sid))
                                         :body msg}))
@@ -41,47 +42,47 @@
               :params {:protocolVersion "2025-03-26" :capabilities {}
                        :clientInfo {:name "t" :version "0"}}}]
     (try
-      (let [r   (post d1 "one" nil init)
+      (let [r   (post d1 nil init)
             sid (get-in r [:headers "Mcp-Session-Id"])]
         (is (= 200 (:status r)) (pr-str r))
         (is (string? sid) (pr-str r))
         (is (= "slopp" (get-in (body r) [:result :serverInfo :name])) (pr-str r))
-        (testing "the project is open and listed, with its one attachment"
+        (testing "the project is open and listed, named by its dir, with its one attachment"
           (let [ps (projects! ctx)]
             (is (= [d1] (mapv :dir ps)) (pr-str ps))
             (is (= 1 (:sessions (first ps))) (pr-str ps))
-            (is (= "one" (:slug (first ps))) (pr-str ps))))
+            (is (= (.getName (java.io.File. ^String d1)) (:slug (first ps))) (pr-str ps))))
         (testing "a call on the session reaches the store: thread_open answers"
-          (let [r   (post d1 "one" sid {:jsonrpc "2.0" :id 2 :method "tools/call"
-                                        :params {:name "thread_open"
-                                                 :arguments {:thread "t-http"}}})
+          (let [r   (post d1 sid {:jsonrpc "2.0" :id 2 :method "tools/call"
+                                  :params {:name "thread_open"
+                                           :arguments {:thread "t-http"}}})
                 txt (get-in (body r) [:result :content 0 :text])]
             (is (= 200 (:status r)) (pr-str r))
             (is (re-find #"t-http" (str txt)) (pr-str r))))
         (testing "a notification is accepted with no body"
-          (let [r (post d1 "one" sid {:jsonrpc "2.0" :method "notifications/initialized"})]
+          (let [r (post d1 sid {:jsonrpc "2.0" :method "notifications/initialized"})]
             (is (= 202 (:status r)) (pr-str r))))
         (testing "a second dir is a second project with its own session"
-          (let [r2 (post d2 "two" nil init)
+          (let [r2 (post d2 nil init)
                 ps (projects! ctx)]
             (is (= 200 (:status r2)) (pr-str r2))
             (is (= #{d1 d2} (set (map :dir ps))) (pr-str ps))
             (daemon/detach! (get-in r2 [:headers "Mcp-Session-Id"]))))
         (testing "an unknown session that names its dir is re-attached under the id it holds"
-          (let [r (post d1 "one" "nope" {:jsonrpc "2.0" :id 3 :method "ping"})
+          (let [r (post d1 "nope" {:jsonrpc "2.0" :id 3 :method "ping"})
                 new (get-in r [:headers "Mcp-Session-Id"])]
             (is (= 200 (:status r)) (pr-str r))
             (is (= "nope" new) (pr-str (:headers r)))
             (daemon/detach! new)))
         (testing "a standalone stream is declined, not broken"
-          (let [r (slopp.http/handle! ctx {:request-method :get :uri "/api/projects/one/mcp"
+          (let [r (slopp.http/handle! ctx {:request-method :get :uri "/api/mcp"
                                            :headers {"mcp-session-id" sid}})]
             (is (= 405 (:status r)) (pr-str r))))
         (testing "a body that is not one JSON-RPC message is the contract's 400"
-          (let [r (post d1 "one" sid "{not json")]
+          (let [r (post d1 sid "{not json")]
             (is (= 400 (:status r)) (pr-str r))))
         (testing "DELETE detaches, and the last detach closes the project"
-          (let [r (slopp.http/handle! ctx {:request-method :delete :uri "/api/projects/one/mcp"
+          (let [r (slopp.http/handle! ctx {:request-method :delete :uri "/api/mcp"
                                            :headers {"mcp-session-id" sid}})]
             (is (= 200 (:status r)) (pr-str r)))
           (is (empty? (projects! ctx)) (pr-str (projects! ctx)))))
@@ -89,8 +90,8 @@
 
 (deftest ^:external a-projects-api-and-telemetry-are-served-under-the-one-prefix
   ;; One root: the project's typed read API answers at /api/projects/<slug>/
-  ;; <resource> — its contract declares /api/<resource>, and the mount
-  ;; replaces that prefix rather than nesting under it; the machine's one
+  ;; <resource>, the slug being the dir's basename the slug-free MCP door
+  ;; named it by; the read is first-class, not a mount. The machine's one
   ;; OTLP sink routes a batch by session id — which is the THREAD id since
   ;; Phase 0 — to the project holding that thread, and says what it could
   ;; not place. And it keeps routing after the project closed: an exporter
@@ -98,9 +99,9 @@
   ;; of its records were going.
   (let [d    (tmp-dir!)
         ctx  (daemon/context)
-        post (fn [slug sid msg]
+        post (fn [sid msg]
                (slopp.http/handle! ctx {:request-method :post
-                                        :uri (str "/api/projects/" slug "/mcp")
+                                        :uri "/api/mcp"
                                         :headers (cond-> {"x-slopp-dir" d}
                                                    sid (assoc "mcp-session-id" sid))
                                         :body msg}))
@@ -114,21 +115,22 @@
                                                :body batch}))
         otel-status (fn [] (:otel (:body (slopp.http/handle! ctx {:request-method :get :uri "/api/status"}))))]
     (try
-      (let [r   (post "one" nil {:jsonrpc "2.0" :id 1 :method "initialize"
-                                 :params {:protocolVersion "2025-03-26" :capabilities {}
-                                          :clientInfo {:name "t" :version "0"}}})
-            sid (get-in r [:headers "Mcp-Session-Id"])]
+      (let [r   (post nil {:jsonrpc "2.0" :id 1 :method "initialize"
+                           :params {:protocolVersion "2025-03-26" :capabilities {}
+                                    :clientInfo {:name "t" :version "0"}}})
+            sid (get-in r [:headers "Mcp-Session-Id"])
+            slug (:slug (first (projects! ctx)))]
         ;; a write, so the project has a store and an open thread
-        (let [w (post "one" sid {:jsonrpc "2.0" :id 2 :method "tools/call"
-                                 :params {:name "ns_create"
-                                          :arguments {:ns "ot.core" :thread "t-tel" :prompt "telemetry fixture"
-                                                      :source "(ns ot.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n"}}})]
+        (let [w (post sid {:jsonrpc "2.0" :id 2 :method "tools/call"
+                           :params {:name "ns_create"
+                                    :arguments {:ns "ot.core" :thread "t-tel" :prompt "telemetry fixture"
+                                                :source "(ns ot.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n"}}})]
           (is (= 200 (:status w)) (pr-str w)))
-        (testing "the read API answers under the project's mount, with no second prefix"
-          (let [r (slopp.http/handle! ctx {:request-method :get :uri "/api/projects/one/namespaces"})]
+        (testing "the read API answers under the project's own slug, with no second prefix"
+          (let [r (slopp.http/handle! ctx {:request-method :get :uri (str "/api/projects/" slug "/namespaces")})]
             (is (= 200 (:status r)) (pr-str r)))
-          (let [r (slopp.http/handle! ctx {:request-method :get :uri "/api/projects/one/api/namespaces"})]
-            (is (= 404 (:status r)) "the contract's own /api is replaced by the mount, not nested under it")))
+          (let [r (slopp.http/handle! ctx {:request-method :get :uri (str "/api/projects/" slug "/api/namespaces")})]
+            (is (= 404 (:status r)) "the contract's own /api is not nested under the project slug")))
         (testing "an unknown project is a 404, not a 500"
           (let [r (slopp.http/handle! ctx {:request-method :get :uri "/api/projects/nope/namespaces"})]
             (is (= 404 (:status r)) (pr-str r))))
@@ -192,7 +194,7 @@
         token (daemon/token)
         call  (fn [body]
                 (slopp.http/handle! ctx {:request-method :post
-                                   :uri "/api/projects/_/call"
+                                   :uri "/api/call"
                                    :headers {"x-slopp-dir" d}
                                    :body body}))]
     (try
@@ -229,7 +231,7 @@
         ctx  (daemon/context)
         post (fn [sid msg]
                (slopp.http/handle! ctx {:request-method :post
-                                  :uri "/api/projects/one/mcp"
+                                  :uri "/api/mcp"
                                   :headers (cond-> {"x-slopp-dir" d}
                                              sid (assoc "mcp-session-id" sid))
                                   :body msg}))
@@ -277,7 +279,7 @@
         ctx  (daemon/context)
         post (fn [sid msg]
                (slopp.http/handle! ctx {:request-method :post
-                                  :uri "/api/projects/one/mcp"
+                                  :uri "/api/mcp"
                                   :headers (cond-> {"x-slopp-dir" d}
                                              sid (assoc "mcp-session-id" sid))
                                   :body msg}))
@@ -337,7 +339,7 @@
         ctx  (daemon/context)
         post (fn [sid msg]
                (slopp.http/handle! ctx {:request-method :post
-                                  :uri "/api/projects/one/mcp"
+                                  :uri "/api/mcp"
                                   :headers (cond-> {"x-slopp-dir" d}
                                              sid (assoc "mcp-session-id" sid))
                                   :body msg}))
@@ -372,7 +374,7 @@
         ctx  (daemon/context)
         post (fn [sid msg]
                (slopp.http/handle! ctx {:request-method :post
-                                  :uri "/api/projects/one/mcp"
+                                  :uri "/api/mcp"
                                   :headers (cond-> {"x-slopp-dir" d}
                                              sid (assoc "mcp-session-id" sid))
                                   :body msg}))
@@ -406,7 +408,7 @@
         ctx  (daemon/context)
         post (fn [sid msg]
                (slopp.http/handle! ctx {:request-method :post
-                                        :uri "/api/projects/one/mcp"
+                                        :uri "/api/mcp"
                                         :headers (cond-> {"x-slopp-dir" d}
                                                    sid (assoc "mcp-session-id" sid))
                                         :body msg}))
@@ -416,7 +418,8 @@
     (try
       (post nil init)
       (is (not (daemon/reader-open? d)) "attaching alone opens no reader")
-      (slopp.http/handle! ctx {:request-method :get :uri "/api/projects/one/namespaces"})
+      (let [slug (:slug (first (projects! ctx)))]
+        (slopp.http/handle! ctx {:request-method :get :uri (str "/api/projects/" slug "/namespaces")}))
       (is (daemon/reader-open? d) "the first API request opens it")
       (finally (daemon/reset-all!)))))
 
@@ -486,7 +489,7 @@
         ctx  (daemon/context)
         post (fn [sid msg]
                (slopp.http/handle! ctx {:request-method :post
-                                        :uri "/api/projects/one/mcp"
+                                        :uri "/api/mcp"
                                         :headers (cond-> {"x-slopp-dir" d}
                                                    sid (assoc "mcp-session-id" sid))
                                         :body msg}))
@@ -516,7 +519,7 @@
           (is (string? (get-in r [:headers "Mcp-Session-Id"])) (pr-str (:headers r)))))
       (testing "a stale id with no dir to re-attach by is still a 404"
         (let [r (slopp.http/handle! ctx {:request-method :post
-                                         :uri "/api/projects/nowhere/mcp"
+                                         :uri "/api/mcp"
                                          :headers {"mcp-session-id" "nope"}
                                          :body {:jsonrpc "2.0" :id 3 :method "ping"}})]
           (is (= 404 (:status r)) (pr-str r))))
@@ -558,17 +561,16 @@
   ;; a mount is — a tree of files, not a declaration — and it is the same
   ;; `mount-routes` every project's app server uses.
   ;;
-  ;; Since the one-surface collapse the project read API is FIRST-CLASS here:
-  ;; the 15 `/api/projects/:slug/<resource>` routes are declared by
-  ;; `slopp.api.endpoints` and served from this one context, not delegated
-  ;; into a per-project mount. So `declared` covers those namespaces too.
+  ;; The project read API is FIRST-CLASS here: the 15 `/api/projects/:slug/
+  ;; <resource>` routes are declared by `slopp-server.api.endpoints` and served
+  ;; from this one context. The write/MCP doors are slug-free — one door each
+  ;; at `/api/{mcp,call,cli,hook}`, addressed by `X-Slopp-Dir`.
   (let [declared (routes/from-namespaces ['slopp-server.process 'slopp-server.ui.shell 'slopp-server.ui.styles
                                           'slopp-server.api.endpoints 'slopp-server.api.reads])
         served   (:http/routes (daemon/context))
         mounted  (filter #(str/starts-with? (:path %) "/assets/") served)]
     (is (= #{"/api/projects" "/api/status"
-             "/api/projects/:slug/mcp" "/api/projects/:slug/call"
-             "/api/projects/:slug/cli" "/api/projects/:slug/hook"
+             "/api/mcp" "/api/call" "/api/cli" "/api/hook"
              "/api/otel/v1/logs"
              "/api/projects/:slug/namespaces" "/api/projects/:slug/ns/:ns"
              "/api/projects/:slug/timeline" "/api/projects/:slug/change/:range"
@@ -703,7 +705,7 @@
         stops (atom [])
         post  (fn [msg]
                 (slopp.http/handle! ctx {:request-method :post
-                                         :uri "/api/projects/one/mcp"
+                                         :uri "/api/mcp"
                                          :headers {"x-slopp-dir" d}
                                          :body msg}))
         init  {:jsonrpc "2.0" :id 1 :method "initialize"
@@ -738,7 +740,7 @@
         ctx (daemon/context)]
     (try
       (let [r (slopp.http/handle! ctx {:request-method :post
-                                       :uri "/api/projects/_/call"
+                                       :uri "/api/call"
                                        :headers {"x-slopp-dir" d}
                                        :body {:tool "thread_list" :arguments {}}})]
         (is (= 403 (:status r)) (pr-str r)))
@@ -808,7 +810,7 @@
         token (daemon/token)
         hook  (fn [dir body]
                 (slopp.http/handle! ctx {:request-method :post
-                                         :uri "/api/projects/_/hook"
+                                         :uri "/api/hook"
                                          :headers {"x-slopp-dir" dir "x-slopp-token" token}
                                          :body {:hook body}}))
         mail  (fn [sid] (io/file d ".slopp" (str "pending-intent." sid)))]
@@ -820,7 +822,7 @@
           (is (not (.exists (mail "s-hook"))))))
       ;; open the project the way a shell does
       (.close (db/open! d))
-      (slopp.http/handle! ctx {:request-method :post :uri "/api/projects/_/call"
+      (slopp.http/handle! ctx {:request-method :post :uri "/api/call"
                                :headers {"x-slopp-dir" d}
                                :body {:tool "thread_open" :arguments {:thread "t-hook"} :token token}})
       (testing "an ask is recorded and answered with the map"
@@ -854,7 +856,7 @@
         token (daemon/token)
         hook  (fn [body]
                 (slopp.http/handle! ctx {:request-method :post
-                                         :uri "/api/projects/_/hook"
+                                         :uri "/api/hook"
                                          :headers {"x-slopp-dir" d "x-slopp-token" token}
                                          :body {:hook body}}))
         bash  (fn [event sid cmd]
@@ -862,7 +864,7 @@
                        :tool_input {:command cmd}}))]
     (try
       (.close (db/open! d))
-      (slopp.http/handle! ctx {:request-method :post :uri "/api/projects/_/call"
+      (slopp.http/handle! ctx {:request-method :post :uri "/api/call"
                                :headers {"x-slopp-dir" d}
                                :body {:tool "thread_open" :arguments {:thread "t-bash"} :token token}})
       (testing "a raw store read is denied before it runs"
@@ -891,7 +893,7 @@
         token (daemon/token)
         cli   (fn [frame & [tok]]
                 (slopp.http/handle! ctx {:request-method :post
-                                         :uri "/api/projects/_/cli"
+                                         :uri "/api/cli"
                                          :headers (cond-> {"x-slopp-dir" d}
                                                     (not= tok :none) (assoc "x-slopp-token" (or tok token)))
                                          :body frame}))]
@@ -926,7 +928,7 @@
         token (daemon/token)
         hook  (fn [body tok]
                 (slopp.http/handle! ctx {:request-method :post
-                                         :uri "/api/projects/_/hook"
+                                         :uri "/api/hook"
                                          :headers (cond-> {"x-slopp-dir" d}
                                                     tok (assoc "x-slopp-token" tok))
                                          :body {:hook body}}))
@@ -937,7 +939,7 @@
           (is (= 200 (:status r)) (pr-str r))
           (is (= "" (str (:body r))))))
       (.close (db/open! d))
-      (slopp.http/handle! ctx {:request-method :post :uri "/api/projects/_/call"
+      (slopp.http/handle! ctx {:request-method :post :uri "/api/call"
                                :headers {"x-slopp-dir" d}
                                :body {:tool "thread_open" :arguments {:thread "s-stop"} :token token}})
       (testing "without the token, a write does not run"
@@ -945,7 +947,7 @@
       (testing "with it, the pause done runs on the session's thread"
         (let [r (hook stop token)]
           (is (= 200 (:status r)) (pr-str r))
-          (let [rep (slopp.http/handle! ctx {:request-method :post :uri "/api/projects/_/call"
+          (let [rep (slopp.http/handle! ctx {:request-method :post :uri "/api/call"
                                              :headers {"x-slopp-dir" d}
                                              :body {:tool "query_commits" :arguments {} :token token}})
                 ses (:reader (#'daemon/api! d))
@@ -955,7 +957,7 @@
       (finally (daemon/reset-all!)))))
 
 (deftest ^:external an-attach-under-the-underscore-slug-is-named-by-its-dir
-  ;; The plugin's .mcp.json is one URL for every project, `/api/projects/_/mcp`,
+  ;; The plugin's .mcp.json is one URL for every project, `/api/mcp`,
   ;; with the dir in a header — the same `_` the CLI door reads as "by dir".
   ;; The display name is then the dir's basename, never the placeholder: the
   ;; first HTTP-entry session listed its project as `_` and the brief handed
@@ -964,7 +966,7 @@
         ctx (daemon/context)]
     (try
       (let [r (slopp.http/handle! ctx {:request-method :post
-                                       :uri "/api/projects/_/mcp"
+                                       :uri "/api/mcp"
                                        :headers {"x-slopp-dir" d}
                                        :body {:jsonrpc "2.0" :id 1 :method "initialize"
                                               :params {:protocolVersion "2025-03-26" :capabilities {}

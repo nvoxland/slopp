@@ -66,25 +66,22 @@
       (first (remove taken (map #(str base "-" %) (iterate inc 2)))))))
 
 (defn- project-dir
-  "The project a request names: `X-Slopp-Dir` — an existing absolute
-  directory, canonicalized — else the slug in the path, which resolves only
-  to a project already open. `{:dir}` or `{:error}`.
+  "The project a request names, by `X-Slopp-Dir` — an existing absolute
+  directory, canonicalized. `{:dir}` or `{:error}`.
 
   By DIR, because `.mcp.json` is written before any daemon exists and a
   slug minted at attach time cannot be known then; the header is what the
-  plugin writes, literally (env expansion in headers is unreliable)."
+  plugin writes, literally (env expansion in headers is unreliable). The
+  write/MCP doors are slug-free — one door, addressed by this header — so
+  there is no path slug to fall back to."
   [req]
-  (let [h    (get-in req [:headers "x-slopp-dir"])
-        slug (get-in req [:path-params :slug])]
-    (if-not (str/blank? (str h))
+  (let [h (get-in req [:headers "x-slopp-dir"])]
+    (if (str/blank? (str h))
+      {:error "send X-Slopp-Dir: <absolute project dir> to name the project"}
       (let [f (java.io.File. (str h))]
         (if (and (.isAbsolute f) (.isDirectory f))
           {:dir (.getCanonicalPath f)}
-          {:error (str "X-Slopp-Dir must name an existing absolute directory: " h)}))
-      (if-let [p (first (filter #(= slug (:slug %)) (vals (:projects @state))))]
-        {:dir (:dir p)}
-        {:error (str "no open project " slug
-                     " — send X-Slopp-Dir: <absolute project dir> to open one")}))))
+          {:error (str "X-Slopp-Dir must name an existing absolute directory: " h)})))))
 
 (defn ^:export lookup!
   "The slopp session behind MCP session `sid`, touching its `:last-seen`;
@@ -448,7 +445,6 @@
   2025-06-18 spec dropped batching, the pipe never sent one, and a batch
   is the contract's 400 rather than a second shape to carry."
   [:map
-   [:slug {:doc "the project's display name, from the path"} :string]
    [:jsonrpc {:doc "the JSON-RPC version, always \"2.0\""} :string]
    [:id {:optional true :doc "the request id; absent (or null) on a notification"} [:maybe [:or :int :string]]]
    [:method {:optional true :doc "the method, on a request or a notification"} :string]
@@ -458,9 +454,8 @@
 
 (def ^:private call-contract
   "What `slopp <op>` posts to the write door: the op, its arguments, and
-  the daemon's token."
+  the daemon's token. The project is named by X-Slopp-Dir, not a path slug."
   [:map
-   [:slug {:doc "an open project's display name, or `_` to name the project by X-Slopp-Dir"} :string]
    [:tool {:doc "the op to run"} :string]
    [:arguments {:optional true :doc "the op's arguments"} :map]
    [:token {:optional true :doc "the daemon's per-boot secret, from ~/.slopp/daemon.json; refused without it"} :string]
@@ -511,13 +506,13 @@
            :headers {"Content-Type" "application/json"}
            :body "{}"}))))
 
-(defn ^{:http/method :get :rest/path "/api/projects/:slug/mcp" :http/auth :public
+(defn ^{:http/method :get :rest/path "/api/mcp" :http/auth :public
         :rest/response :any
         :rest/unconstrained-ok "a refusal with an Allow header, never a document"}
   mcp-get-endpoint
-  "`GET /api/projects/:slug/mcp` — declined: there is no standalone
-  stream here, answers ride the POST responses. Its own var so the safe
-  method stays safe: it touches nothing."
+  "`GET /api/mcp` — declined: there is no standalone stream here, answers
+  ride the POST responses. Its own var so the safe method stays safe: it
+  touches nothing."
   [_req]
   {:status 405 :http/raw true
    :headers {"Allow" "POST, DELETE" "Content-Type" "application/json"}
@@ -638,36 +633,36 @@
           session)))))
 
 (defn- mcp-doors
-  "This daemon's doors, lent to the MCP envelope: sessions by id, attach
-  by the dir a request names, detach."
+  "This server's doors, lent to the MCP envelope: sessions by id, attach by
+  the dir a request names (`X-Slopp-Dir`), detach. No path slug: the door is
+  slug-free and the project's display name is the dir's basename."
   []
   {:slopp.mcp.http/lookup  lookup!
    :slopp.mcp.http/attach! (fn [req]
                              (let [{:keys [dir error]} (project-dir req)]
                                (if error
                                  {:error error}
-                                 (attach! dir (let [slug (get-in req [:path-params :slug])]
-                                                (when (not= "_" slug) slug))
-                                          :sid (get-in req [:headers "mcp-session-id"])))))
+                                 (attach! dir nil :sid (get-in req [:headers "mcp-session-id"])))))
    :slopp.mcp.http/detach! detach!})
 
-^:unsafe (defn ^{:http/method :post :rest/path "/api/projects/:slug/mcp" :http/auth :public
+^:unsafe (defn ^{:http/method :post :rest/path "/api/mcp" :http/auth :public
                  :rest/request jsonrpc-contract
                  :rest/response :any
                  :rest/unconstrained-ok "the answer is the JSON-RPC envelope's, whatever the message asked"}
   mcp-post-endpoint
-  "`POST /api/projects/:slug/mcp` — MCP over streamable HTTP: one JSON-RPC
-  message in, its answer out, the session id riding a header. The
-  envelope is [[slopp.mcp.http/endpoint]], lent this daemon's doors."
+  "`POST /api/mcp` — MCP over streamable HTTP: one JSON-RPC message in, its
+  answer out, the session id riding a header and the project named by
+  `X-Slopp-Dir`. The envelope is [[slopp-server.mcp.http/endpoint]], lent this
+  server's doors."
   [req]
   (mcp.http/endpoint (mcp-doors) req))
 
-^:unsafe (defn ^{:http/method :delete :rest/path "/api/projects/:slug/mcp" :http/auth :public
+^:unsafe (defn ^{:http/method :delete :rest/path "/api/mcp" :http/auth :public
                  :rest/response :any
                  :rest/unconstrained-ok "the envelope's own acknowledgement, or its 404"}
   mcp-delete-endpoint
-  "`DELETE /api/projects/:slug/mcp` — detach the session the header names;
-  the last detach closes the project."
+  "`DELETE /api/mcp` — detach the session the header names; the last detach
+  closes the project."
   [req]
   (mcp.http/endpoint (mcp-doors) req))
 
@@ -830,22 +825,21 @@
                       (cli-session! dir (let [slug (get-in req [:path-params :slug])]
                                           (when (not= "_" slug) slug)))))))
 
-^:unsafe (defn ^{:http/method :post :rest/path "/api/projects/:slug/call" :http/auth :public
+^:unsafe (defn ^{:http/method :post :rest/path "/api/call" :http/auth :public
                  :rest/request call-contract
                  :rest/response :any
                  :rest/unconstrained-ok "the op's own answer as the CLI prints it: {isError text}"}
   call-endpoint
-  "`POST /api/projects/:slug/call` — the write door: `{tool arguments
-  token}` runs on the project named by `X-Slopp-Dir` (slug `_`) or by an
-  open project's slug, on its CLI session. The token is the daemon's and
-  [[slopp.mcp/http-call!]] checks it. A WRITE naming no thread is refused
-  here with the same words a one-shot uses, because the alternative is the
-  same stranding: the call would land on the CLI session's own line, which
-  nothing a shell knows about ever lands. Refused as an ANSWER — 200 with
-  `isError`, the shape every refusal on this door has — because a 4xx reads
-  to the CLI as a failed route, and it falls back to booting a one-shot JVM
-  that refuses again after loading the whole store (the first end-to-end
-  run did exactly that)."
+  "`POST /api/call` — the write door: `{tool arguments token}` runs on the
+  project named by `X-Slopp-Dir`, on its CLI session. The token is the
+  server's and [[slopp-server.mcp/http-call!]] checks it. A WRITE naming no
+  thread is refused here with the same words a one-shot uses, because the
+  alternative is the same stranding: the call would land on the CLI session's
+  own line, which nothing a shell knows about ever lands. Refused as an
+  ANSWER — 200 with `isError`, the shape every refusal on this door has —
+  because a 4xx reads to the CLI as a failed route, and it falls back to
+  booting a one-shot JVM that refuses again after loading the whole store
+  (the first end-to-end run did exactly that)."
   [req]
   (let [{:keys [dir error]} (project-dir req)]
     (if error
@@ -927,9 +921,8 @@
 
 (def ^:private hook-contract
   "What Claude Code hands a hook on stdin — the fields slopp reads; the rest
-  ride along unread."
+  ride along unread. The project is named by X-Slopp-Dir, not a path slug."
   [:map
-   [:slug {:doc "an open project's display name, or `_` to name the project by X-Slopp-Dir"} :string]
    [:hook {:doc "Claude Code's hook payload, as it came on stdin; its shape is the harness's and stays open here"}
     [:map
      [:hook_event_name {:doc "UserPromptSubmit, PreToolUse, PostToolUse, Stop, …"} :string]
@@ -937,17 +930,17 @@
      [:prompt {:optional true :doc "the verbatim ask, on UserPromptSubmit"} :string]
      [:tool_input {:optional true :doc "the tool's input, on PreToolUse/PostToolUse; `command` for Bash"} [:map [:command {:optional true :doc "the shell command the Bash tool ran or is about to run"} :string]]]]]])
 
-^:unsafe (defn ^{:http/method :post :rest/path "/api/projects/:slug/hook" :http/auth :public
+^:unsafe (defn ^{:http/method :post :rest/path "/api/hook" :http/auth :public
                  :rest/request hook-contract
                  :rest/media-type "text/plain"
                  :rest/response :string}
   hook-endpoint
-  "`POST /api/projects/:slug/hook` — the plugin's hooks, one door: the
-  Claude Code hook payload in, what the hook prints out, as text. On
-  `UserPromptSubmit` the ask is recorded and the map returned; on
+  "`POST /api/hook` — the plugin's hooks, one door: the Claude Code hook
+  payload in, what the hook prints out, as text; the project by `X-Slopp-Dir`.
+  On `UserPromptSubmit` the ask is recorded and the map returned; on
   `PreToolUse`/`PostToolUse` the Bash verdict, as the hook's JSON or
   nothing; on `Stop` the session-pause `done` on the agent's thread — a
-  write, so it needs the daemon's token in `X-Slopp-Token` like every
+  write, so it needs the server's token in `X-Slopp-Token` like every
   write from a shell. `X-Slopp-Cli: 1` asks for the CLI voice in the map.
   Any other event is an empty answer. The rules are
   [[slopp-server.process.hooks]]'s; the shell side has none to keep in step."
@@ -976,18 +969,18 @@
 
       :else (text 200 ""))))
 
-^:unsafe (defn ^{:http/method :post :rest/path "/api/projects/:slug/cli" :http/auth :public
+^:unsafe (defn ^{:http/method :post :rest/path "/api/cli" :http/auth :public
                  :rest/request :string
                  :rest/media-type "text/plain"
                  :rest/response :string}
   cli-endpoint
-  "`POST /api/projects/:slug/cli` — `slopp <op>` from a shell: the TEXT
-  frame [[slopp-server.process.hooks/cli-frame]] reads (header lines, a blank
-  line, the payload — the op's arguments as JSON or EDN, or a verb's raw
-  source blob), the token in `X-Slopp-Token`, the project by `X-Slopp-Dir`.
-  It is [[call-endpoint]] for a client that builds no JSON and prints what
-  it gets: the op's answer as text, 200 when it answered, 409 when it
-  refused, 400 for a frame that is not a call, 403 without the token."
+  "`POST /api/cli` — `slopp <op>` from a shell: the TEXT frame
+  [[slopp-server.process.hooks/cli-frame]] reads (header lines, a blank line,
+  the payload — the op's arguments as JSON or EDN, or a verb's raw source
+  blob), the token in `X-Slopp-Token`, the project by `X-Slopp-Dir`. It is
+  [[call-endpoint]] for a client that builds no JSON and prints what it gets:
+  the op's answer as text, 200 when it answered, 409 when it refused, 400 for
+  a frame that is not a call, 403 without the token."
   [req]
   (let [{:keys [dir error]} (project-dir req)
         call (hooks/cli-call (hooks/cli-frame (:body req)))]

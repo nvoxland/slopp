@@ -12,62 +12,6 @@
   (is (= "logi.quoting" (edit.modules/module-of 'logi.quoting.internal)))
   (is (= "scratch" (edit.modules/module-of 'scratch))))
 
-(deftest module-edges-are-crdt-grain
-  (let [base    (store/empty-store)
-        [s1 d1] (store/record-module-edge base "b.app" "a.core" :add
-                                          :prompt "app uses core" :agent "t")
-        [s2 d2] (store/record-module-edge s1 "b.app" "a.util" :add)
-        [s3 d3] (store/record-module-edge s2 "b.app" "a.util" :remove)]
-    (testing "the EDGE is the unit: one semantic delta each, state is the fold"
-      (is (= :module-edge (:op d1)))
-      (is (= {:from "b.app" :to "a.core" :action :add}
-             (select-keys d1 [:from :to :action])))
-      (is (= "app uses core" (:prompt d1)) "the why rides the delta")
-      (is (= {"b.app" #{"a.core" "a.util"}} (:modules s2)))
-      (is (= {"b.app" #{"a.core"}} (:modules s3)) "remove folds out"))
-    (testing "replay-delta reconstructs the fold"
-      (is (= (:modules s2) (:modules (store/replay-delta s1 d2))))
-      (is (= (:modules s3) (:modules (store/replay-delta s2 d3)))))
-    (testing "concurrent adds to the SAME module merge as a union — never a conflict"
-      (let [[ours _]   (store/record-module-edge s1 "b.app" "a.util" :add)
-            [theirs _] (store/record-module-edge s1 "b.app" "a.extra" :add)
-            r          (merge/merge-logs ours theirs :from "fork")]
-        (is (empty? (:conflicts r)) (pr-str (:conflicts r)))
-        (is (= #{"a.core" "a.util" "a.extra"}
-               (get-in r [:store :modules "b.app"])))))
-    (testing "a union that closes a cycle still merges — judging it is the CALLER's"
-      ;; merge-logs can only see the DECLARED manifest, where a -test
-      ;; namespace's fixture requires are edges. Warning from here reported
-      ;; a cycle on every merge into slopp's own main that no production
-      ;; code had, advising a retraction that would have broken the very
-      ;; test that created the edge. api.modules/merge-production-cycle
-      ;; judges the production graph instead — and it can only run after
-      ;; the merge has produced a store, which is why it cannot live here.
-      ;; These stores have no namespaces at all, which is the other half of
-      ;; the same point: nothing at this layer knows what production means.
-      (let [[ours _]   (store/record-module-edge base "x.a" "x.b" :add)
-            [theirs _] (store/record-module-edge base "x.b" "x.a" :add)
-            r          (merge/merge-logs ours theirs :from "fork")]
-        (is (empty? (:conflicts r)))
-        (is (= {"x.a" #{"x.b"} "x.b" #{"x.a"}} (:modules (:store r)))
-            "the union lands — CRDT grain is not conditional on acyclicity")
-        (is (not-any? :modules-cycle (:notes r)) (pr-str (:notes r)))))))
-
-(deftest test-namespaces-see-package-private-deep-vars
-  ;; a -test ns folds into the package it tests — for visibility, not just
-  ;; module edges — so package-private deep helpers stay unit-testable.
-  ;; (found dogfooding the deep-module split: without this, moving a
-  ;; test-referenced helper into a deep ns forces a spurious ^:export.)
-  (let [viol (fn [rows] (seq (edit.modules/module-violations {} rows)))
-        row  (fn [from to] {:from-ns from :from-var 'f :to to})]
-    (testing "a -test ns reaches its subject's package-private deep var"
-      (is (nil? (viol [(row 'a.b-test 'a.b.impl)]))
-          "a.b-test folds to a.b, which shares a.b.impl's parent prefix")
-      (is (nil? (viol [(row 'a.b.c-test 'a.b.c.deep)]))
-          "deeper test folds too"))
-    (testing "a genuine foreign module still can't reach it"
-      (is (some #(= :visibility (:rule %)) (viol [(row 'x.y 'a.b.impl)]))))))
-
 (deftest module-rules-are-recursive-and-declared
   (let [viol (fn [manifest rows] (seq (edit.modules/module-violations manifest rows)))
         row  (fn [from to] {:from-ns from :from-var 'f :to to})]
@@ -120,95 +64,6 @@
           "the refusal names the granted subtree"))
     (testing "same-ns rows are exempt"
       (is (nil? (viol {"b.user" #{}} [(row 'b.user 'b.user)]))))))
-
-(deftest ^:external the-manifest-follows-ns-renames
-  (let [sess (external/open!)]
-    (try
-      (ops/ingest! sess 'ma.core "(ns ma.core)\n(defn shared \"Public.\" [x] x)\n")
-      (ops/module-dep! sess "mb.app" "ma.core" :prompt "app uses core")
-      (ops/ingest! sess 'mb.app
-                   (str "(ns mb.app (:require [ma.core :as core]))\n"
-                        "(defn use-it \"Uses ma.\" [x] (core/shared x))\n"))
-      (testing "renaming the CALLER module re-keys the manifest entry"
-        (is (nil? (:error (ops/ns-rename! sess 'mb.app 'mb.hub :prompt "rebrand"))))
-        (is (= {"mb.hub" #{"ma.core"}}
-               (edit.modules/modules-manifest (:store @sess)))))
-      (testing "renaming the TARGET module re-keys the dep values"
-        (is (nil? (:error (ops/ns-rename! sess 'ma.core 'mx.core :prompt "rebrand"))))
-        (is (= {"mb.hub" #{"mx.core"}}
-               (edit.modules/modules-manifest (:store @sess))))
-        (is (nil? (:error (ops/edit-replace! sess 'mb.hub 'use-it
-                                             "(defn use-it \"Uses mx.\" [x] (core/shared (inc x)))"
-                                             :prompt "still declared under the new names")))))
-      (finally (ops/close! sess)))))
-
-(deftest ^:external an-unadopted-populated-store-adopts-on-reopen
-  (let [dir  (str (java.nio.file.Files/createTempDirectory
-                   "slopp-modules-adopt"
-                   (make-array java.nio.file.attribute.FileAttribute 0)))
-        ;; one agent across the reopen — the store is "populated" only for a
-        ;; session that can see the writes, and adoption is keyed by agent
-        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "modadopt"})]
-    ;; land cross-module reality with the gate bypassed (what a bulk import
-    ;; does) — manifest stays {}, journal has no :module-edge deltas
-    (try
-      (swap! sess assoc :adopting? true)
-      (ops/ingest! sess 'ka.core "(ns ka.core)\n(defn f \"F.\" [x] x)\n")
-      (ops/ingest! sess 'kb.app
-                   (str "(ns kb.app (:require [ka.core :as core]))\n"
-                        "(defn g \"G.\" [x] (core/f x))\n"))
-      (is (= {} (edit.modules/modules-manifest (:store @sess))))
-      (finally (ops/close! sess)))
-    ;; reopen: empty manifest + populated + no edge delta ever = adopt
-    (let [sess2 (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "modadopt"})]
-      (try
-        (is (= {"kb.app" #{"ka.core"}}
-               (edit.modules/modules-manifest (:store @sess2))))
-        (is (nil? (:error (ops/edit-replace! sess2 'kb.app 'g
-                                             "(defn g \"G.\" [x] (core/f (inc x)))"
-                                             :prompt "gated edits work under the adopted manifest"))))
-        (finally (ops/close! sess2))))))
-
-(deftest ^:external cycle-refusal-is-local-to-the-new-edge
-  (testing "module-path answers reachability deterministically"
-    (let [m {"a.x" #{"b.y"} "b.y" #{"c.z"}}]
-      (is (= ["a.x" "b.y" "c.z"] (store/module-path m "a.x" "c.z")))
-      (is (nil? (store/module-path m "c.z" "a.x")))))
-  ;; The gate reads PRODUCTION edges (see
-  ;; cycle-refusal-judges-production-edges-not-test-fixtures), so the
-  ;; fixture is real code rather than hand-placed manifest entries — an
-  ;; adopted cycle from test folding no longer reaches this question at all.
-  (testing "an unrelated edge lands; closing a real chain refuses"
-    (let [sess (external/open!)]
-      (try
-        (ops/ingest! sess 'a.x "(ns a.x)\n(defn f \"F.\" [n] n)\n")
-        (ops/module-dep! sess "b.y" "a.x" :prompt "b calls a")
-        (ops/ingest! sess 'b.y
-                     "(ns b.y (:require [a.x :as x]))\n(defn g \"G.\" [n] (x/f n))\n")
-        (ops/module-dep! sess "c.z" "b.y" :prompt "c calls b")
-        (ops/ingest! sess 'c.z
-                     "(ns c.z (:require [b.y :as y]))\n(defn h \"H.\" [n] (y/g n))\n")
-        (let [r (ops/module-dep! sess "d.w" "c.z" :prompt "unrelated — must land")]
-          (is (nil? (:error r)) (pr-str r)))
-        (let [r (ops/module-dep! sess "a.x" "c.z" :prompt "would close a.x→c.z→b.y→a.x")]
-          (is (re-find #"(?i)closes a dependency cycle" (str (:error r))) (pr-str r)))
-        (let [r (ops/module-dep! sess "b.y" "d.w" :prompt "d.w reaches nothing — fine")]
-          (is (nil? (:error r)) (pr-str r)))
-        (finally (ops/close! sess))))))
-
-(deftest module-layers-condense-cycles
-  (testing "a DAG layers by deepest dependency"
-    (is (= {:layers [["a.core"] ["a.util"] ["b.app"]] :cycles []}
-           (store/module-layers {"b.app" #{"a.core" "a.util"}
-                                 "a.util" #{"a.core"}}))))
-  (testing "cycle members share a layer and are named, not poisonous"
-    (let [r (store/module-layers {"x.a" #{"x.b"} "x.b" #{"x.a"}
-                                  "y.c" #{"x.a"}})]
-      (is (= [["x.a" "x.b"] ["y.c"]] (:layers r)) (pr-str r))
-      (is (= [["x.a" "x.b"]] (:cycles r)))))
-  (testing "dep-only modules (declaring nothing) sit at layer 0"
-    (is (= [["z.leaf"] ["z.top"]]
-           (:layers (store/module-layers {"z.top" #{"z.leaf"}}))))))
 
 (deftest ^:external the-module-lifecycle
   (let [sess (external/open!)]
@@ -304,6 +159,151 @@
           (is (some #{'mb.app/use-it} (get-in r [:findings :missing-doc]))
               (pr-str (:findings r)))))
       (finally (ops/close! sess)))))
+
+(deftest module-edges-are-crdt-grain
+  (let [base    (store/empty-store)
+        [s1 d1] (store/record-module-edge base "b.app" "a.core" :add
+                                          :prompt "app uses core" :agent "t")
+        [s2 d2] (store/record-module-edge s1 "b.app" "a.util" :add)
+        [s3 d3] (store/record-module-edge s2 "b.app" "a.util" :remove)]
+    (testing "the EDGE is the unit: one semantic delta each, state is the fold"
+      (is (= :module-edge (:op d1)))
+      (is (= {:from "b.app" :to "a.core" :action :add}
+             (select-keys d1 [:from :to :action])))
+      (is (= "app uses core" (:prompt d1)) "the why rides the delta")
+      (is (= {"b.app" #{"a.core" "a.util"}} (:modules s2)))
+      (is (= {"b.app" #{"a.core"}} (:modules s3)) "remove folds out"))
+    (testing "replay-delta reconstructs the fold"
+      (is (= (:modules s2) (:modules (store/replay-delta s1 d2))))
+      (is (= (:modules s3) (:modules (store/replay-delta s2 d3)))))
+    (testing "concurrent adds to the SAME module merge as a union — never a conflict"
+      (let [[ours _]   (store/record-module-edge s1 "b.app" "a.util" :add)
+            [theirs _] (store/record-module-edge s1 "b.app" "a.extra" :add)
+            r          (merge/merge-logs ours theirs :from "fork")]
+        (is (empty? (:conflicts r)) (pr-str (:conflicts r)))
+        (is (= #{"a.core" "a.util" "a.extra"}
+               (get-in r [:store :modules "b.app"])))))
+    (testing "a union that closes a cycle still merges — judging it is the CALLER's"
+      ;; merge-logs can only see the DECLARED manifest, where a -test
+      ;; namespace's fixture requires are edges. Warning from here reported
+      ;; a cycle on every merge into slopp's own main that no production
+      ;; code had, advising a retraction that would have broken the very
+      ;; test that created the edge. api.modules/merge-production-cycle
+      ;; judges the production graph instead — and it can only run after
+      ;; the merge has produced a store, which is why it cannot live here.
+      ;; These stores have no namespaces at all, which is the other half of
+      ;; the same point: nothing at this layer knows what production means.
+      (let [[ours _]   (store/record-module-edge base "x.a" "x.b" :add)
+            [theirs _] (store/record-module-edge base "x.b" "x.a" :add)
+            r          (merge/merge-logs ours theirs :from "fork")]
+        (is (empty? (:conflicts r)))
+        (is (= {"x.a" #{"x.b"} "x.b" #{"x.a"}} (:modules (:store r)))
+            "the union lands — CRDT grain is not conditional on acyclicity")
+        (is (not-any? :modules-cycle (:notes r)) (pr-str (:notes r)))))))
+
+(deftest ^:external the-manifest-follows-ns-renames
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'ma.core "(ns ma.core)\n(defn shared \"Public.\" [x] x)\n")
+      (ops/module-dep! sess "mb.app" "ma.core" :prompt "app uses core")
+      (ops/ingest! sess 'mb.app
+                   (str "(ns mb.app (:require [ma.core :as core]))\n"
+                        "(defn use-it \"Uses ma.\" [x] (core/shared x))\n"))
+      (testing "renaming the CALLER module re-keys the manifest entry"
+        (is (nil? (:error (ops/ns-rename! sess 'mb.app 'mb.hub :prompt "rebrand"))))
+        (is (= {"mb.hub" #{"ma.core"}}
+               (edit.modules/modules-manifest (:store @sess)))))
+      (testing "renaming the TARGET module re-keys the dep values"
+        (is (nil? (:error (ops/ns-rename! sess 'ma.core 'mx.core :prompt "rebrand"))))
+        (is (= {"mb.hub" #{"mx.core"}}
+               (edit.modules/modules-manifest (:store @sess))))
+        (is (nil? (:error (ops/edit-replace! sess 'mb.hub 'use-it
+                                             "(defn use-it \"Uses mx.\" [x] (core/shared (inc x)))"
+                                             :prompt "still declared under the new names")))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external an-unadopted-populated-store-adopts-on-reopen
+  (let [dir  (str (java.nio.file.Files/createTempDirectory
+                   "slopp-modules-adopt"
+                   (make-array java.nio.file.attribute.FileAttribute 0)))
+        ;; one agent across the reopen — the store is "populated" only for a
+        ;; session that can see the writes, and adoption is keyed by agent
+        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "modadopt"})]
+    ;; land cross-module reality with the gate bypassed (what a bulk import
+    ;; does) — manifest stays {}, journal has no :module-edge deltas
+    (try
+      (swap! sess assoc :adopting? true)
+      (ops/ingest! sess 'ka.core "(ns ka.core)\n(defn f \"F.\" [x] x)\n")
+      (ops/ingest! sess 'kb.app
+                   (str "(ns kb.app (:require [ka.core :as core]))\n"
+                        "(defn g \"G.\" [x] (core/f x))\n"))
+      (is (= {} (edit.modules/modules-manifest (:store @sess))))
+      (finally (ops/close! sess)))
+    ;; reopen: empty manifest + populated + no edge delta ever = adopt
+    (let [sess2 (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "modadopt"})]
+      (try
+        (is (= {"kb.app" #{"ka.core"}}
+               (edit.modules/modules-manifest (:store @sess2))))
+        (is (nil? (:error (ops/edit-replace! sess2 'kb.app 'g
+                                             "(defn g \"G.\" [x] (core/f (inc x)))"
+                                             :prompt "gated edits work under the adopted manifest"))))
+        (finally (ops/close! sess2))))))
+
+(deftest ^:external cycle-refusal-is-local-to-the-new-edge
+  (testing "module-path answers reachability deterministically"
+    (let [m {"a.x" #{"b.y"} "b.y" #{"c.z"}}]
+      (is (= ["a.x" "b.y" "c.z"] (store/module-path m "a.x" "c.z")))
+      (is (nil? (store/module-path m "c.z" "a.x")))))
+  ;; The gate reads PRODUCTION edges (see
+  ;; cycle-refusal-judges-production-edges-not-test-fixtures), so the
+  ;; fixture is real code rather than hand-placed manifest entries — an
+  ;; adopted cycle from test folding no longer reaches this question at all.
+  (testing "an unrelated edge lands; closing a real chain refuses"
+    (let [sess (external/open!)]
+      (try
+        (ops/ingest! sess 'a.x "(ns a.x)\n(defn f \"F.\" [n] n)\n")
+        (ops/module-dep! sess "b.y" "a.x" :prompt "b calls a")
+        (ops/ingest! sess 'b.y
+                     "(ns b.y (:require [a.x :as x]))\n(defn g \"G.\" [n] (x/f n))\n")
+        (ops/module-dep! sess "c.z" "b.y" :prompt "c calls b")
+        (ops/ingest! sess 'c.z
+                     "(ns c.z (:require [b.y :as y]))\n(defn h \"H.\" [n] (y/g n))\n")
+        (let [r (ops/module-dep! sess "d.w" "c.z" :prompt "unrelated — must land")]
+          (is (nil? (:error r)) (pr-str r)))
+        (let [r (ops/module-dep! sess "a.x" "c.z" :prompt "would close a.x→c.z→b.y→a.x")]
+          (is (re-find #"(?i)closes a dependency cycle" (str (:error r))) (pr-str r)))
+        (let [r (ops/module-dep! sess "b.y" "d.w" :prompt "d.w reaches nothing — fine")]
+          (is (nil? (:error r)) (pr-str r)))
+        (finally (ops/close! sess))))))
+
+(deftest module-layers-condense-cycles
+  (testing "a DAG layers by deepest dependency"
+    (is (= {:layers [["a.core"] ["a.util"] ["b.app"]] :cycles []}
+           (store/module-layers {"b.app" #{"a.core" "a.util"}
+                                 "a.util" #{"a.core"}}))))
+  (testing "cycle members share a layer and are named, not poisonous"
+    (let [r (store/module-layers {"x.a" #{"x.b"} "x.b" #{"x.a"}
+                                  "y.c" #{"x.a"}})]
+      (is (= [["x.a" "x.b"] ["y.c"]] (:layers r)) (pr-str r))
+      (is (= [["x.a" "x.b"]] (:cycles r)))))
+  (testing "dep-only modules (declaring nothing) sit at layer 0"
+    (is (= [["z.leaf"] ["z.top"]]
+           (:layers (store/module-layers {"z.top" #{"z.leaf"}}))))))
+
+(deftest test-namespaces-see-package-private-deep-vars
+  ;; a -test ns folds into the package it tests — for visibility, not just
+  ;; module edges — so package-private deep helpers stay unit-testable.
+  ;; (found dogfooding the deep-module split: without this, moving a
+  ;; test-referenced helper into a deep ns forces a spurious ^:export.)
+  (let [viol (fn [rows] (seq (edit.modules/module-violations {} rows)))
+        row  (fn [from to] {:from-ns from :from-var 'f :to to})]
+    (testing "a -test ns reaches its subject's package-private deep var"
+      (is (nil? (viol [(row 'a.b-test 'a.b.impl)]))
+          "a.b-test folds to a.b, which shares a.b.impl's parent prefix")
+      (is (nil? (viol [(row 'a.b.c-test 'a.b.c.deep)]))
+          "deeper test folds too"))
+    (testing "a genuine foreign module still can't reach it"
+      (is (some #(= :visibility (:rule %)) (viol [(row 'x.y 'a.b.impl)]))))))
 
 (deftest fully-qualified-unrequired-calls-hit-the-gate
   ;; kondo emits NO var-usage row for a qualified call into a namespace the
@@ -807,22 +807,6 @@
       (let [st2 (first (store/record-module-tier st "app.core" :external))]
         (is (empty? (tiers/layering-violations st2 'app.core :external)))))))
 
-(deftest ^:external module-platforms-surface-in-query-depends
-  (let [sess (external/open!)]
-    (try
-      (ops/create-ns! sess 'plat.client :source "(ns plat.client)\n"
-                      :platform :cljs :prompt "browser")
-      (ops/create-ns! sess 'plat.shared :source "(ns plat.shared)\n"
-                      :platform :cljc :prompt "portable")
-      (ops/create-ns! sess 'plat.server :source "(ns plat.server)\n(defn ^:unused-ok f [] 1)\n")
-      (let [r (graph/query-depends sess "" :modules true)]
-        (testing "declared platforms surface in the module graph"
-          (is (= :cljs (get (:platforms r) "plat.client")) (pr-str (:platforms r)))
-          (is (= :cljc (get (:platforms r) "plat.shared")) (pr-str (:platforms r))))
-        (testing "an undeclared ns (= :jvm default) is absent, not noise"
-          (is (nil? (get (:platforms r) "plat.server")) (pr-str (:platforms r)))))
-      (finally (ops/close! sess)))))
-
 (deftest ^:external module-platform-verb
   (let [sess (external/open!)]
     (try
@@ -857,6 +841,22 @@
   (testing "the load-bearing case: a :cljc form is checked by BOTH worlds"
     (is (gates/rule-applies-to-platform? :clojure :cljc))
     (is (gates/rule-applies-to-platform? :clojurescript :cljc))))
+
+(deftest ^:external module-platforms-surface-in-query-depends
+  (let [sess (external/open!)]
+    (try
+      (ops/create-ns! sess 'plat.client :source "(ns plat.client)\n"
+                      :platform :cljs :prompt "browser")
+      (ops/create-ns! sess 'plat.shared :source "(ns plat.shared)\n"
+                      :platform :cljc :prompt "portable")
+      (ops/create-ns! sess 'plat.server :source "(ns plat.server)\n(defn ^:unused-ok f [] 1)\n")
+      (let [r (graph/query-depends sess "" :modules true)]
+        (testing "declared platforms surface in the module graph"
+          (is (= :cljs (get (:platforms r) "plat.client")) (pr-str (:platforms r)))
+          (is (= :cljc (get (:platforms r) "plat.shared")) (pr-str (:platforms r))))
+        (testing "an undeclared ns (= :jvm default) is absent, not noise"
+          (is (nil? (get (:platforms r) "plat.server")) (pr-str (:platforms r)))))
+      (finally (ops/close! sess)))))
 
 (defn ^{:rule/severity :advisory} fixture-advisory-gate
   "Test fixture: a write gate that declares its OWN default severity as
@@ -978,57 +978,6 @@
         (is (= :instrument (get-in @sess [:store :module-roles "tr.hub"])))
         (is (nil? (get-in @sess [:store :module-roles "tr.core"]))))
       (finally (ops/close! sess)))))
-
-(deftest ^:external the-whole-store-check-names-no-app-type
-  ;; R6 (no `slopp.*` surface may assume a project is a web project), and the
-  ;; sibling of `ops.engine-test/the-write-engine-names-no-app-type` — same
-  ;; rule, the other generic surface. `full_check` answers "is the STORE good",
-  ;; which is a question every project has, and it reached into the WEB tooling
-  ;; for one part of the answer: how far behind the served app image is.
-  ;;
-  ;; **It was a CYCLE before it was anything else.** With the tooling in
-  ;; `slopp.webdev`, the edges run BOTH ways: several the right way (tooling
-  ;; calls the operation surface — that is what tooling does) and this ONE
-  ;; back. `module_dep` cycle-checks adds, so the single edge blocked the whole
-  ;; regroup, and the move to `slopp.webdev` would only have renamed the cycle.
-  ;;
-  ;; And it never needed to be there. `behind` was `(store running)` delegating
-  ;; the count to `read.orient/code-deltas-since`, and `running` is the
-  ;; app-server map already on the session — nothing in it knows the app serves
-  ;; HTTP. So the R6 violation and the cycle had one fix.
-  ;;
-  ;; Why a named test rather than a layering rule: while both namespaces sat in
-  ;; module `slopp.api`, layering could not see this at all — it is a
-  ;; MODULE-grain question, so the drawer hid the violation from the check
-  ;; built to find it, the third time in this restructure. Now that the tooling
-  ;; has its own module the layering check CAN see it, and this test survives
-  ;; the move as the specific statement of what layering states generically.
-  ;; Its sibling `web-tooling-is-reached-only-by-the-transport` states it over
-  ;; the whole image; this one states it about the surface that broke.
-  (let [st  (external/built-store)
-        src (store.render/render-ns st 'slopp.ops.external)
-        pat #"slopp\.webdev"]
-    (testing "there is a population — the vacuity that ate a sibling guard"
-      ;; and it doubles as the guard on the quoted symbol above: a namespace
-      ;; name in a test body is DATA, so a rename walks straight past it and
-      ;; the check silently starts reading nothing
-      (is (< 50 (count (:namespaces st))))
-      (is (re-find #"full-check!" src)
-          "rendered the wrong namespace, or rendered nothing"))
-    (testing "the search pattern still matches something, somewhere"
-      ;; The SAME guard, one level down, and the level this test was missing:
-      ;; the pattern is data too. Phase 3 renamed the web tooling out of
-      ;; `slopp.api`, and the previous pattern — `slopp\.api\.(?:cljs|devserver)`
-      ;; — went on matching nothing, forever, silently. `slopp.mcp` names the
-      ;; tooling on purpose (it is the transport, the one declared exception),
-      ;; so if the pattern stops matching THERE it has stopped matching
-      ;; anywhere and the assertion below is measuring an empty search.
-      (is (seq (re-seq pat (store.render/render-ns st 'slopp-server.mcp)))
-          "the pattern no longer matches the tooling's own consumer — retarget it"))
-    (testing "the whole-store check names no web-tooling namespace, by any path"
-      ;; require, qualified ref and prose all read the same here on purpose
-      (is (= [] (vec (re-seq pat src)))
-          "the offending mentions are the failure value"))))
 
 (deftest no-shipped-framework-family-reaches-back-into-slopp
   ;; A shipped family is what slopp VENDORS into a user's project: today
@@ -1431,7 +1380,7 @@
                    (str "(ns mo.app (:require [mo.core :as core]))\n"
                         "(defn ^:unused-ok use-it \"Uses core.\" [x] (core/shared x))\n"))
       (testing "the must-NOT-flag half — same fixture, one rename earlier"
-        (let [r (external/full-check! sess)]
+        (let [r (external/run-full-check! sess)]
           (is (nil? (:module-violations r)) (pr-str (:module-violations r)))
           (is (= :green (:status r)) (pr-str r))))
       (testing "the rename that CREATES the violation is not refused"
@@ -1447,7 +1396,7 @@
         (is (re-find #"package-private"
                      (str (edit.modules/module-scan (:store @sess) 'mo.app)))))
       (testing "and full_check names it, red"
-        (let [r (external/full-check! sess)]
+        (let [r (external/run-full-check! sess)]
           (is (= 1 (:count (:module-violations r)))
               (pr-str (:module-violations r)))
           (is (= [{:from-ns 'mo.app :from-var 'use-it
@@ -1758,6 +1707,57 @@
         (let [r (ops/module-dep! sess "mc.app" "mc.util" :prompt "as advised")]
           (is (re-find #"CLOSES a dependency cycle" (str (:error r))) (pr-str r))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external the-whole-store-check-names-no-app-type
+  ;; R6 (no `slopp.*` surface may assume a project is a web project), and the
+  ;; sibling of `ops.engine-test/the-write-engine-names-no-app-type` — same
+  ;; rule, the other generic surface. `full_check` answers "is the STORE good",
+  ;; which is a question every project has, and it reached into the WEB tooling
+  ;; for one part of the answer: how far behind the served app image is.
+  ;;
+  ;; **It was a CYCLE before it was anything else.** With the tooling in
+  ;; `slopp.webdev`, the edges run BOTH ways: several the right way (tooling
+  ;; calls the operation surface — that is what tooling does) and this ONE
+  ;; back. `module_dep` cycle-checks adds, so the single edge blocked the whole
+  ;; regroup, and the move to `slopp.webdev` would only have renamed the cycle.
+  ;;
+  ;; And it never needed to be there. `behind` was `(store running)` delegating
+  ;; the count to `read.orient/code-deltas-since`, and `running` is the
+  ;; app-server map already on the session — nothing in it knows the app serves
+  ;; HTTP. So the R6 violation and the cycle had one fix.
+  ;;
+  ;; Why a named test rather than a layering rule: while both namespaces sat in
+  ;; module `slopp.api`, layering could not see this at all — it is a
+  ;; MODULE-grain question, so the drawer hid the violation from the check
+  ;; built to find it, the third time in this restructure. Now that the tooling
+  ;; has its own module the layering check CAN see it, and this test survives
+  ;; the move as the specific statement of what layering states generically.
+  ;; Its sibling `web-tooling-is-reached-only-by-the-transport` states it over
+  ;; the whole image; this one states it about the surface that broke.
+  (let [st  (external/built-store)
+        src (store.render/render-ns st 'slopp.ops.external)
+        pat #"slopp\.webdev"]
+    (testing "there is a population — the vacuity that ate a sibling guard"
+      ;; and it doubles as the guard on the quoted symbol above: a namespace
+      ;; name in a test body is DATA, so a rename walks straight past it and
+      ;; the check silently starts reading nothing
+      (is (< 50 (count (:namespaces st))))
+      (is (re-find #"full-check!" src)
+          "rendered the wrong namespace, or rendered nothing"))
+    (testing "the search pattern still matches something, somewhere"
+      ;; The SAME guard, one level down, and the level this test was missing:
+      ;; the pattern is data too. Phase 3 renamed the web tooling out of
+      ;; `slopp.api`, and the previous pattern — `slopp\.api\.(?:cljs|devserver)`
+      ;; — went on matching nothing, forever, silently. `slopp.mcp` names the
+      ;; tooling on purpose (it is the transport, the one declared exception),
+      ;; so if the pattern stops matching THERE it has stopped matching
+      ;; anywhere and the assertion below is measuring an empty search.
+      (is (seq (re-seq pat (store.render/render-ns st 'slopp-server.mcp)))
+          "the pattern no longer matches the tooling's own consumer — retarget it"))
+    (testing "the whole-store check names no web-tooling namespace, by any path"
+      ;; require, qualified ref and prose all read the same here on purpose
+      (is (= [] (vec (re-seq pat src)))
+          "the offending mentions are the failure value"))))
 
 (deftest a-visibility-refusal-names-the-var-to-export
   ;; The refusal's one instruction is "mark the target ^:export in its defn",

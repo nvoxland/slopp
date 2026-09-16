@@ -37,6 +37,14 @@
                :when (try (require n) true (catch Throwable _ false))]
            n))))
 
+(defn- write-trace!
+  "Emit this shard's trace as EDN beside the build. A FILE, not stdout: the
+  output parsers regex the whole joined stdout+stderr of every shard, and a
+  megabyte of form names there is a false-match surface."
+  [trace]
+  (spit (io/file (str trace-file-prefix (java.util.UUID/randomUUID) ".edn"))
+        (pr-str trace)))
+
 (def ^:export timing-file-prefix
   "Marks this run's per-namespace TIMING files in the built dir.
 
@@ -46,14 +54,6 @@
   poured into a set-valued map and throw on the first number. Two prefixes, two
   readers, neither able to see the other's files."
   "slopp-nstiming-")
-
-(defn- write-trace!
-  "Emit this shard's trace as EDN beside the build. A FILE, not stdout: the
-  output parsers regex the whole joined stdout+stderr of every shard, and a
-  megabyte of form names there is a false-match surface."
-  [trace]
-  (spit (io/file (str trace-file-prefix (java.util.UUID/randomUUID) ".edn"))
-        (pr-str trace)))
 
 (defn- write-timing!
   "Emit this shard's per-namespace wall time as EDN beside the build.

@@ -24,6 +24,58 @@
             [slopp.edit.http :as edit.http]
             [slopp.store :as store]))
 
+(defn ^:export ^{:rule/applies-to :production} rest-endpoint-schema
+  "The API-contract gate (D-web-contracts): a `:http/path` endpoint must type out
+  its contract so the client validates against the SAME schema. `:rest/response`
+  is required on EVERY endpoint; `:rest/request` is required on a BODY method
+  (`:post`/`:put`/`:patch`) — a `:get`/`:delete`/`:head` needs only a response.
+  Declare a `.cljc` malli schema VAR (shareable/reusable — `some.contracts/order`)
+  or an inline `[:map …]` for a one-off shape. Returns a teaching string, or nil
+  when clean.
+
+  **Inert until the store opts into `rest`**, which `edit.gates/gate-check`
+  decides from the namespace this gate lives in — not this gate. That is the
+  point of it living in `slopp.edit.rest` rather than in http: serving a
+  document is http's business and publishing a typed API is rest's, so an app
+  that renders HTML is never asked for a JSON contract.
+
+  **This docstring said `http.enabled` for a while and that was wrong** — an
+  error worth recording rather than quietly correcting, because a consumer
+  derived a design proposal from it and reached \"slopp requires a contract on
+  every page\". It does not.
+
+  What WAS true, until `:rest/path` existed: once a store enabled `rest`, every
+  route in it was asked for a contract, pages included — so a stylesheet
+  declared `:rest/response :string` and then `:rest/client false` to undo the
+  wrapper. Both markers existed only to answer a question the page should never
+  have been asked, and this gate asking `:rest/path` alone is what ended it."
+  [candidate ns-sym form-name]
+  (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
+    (let [m (edit.http/web-name-meta e)]
+      ;; `:rest/path` ONLY. This used to fire on `:http/path`, which was the
+      ;; only path marker there was — so it asked a stylesheet for a JSON
+      ;; contract, the stylesheet answered `:rest/response :string`, and
+      ;; `:rest/client false` existed to undo the wrapper that followed. The
+      ;; question is right; it was being asked of the wrong things.
+      (when (:rest/path m)
+        (let [body?   (contains? #{:post :put :patch} (:http/method m))
+              missing (cond-> []
+                        (not (contains? m :rest/response)) (conj :rest/response)
+                        (and body? (not (contains? m :rest/request))) (conj :rest/request))]
+          (when (seq missing)
+            (str ns-sym "/" form-name " declares the route "
+                 (pr-str (str (:rest/path m)))
+                 " but no " (str/join " / " (map str missing))
+                 " — a :rest/path is a TYPED api, so it types out its contract"
+                 " and the client validates against the SAME schema"
+                 " (D-web-contracts). Add "
+                 (str/join " and " (map str missing))
+                 " to the name metadata: a .cljc malli schema VAR"
+                 " (shareable/reusable, e.g. some.contracts/order) or an inline"
+                 " [:map …] for a one-off shape. If this is content rather than"
+                 " an api, declare :http/path instead and it is asked for"
+                 " none of this.")))))))
+
 (defn ^:export rest-path-prefix
   "The url prefix this store's REST API lives under — `rest.prefix`, or
   `\"/api\"` — NORMALISED: trailing slashes trimmed, a leading one added.
@@ -114,55 +166,3 @@
              " can rely on it without reading metadata. If this IS an API,"
              " declare :rest/path and give it a :rest/response; if it is"
              " content, serve it outside " (pr-str prefix) ".")))))
-
-(defn ^:export ^{:rule/applies-to :production} rest-endpoint-schema
-  "The API-contract gate (D-web-contracts): a `:http/path` endpoint must type out
-  its contract so the client validates against the SAME schema. `:rest/response`
-  is required on EVERY endpoint; `:rest/request` is required on a BODY method
-  (`:post`/`:put`/`:patch`) — a `:get`/`:delete`/`:head` needs only a response.
-  Declare a `.cljc` malli schema VAR (shareable/reusable — `some.contracts/order`)
-  or an inline `[:map …]` for a one-off shape. Returns a teaching string, or nil
-  when clean.
-
-  **Inert until the store opts into `rest`**, which `edit.gates/gate-check`
-  decides from the namespace this gate lives in — not this gate. That is the
-  point of it living in `slopp.edit.rest` rather than in http: serving a
-  document is http's business and publishing a typed API is rest's, so an app
-  that renders HTML is never asked for a JSON contract.
-
-  **This docstring said `http.enabled` for a while and that was wrong** — an
-  error worth recording rather than quietly correcting, because a consumer
-  derived a design proposal from it and reached \"slopp requires a contract on
-  every page\". It does not.
-
-  What WAS true, until `:rest/path` existed: once a store enabled `rest`, every
-  route in it was asked for a contract, pages included — so a stylesheet
-  declared `:rest/response :string` and then `:rest/client false` to undo the
-  wrapper. Both markers existed only to answer a question the page should never
-  have been asked, and this gate asking `:rest/path` alone is what ended it."
-  [candidate ns-sym form-name]
-  (when-let [e (store/form-named candidate (symbol (str ns-sym)) (symbol (str form-name)))]
-    (let [m (edit.http/web-name-meta e)]
-      ;; `:rest/path` ONLY. This used to fire on `:http/path`, which was the
-      ;; only path marker there was — so it asked a stylesheet for a JSON
-      ;; contract, the stylesheet answered `:rest/response :string`, and
-      ;; `:rest/client false` existed to undo the wrapper that followed. The
-      ;; question is right; it was being asked of the wrong things.
-      (when (:rest/path m)
-        (let [body?   (contains? #{:post :put :patch} (:http/method m))
-              missing (cond-> []
-                        (not (contains? m :rest/response)) (conj :rest/response)
-                        (and body? (not (contains? m :rest/request))) (conj :rest/request))]
-          (when (seq missing)
-            (str ns-sym "/" form-name " declares the route "
-                 (pr-str (str (:rest/path m)))
-                 " but no " (str/join " / " (map str missing))
-                 " — a :rest/path is a TYPED api, so it types out its contract"
-                 " and the client validates against the SAME schema"
-                 " (D-web-contracts). Add "
-                 (str/join " and " (map str missing))
-                 " to the name metadata: a .cljc malli schema VAR"
-                 " (shareable/reusable, e.g. some.contracts/order) or an inline"
-                 " [:map …] for a one-off shape. If this is content rather than"
-                 " an api, declare :http/path instead and it is asked for"
-                 " none of this.")))))))

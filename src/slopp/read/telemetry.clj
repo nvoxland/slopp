@@ -202,74 +202,6 @@
   [{:keys [tool op]}]
   (if (seq (str op)) (str tool "/" op) (str tool)))
 
-(defn ^:export read-cost
-  "What a turn's answers COST to send, and whether withholding one saved
-  anything — the pure fold over the same `calls` ring `call-timing` reads,
-  using the response facts the wire records alongside each call: `:chars` on
-  the wire, `:trimmed?` when the size gate cut the payload, `:stub?` when the
-  knowledge differential withheld it, `:spooled` for the retrieval id either
-  path minted, and `:detail-asked` for what a retrieval call went back for.
-
-  Returns `{:chars :withheld :trimmed :stubbed :refetched :refetched-chars
-  :refetched-elsewhere :refetch-rate :by-tool}`, or NIL when no call carries a
-  size — the ring predates this record, and a zeroed total over unmeasured
-  calls reads exactly like a measured zero.
-
-  **The re-fetch is the number the tier was missing.** Reads are 52% of the
-  token bill and got the least optimization; the one lever shipped on that
-  tier is the size gate, and it was measured once, by hand, off a single
-  transcript: an 8,367-char trimmed read plus a 21,676-char re-fetch, against
-  21,676 for sending it whole. A withholding that is opened anyway is a NET
-  LOSS, and until this existed nothing could tell that case from the one where
-  the agent never came back. `:refetch-rate` is over what was WITHHELD, so it
-  is nil when nothing was — there is no rate, rather than a rate of none.
-
-  A re-fetch is charged to the tool that MINTED the id, not to the retrieval
-  call that spent the characters. Charged the other way the ledger ranks
-  `query_detail` as the expensive tool and leaves every trimming tool looking
-  clean, which inverts the thing being asked.
-
-  `:refetched-elsewhere` counts retrievals naming an id no call in this turn
-  minted — a trim in one ask opened in the next. Attributing those to nobody
-  would let a turn boundary read as evidence the trim paid.
-
-  Rows are not capped. A turn touches a handful of tools and each row is a few
-  dozen characters, well inside what `refusal-samples` already allows onto a
-  delta; a cap here would silently shrink the population the ledger folds."
-  [calls]
-  (when (seq (filter :chars calls))
-    (let [sized    (filter :chars calls)
-          minted   (into {} (keep (fn [{:keys [spooled] :as c}]
-                                    (when spooled [spooled (tool-label c)]))
-                                  calls))
-          fetches  (filter :detail-asked calls)
-          hits     (filter #(minted (:detail-asked %)) fetches)
-          re-by    (frequencies (map #(minted (:detail-asked %)) hits))
-          withheld (count (filter #(or (:trimmed? %) (:stub? %)) calls))
-          rows     (->> (group-by tool-label sized)
-                        (map (fn [[t cs]]
-                               (let [n-tr (count (filter :trimmed? cs))
-                                     n-st (count (filter :stub? cs))
-                                     n-re (get re-by t 0)]
-                                 (cond-> {:tool t :n (count cs)
-                                          :chars (reduce + 0 (map :chars cs))}
-                                   (pos? n-tr) (assoc :trimmed n-tr)
-                                   (pos? n-st) (assoc :stubbed n-st)
-                                   (pos? n-re) (assoc :refetched n-re)))))
-                        (sort-by (juxt (comp - :chars) :tool))
-                        vec)]
-      {:calls               (count sized)
-       :chars               (reduce + 0 (map :chars sized))
-       :withheld            withheld
-       :trimmed             (count (filter :trimmed? calls))
-       :stubbed             (count (filter :stub? calls))
-       :refetched           (count hits)
-       :refetched-chars     (reduce + 0 (keep :chars hits))
-       :refetched-elsewhere (- (count fetches) (count hits))
-       :refetch-rate        (when (pos? withheld)
-                              (double (/ (count hits) withheld)))
-       :by-tool             rows})))
-
 (defn ^:export call-timing
   "A turn's wall clock split into the part slopp spent working, the part it
   did not, and the part nobody was there for — the pure fold over `calls`,
@@ -388,6 +320,74 @@
                                                                        refusal-sample-chars))}))))
                                     (take refusal-samples)
                                     vec)})})))
+
+(defn ^:export read-cost
+  "What a turn's answers COST to send, and whether withholding one saved
+  anything — the pure fold over the same `calls` ring `call-timing` reads,
+  using the response facts the wire records alongside each call: `:chars` on
+  the wire, `:trimmed?` when the size gate cut the payload, `:stub?` when the
+  knowledge differential withheld it, `:spooled` for the retrieval id either
+  path minted, and `:detail-asked` for what a retrieval call went back for.
+
+  Returns `{:chars :withheld :trimmed :stubbed :refetched :refetched-chars
+  :refetched-elsewhere :refetch-rate :by-tool}`, or NIL when no call carries a
+  size — the ring predates this record, and a zeroed total over unmeasured
+  calls reads exactly like a measured zero.
+
+  **The re-fetch is the number the tier was missing.** Reads are 52% of the
+  token bill and got the least optimization; the one lever shipped on that
+  tier is the size gate, and it was measured once, by hand, off a single
+  transcript: an 8,367-char trimmed read plus a 21,676-char re-fetch, against
+  21,676 for sending it whole. A withholding that is opened anyway is a NET
+  LOSS, and until this existed nothing could tell that case from the one where
+  the agent never came back. `:refetch-rate` is over what was WITHHELD, so it
+  is nil when nothing was — there is no rate, rather than a rate of none.
+
+  A re-fetch is charged to the tool that MINTED the id, not to the retrieval
+  call that spent the characters. Charged the other way the ledger ranks
+  `query_detail` as the expensive tool and leaves every trimming tool looking
+  clean, which inverts the thing being asked.
+
+  `:refetched-elsewhere` counts retrievals naming an id no call in this turn
+  minted — a trim in one ask opened in the next. Attributing those to nobody
+  would let a turn boundary read as evidence the trim paid.
+
+  Rows are not capped. A turn touches a handful of tools and each row is a few
+  dozen characters, well inside what `refusal-samples` already allows onto a
+  delta; a cap here would silently shrink the population the ledger folds."
+  [calls]
+  (when (seq (filter :chars calls))
+    (let [sized    (filter :chars calls)
+          minted   (into {} (keep (fn [{:keys [spooled] :as c}]
+                                    (when spooled [spooled (tool-label c)]))
+                                  calls))
+          fetches  (filter :detail-asked calls)
+          hits     (filter #(minted (:detail-asked %)) fetches)
+          re-by    (frequencies (map #(minted (:detail-asked %)) hits))
+          withheld (count (filter #(or (:trimmed? %) (:stub? %)) calls))
+          rows     (->> (group-by tool-label sized)
+                        (map (fn [[t cs]]
+                               (let [n-tr (count (filter :trimmed? cs))
+                                     n-st (count (filter :stub? cs))
+                                     n-re (get re-by t 0)]
+                                 (cond-> {:tool t :n (count cs)
+                                          :chars (reduce + 0 (map :chars cs))}
+                                   (pos? n-tr) (assoc :trimmed n-tr)
+                                   (pos? n-st) (assoc :stubbed n-st)
+                                   (pos? n-re) (assoc :refetched n-re)))))
+                        (sort-by (juxt (comp - :chars) :tool))
+                        vec)]
+      {:calls               (count sized)
+       :chars               (reduce + 0 (map :chars sized))
+       :withheld            withheld
+       :trimmed             (count (filter :trimmed? calls))
+       :stubbed             (count (filter :stub? calls))
+       :refetched           (count hits)
+       :refetched-chars     (reduce + 0 (keep :chars hits))
+       :refetched-elsewhere (- (count fetches) (count hits))
+       :refetch-rate        (when (pos? withheld)
+                              (double (/ (count hits) withheld)))
+       :by-tool             rows})))
 
 (defn- model-requests
   "The window's model-side request records: the `:otel` deltas still in the
