@@ -236,10 +236,10 @@ and unchecked. Layering *within* a component is no longer a gate.
 | `slopp.ops` | operations + verification orchestration; session atom = cache of one line (store, image, db conn, lines, trace map) |
 | `slopp.webdev` | tooling for building a WEB project — app type #1, and named so type #2 needs no rename (R6): `webdev.live` (the server slopp runs for you so a project under development is always up) and `webdev.cljs` (the client build — ClojureScript on the JVM, plus the typed client generated from the endpoints' own contracts). Consumed ONLY by `slopp.mcp`, which is the transport and reaches every module; a generic surface reaching in here is the R6 violation `slopp.modules-test/web-tooling-is-reached-only-by-the-transport` exists to catch. NOT `slopp.web` — that is the layer-0 framework a user's app runs on, and mixing tooling under the prefix would make one mixed-layer module, since `module-of` is the first two segments |
 | `slopp.read` | every question asked OF the store, one layer BELOW the operations that answer with it: `read.query` (the `query_*` front door), `read.history` (the store over time — status-at/after, resolve-at, verify-at, plus the human renderings), `read.orient` (`session_brief`, form cards, host warnings), `read.modules` (the module system's read side, against `slopp.edit.modules`'s write side), `read.telemetry` (the folds slopp measures itself with) |
-| `slopp.mcp` | MCP over stdio; dispatch (`call-tool`/`handle`), the serve loop (+ tools/list_changed), wire shaping (spool/told/hints), turn gate |
-| `slopp.mcp.tools` | the tool REGISTRY (deep): six descriptor groups, `read-only-tools` → readOnlyHint annotations, write-tool sets, the composed wire list, the cheat sheet |
-| `slopp.mcp.smells` | workflow-smell machinery (deep): the smell registry, per-session counters, the hint chooser |
-| `slopp.mcp.turn` | one-shot CLI for Claude Code hooks: verbatim-prompt turn markers appended out-of-band |
+| `slopp-server.mcp` | MCP dispatch (`call-tool`/`handle`) — served over HTTP by `slopp-server.process`, not stdio; the serve loop (+ tools/list_changed), wire shaping (spool/told/hints), turn gate |
+| `slopp-server.mcp.tools` | the tool REGISTRY (deep): six descriptor groups, `read-only-tools` → readOnlyHint annotations, write-tool sets, the composed wire list, the cheat sheet |
+| `slopp-server.mcp.smells` | workflow-smell machinery (deep): the smell registry, per-session counters, the hint chooser |
+| `slopp-server.mcp.turn` | one-shot CLI for Claude Code hooks: verbatim-prompt turn markers appended out-of-band |
 | `slopp.build` | explicit build: files + GraalVM native-image recipe (O4). Pure generators, zero internal requires — layer 0, because its three callers (`slopp.git`, `slopp.ops.external`, `slopp.webdev.cljs`) sit in different modules |
 | `slopp.kernel.boot` | run a store's program straight from `store.db` (no exported source): load-string every ns into THIS jvm in dependency order (`*loaded-libs*` stamp = in-process `load-ns!`), then invoke the entry (default `slopp.mcp/-main`). `--snapshot` / `--live` (watches `data_version`, self-reloads). The on-disk kernel + `slopp.kernel.rt` are slopp-the-tool, not project source |
 | `slopp.index.deps` | P4-deps: external-dependency ANALYSIS — resolve a dep's own jars (classpath diff) and extract its API surface (provided namespaces + var arities/docs/macro flags) via clj-kondo, content-addressed by `coord@version` |
@@ -263,7 +263,7 @@ that still exist; the PHRASE is what went.
 |---|---|
 | "the dev server" | keeping a web project live in development — the mechanism is web tooling's, and it is `live` there |
 | "the app server" | the web project's own server, on `web.port` |
-| "the reviewer UI" / "reviewer API" | the external API (`slopp.api.*`) and its consumers. A viewing UI is ONE consumer, not the surface's identity |
+| "the reviewer UI" / "reviewer API" | the external API (`slopp-server.api.*`) and its consumers. A viewing UI is ONE consumer, not the surface's identity |
 | "the UI hub" | "a hub" / "the hub". A hub is a ROLE — one process per machine holding a registry fed by heartbeats. Rendering pages is what today's only hub happens to do with that registry, not what a hub is |
 
 **R6 — an app TYPE never owns a generic name.** Support for an app type lives

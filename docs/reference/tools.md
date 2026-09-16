@@ -145,12 +145,11 @@ The producer serves `slopp.rest.paths/paths-document` over its own
 namespace list:
 
 ```clojure
-{:slopp/contract-version 2
- :endpoints [{:method :get :path "/api/timeline" :name timeline
-              :handler slopp.api.endpoints/timeline
-              :doc "GET /api/timeline -- commit points newest first, plus the working set."
-              :media-type "application/json" :effectful? false :auth :public
-              :request nil :response [:map [:commit points …]]}]}
+{:paths [{:method :get :path "/api/projects/:slug/timeline" :name timeline
+          :handler slopp-server.api.endpoints/timeline
+          :doc "GET /api/projects/:slug/timeline -- commit points newest first, plus the working set."
+          :media-type "application/json" :effectful? false :auth :public
+          :request nil :response [:map [:commit points …]]}]}
 ```
 
 `:doc` is the handler's own docstring, de-indented and whole -- so a handler

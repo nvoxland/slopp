@@ -25,9 +25,10 @@ and produces the exact signature of a stale jar — your fix runs nowhere and
 nothing says why. (`deps.edn` puts `src` on the classpath, so a plain REPL
 from a checkout does load the disk copy; that is the only thing it is for.)
 
-What IS special about the kernel is that live mode cannot hot-reload it — it is
-the code doing the reloading. A change there needs `build` → `clojure -T:build
-uber` → restart the MCP server.
+The daemon runs a snapshot with no live-reload (`D-no-daemon-live`), so ANY
+change to slopp's own code needs `build` → `clojure -T:build uber` → restart
+the MCP server. The kernel is only special in that it is the code doing the
+loading, so it must come from the rebuilt jar to exist at all.
 
 **"Restart" means two different events, and the `restart` TOOL is the one that
 does NOT pick up a new jar.** Worth stating because a consumer spent ten
@@ -82,13 +83,13 @@ instance the daemon re-serves at each `done` (see
 **Startup is async (concurrent sessions).** The MCP server completes its
 `initialize` handshake as soon as the store VALUE loads and boots the image
 (the child JVM that loads every namespace — the slow part) on a background
-thread (`open!`'s `:slopp.api/async-image?`, on for the server). Read-only
+thread (`open!`'s `:slopp.ops/async-image?`, on for the server). Read-only
 store tools serve immediately; oracle and write tools `await` the boot on
 first use. This is what keeps a second session on the same store dir from
 racing the client's MCP connect timeout while the first session is busy (e.g.
 mid-`full_check`) — the store is SQLite-WAL + append-CAS multi-process by
-design, so two live sessions share it and each hot-reloads the other's
-commits. If a startup still fails under heavy load, bump `MCP_TIMEOUT` (ms)
+design, so two concurrent sessions share it and each picks up the other's
+commits (via journal sync, not a code reload — there is none). If a startup still fails under heavy load, bump `MCP_TIMEOUT` (ms)
 in `.claude/settings.json`.
 
 In this repo the server is normally the **plugin's**, running the local jar
@@ -145,8 +146,9 @@ build script that has never heard of a role.
 **The machine daemon is a release; this checkout is a project.** Since
 2026-09-12 (`D-release-base`) the daemon every session attaches to runs a
 released jar from a neutral dir, and slopp2 is opened on it like any other
-project. The in-progress version is slopp2's dev instance — `run.daemon.main =
-slopp.daemon/-main`, `run.daemon.port = 7358` in the `dev` config — booted from
+project. The in-progress version is slopp2's dev instance — `app.main =
+slopp-server.process/-main` in capabilities, with `http.port` overlaid to 7358
+in the `dev` config — booted from
 the store by the machine daemon and refreshed at every `done`. To exercise it,
 start a second agent with `SLOPP_PORT=7358` in its environment; the
 plugin's MCP url, hooks and CLI all name that port and never start a daemon

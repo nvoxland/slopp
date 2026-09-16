@@ -161,11 +161,12 @@ plus the links, and skips cleanly when `ideas/` is absent (a fresh clone).
   session works in a private line; a branch only ever contains work that
   reached a done with nothing red attributable to it. `session_brief` says
   how much is un-landed. Two
-  consequences bite HERE specifically, because slopp hosts itself: the
-  `--live` host reloads from the trunk, so **your edits to slopp's own tool
-  code do not reach the running server until you `done`** — the verification
-  image always has them, which is why tests stay right about your work while
-  the server is still right about main. And if a `done` is red, nothing
+  consequences bite HERE specifically, because slopp hosts itself: the daemon
+  runs a SNAPSHOT of the AOT jar (`D-no-daemon-live`, no live-reload), so
+  **your edits to slopp's own tool code do not reach the running server until
+  the jar is rebuilt and the daemon restarted** — the verification image
+  always has them, which is why tests stay right about your work while the
+  server still runs the last-built jar. And if a `done` is red, nothing
   lands; the thread keeps the work, so iterate and done again rather than
   reaching for the db. A red that is provably somebody ELSE's — its failing
   tests exercise nothing you touched — does not hold your thread: `done`
@@ -223,7 +224,7 @@ plus the links, and skips cleanly when `ideas/` is absent (a fresh clone).
 | `.context/store-and-persistence.md` | `slopp.store`, `slopp.store.db`, `slopp.store.render` |
 | `.context/verification.md` | `slopp.kernel.rt`, `slopp.image`, verification in `slopp.ops.engine` |
 | `.context/dialect.md` | `slopp.edit` dialect gate, `slopp.index` `!`-effects |
-| `.context/operation-api.md` | `slopp.ops`, `slopp.mcp`, `slopp.edit.refactor` |
+| `.context/operation-api.md` | `slopp.ops`, `slopp-server.mcp`, `slopp.edit.refactor` |
 | `.context/dogfooding.md` | user tests, benchmark suite, findings backlog |
 | `.context/working-in-this-repo.md` | dev workflow, REPL, tests, commits |
 | `.context/writing-style.md` | `docs/`, the blog, release notes, README copy |

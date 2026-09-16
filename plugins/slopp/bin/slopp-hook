@@ -26,5 +26,5 @@ printf '{"hook":%s}' "$IN" | curl -sS -m "${1:-8}" --data-binary @- \
   -H "Content-Type: application/json" \
   -H "X-Slopp-Dir: $PWD" -H "X-Slopp-Token: $DTOKEN" \
   ${SLOPP_CLI:+-H "X-Slopp-Cli: 1"} \
-  "$DURL/projects/_/hook" 2>/dev/null || true
+  "$DURL/hook" 2>/dev/null || true
 exit 0

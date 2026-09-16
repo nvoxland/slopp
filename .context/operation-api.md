@@ -1,4 +1,4 @@
-# Operation API (`slopp.ops` + `slopp.mcp`)
+# Operation API (`slopp.ops` + `slopp-server.mcp`)
 
 ## Session
 

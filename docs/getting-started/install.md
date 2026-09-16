@@ -131,6 +131,6 @@ clojure -M -m slopp.kernel.boot .
 The working tree is fileless: only the boot kernel (`src/slopp/kernel/boot.clj`,
 `src/slopp/kernel/rt.clj`) and `deps.edn` are real files. `slopp.kernel.boot` loads every
 namespace's byte-exact source out of `store.db` into the JVM in dependency
-order and invokes the entry point, so a plain `-m slopp.mcp` finds nothing.
+order and invokes the entry point, so a plain `-m slopp-server.mcp` finds nothing.
 
 Next: [your first session](first-session.md).

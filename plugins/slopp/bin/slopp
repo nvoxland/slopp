@@ -77,7 +77,7 @@ case "${1:-}" in
     # is launched from a NEUTRAL dir (~/.slopp, no store), never a project:
     # the projects it serves are whatever attaches. Working ON slopp needs
     # none of this: the machine daemon is a release and slopp's checkout is
-    # a project like any other, whose dev instance (its run.daemon entry)
+    # a project like any other, whose dev instance (its app.main entry)
     # is the in-progress version. SLOPP_DAEMON_DIR=$PWD boots the daemon from
     # a project's own store instead of the neutral dir (still snapshot — the
     # kernel loads once and does not hot-reload its own code).
@@ -88,7 +88,7 @@ case "${1:-}" in
     # the entry its DIR, and a dir is not a port. The kernel loads the code
     # once and serves it; there is no live mode.
     daemon_file
-    set -- "$DIR" --main slopp.daemon/-main "${1:-$PORT}"
+    set -- "$DIR" --main slopp-server.process/-main "${1:-$PORT}"
     ;;
   --call)
     TOOL="${2:-}"; RAW="${3-}"; [ -z "$RAW" ] && RAW="{}"
@@ -164,7 +164,7 @@ if [ -n "$TOOL" ] && [ -s "$ARGSFILE" ]; then
   code="$(curl -sS -m 3600 -o "$OUT" -w '%{http_code}' --data-binary @"$ARGSFILE" \
             -H "Content-Type: text/plain; charset=utf-8" \
             -H "X-Slopp-Dir: $PWD" -H "X-Slopp-Token: $DTOKEN" \
-            "$DURL/projects/_/cli" 2>&1)" || { kill "$BEAT" 2>/dev/null; echo "slopp: the daemon refused or dropped the call ($code)" >&2; rm -f "$ARGSFILE" "$OUT"; exit 2; }
+            "$DURL/cli" 2>&1)" || { kill "$BEAT" 2>/dev/null; echo "slopp: the daemon refused or dropped the call ($code)" >&2; rm -f "$ARGSFILE" "$OUT"; exit 2; }
   kill "$BEAT" 2>/dev/null; wait "$BEAT" 2>/dev/null || true
   cat "$OUT"; echo
   rm -f "$ARGSFILE" "$OUT"

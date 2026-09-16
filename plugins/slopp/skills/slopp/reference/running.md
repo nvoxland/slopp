@@ -146,15 +146,15 @@ session's `done` refreshes that one server.
 
 **This is the only server, and the plugin talks to it directly.** The
 plugin's MCP entry is the daemon's URL
-(`http://127.0.0.1:${SLOPP_PORT:-7357}/api/projects/_/mcp`, the
+(`http://127.0.0.1:${SLOPP_PORT:-7357}/api/mcp`, the
 project named by an `X-Slopp-Dir: ${CLAUDE_PROJECT_DIR}` header Claude Code
-expands) — no process per session at all. A session id the daemon no
+expands — the door is slug-free) — no process per session at all. A session id the daemon no
 longer holds (a restart, an idle reap) is re-attached UNDER THAT ID when
 the request names its dir, so a daemon restart costs one late answer, not
 a reconnect. The hooks and `slopp <op>` are one `curl` each onto the
 daemon's `hook` and `cli` doors; the rules they used to carry (which ask to
 record, which Bash command routes around the store, how a heredoc splits
-into steps) live in `slopp.daemon.hooks`, tested. The plugin needs bash,
+into steps) live in `slopp-server.process.hooks`, tested. The plugin needs bash,
 curl and java, nothing else. The per-session JVM is retired (2026-09-08):
 there is no `SLOPP_DAEMON=0`, no stdio loop in the jar, and `java -jar
 slopp.jar <dir>` IS `slopp daemon`. A shell call fails without a daemon —
@@ -163,8 +163,9 @@ writes it stranded.
 
 **Working ON slopp is working through a released slopp.** The machine daemon
 is a release; slopp's own checkout is a project like any other, and its dev
-config declares the in-progress version as a dev instance: `run.daemon.main =
-slopp.daemon/-main`, `run.daemon.port = 7358`. The machine daemon boots that
+config declares the in-progress version as a dev instance: `app.main =
+slopp-server.process/-main`, with `http.port` overlaid to 7358 in the `dev`
+overlay. The machine daemon boots that
 child from the store, refreshes it at every `done`, and the child — told its
 role — serves whatever attaches to IT and never manages its own project's app
 server. To drive the in-progress version, give a second agent

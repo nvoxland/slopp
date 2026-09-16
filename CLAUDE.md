@@ -19,6 +19,9 @@ wiring belongs below.
   work / what would Y touch" questions to it so source dumps stay out of the
   main context.
 - **The dev session runs a local jar**, not the pinned release:
-  `SLOPP_JAR=$PWD/target/slopp.jar`, with `SLOPP_LIVE=1` set in
-  `.claude/settings.json`. Rebuild it (`clojure -T:build uber`) only for
-  kernel or dependency changes — store code hot-reloads.
+  `SLOPP_JAR=$PWD/target/slopp.jar`. There is NO live-reload
+  (`D-no-daemon-live`): the daemon runs the AOT jar as a SNAPSHOT, so ANY
+  change to slopp's own tool/serving code reaches the running daemon only
+  after a jar rebuild (`clojure -T:build uber`, over a fresh materialization)
+  and a restart. The verification image always has your un-landed thread
+  work; the running daemon serves the last-built jar until it is rebuilt.

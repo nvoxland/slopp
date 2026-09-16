@@ -280,7 +280,7 @@ ends a turn's batch by definition — its verdict is what decides the next move.
    suite still cover every namespace; only the `^:external` tier narrows, to
    the tests your changes since the last commit point can REACH. So it is a
    reachability filter, not a discount: change a leaf namespace and it runs a
-   handful of tests; change `slopp.ops`, `slopp.mcp` or `slopp.rules` and
+   handful of tests; change `slopp.ops`, `slopp-server.mcp` or `slopp.rules` and
    nearly everything reaches you.
    Measured here, both gears on the same store: full = 1297 external tests in
    ~223s; `affected` after a change to `ops`/`mcp`/`rules` = 839 tests in
