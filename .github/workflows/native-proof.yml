@@ -28,7 +28,7 @@ jobs:
           STORE = sys.argv[1]; os.makedirs(STORE, exist_ok=True)
           home = os.path.expanduser("~"); os.makedirs(home + "/.slopp", exist_ok=True)
           log = open("/tmp/daemon.log", "w")
-          daemon = subprocess.Popen(["clojure", "-M", "-m", "slopp.daemon", "7357"], stdout=log, stderr=subprocess.STDOUT)
+          daemon = subprocess.Popen(["clojure", "-M", "-m", "slopp-server.process", "7357"], stdout=log, stderr=subprocess.STDOUT)
           for _ in range(180):
               try:
                   urllib.request.urlopen("http://127.0.0.1:7357/api/status", timeout=2); break
@@ -93,7 +93,7 @@ jobs:
           STORE = sys.argv[1]; os.makedirs(STORE, exist_ok=True)
           home = os.path.expanduser("~"); os.makedirs(home + "/.slopp", exist_ok=True)
           log = open("/tmp/daemon.log", "w")
-          daemon = subprocess.Popen(["clojure", "-M", "-m", "slopp.daemon", "7357"], stdout=log, stderr=subprocess.STDOUT)
+          daemon = subprocess.Popen(["clojure", "-M", "-m", "slopp-server.process", "7357"], stdout=log, stderr=subprocess.STDOUT)
           for _ in range(180):
               try:
                   urllib.request.urlopen("http://127.0.0.1:7357/api/status", timeout=2); break

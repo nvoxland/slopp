@@ -53,7 +53,7 @@ jobs:
           # -Duser.home, not $HOME: the JVM reads its home from the OS, so
           # the daemon file lands where the JVM thinks home is
           SMOKE=/tmp/smoke-home; mkdir -p "$SMOKE/.slopp"
-          java -Duser.home="$SMOKE" -jar "$GITHUB_WORKSPACE/target/slopp.jar" "$SMOKE/.slopp" --main slopp.daemon/-main 7399 > /tmp/smoke.log 2>&1 &
+          java -Duser.home="$SMOKE" -jar "$GITHUB_WORKSPACE/target/slopp.jar" "$SMOKE/.slopp" --main slopp-server.process/-main 7399 > /tmp/smoke.log 2>&1 &
           pid=$!
           ok=""
           for i in $(seq 1 120); do
