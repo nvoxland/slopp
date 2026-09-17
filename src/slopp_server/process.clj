@@ -544,128 +544,6 @@
   (when-let [p (:port (:server @state))]
     (str "http://127.0.0.1:" p "/p/" (:slug proj))))
 
-(defn ^:export attach!
-  "Open an MCP session on the project at `dir`, opening the project itself
-  when this is its first — under the display name `slug` the client asked
-  for, or the dir's basename: `{:sid :session}`.
-
-  ONE slopp session per MCP session, on the shared store. A session holds a
-  thread, a line, a store value and a read ledger, and a write naming a
-  different thread reloads all of it — which is one agent's business, not
-  every agent's on the project. What the project shares lives on the
-  project record: its registry row, its check queue (so two whole-store
-  checks at one content are one run), and its READER — the session the
-  read API answers from and the app server's owner, which every session
-  names as its `:app-owner` as a DELAY: a project whose app nobody serves
-  and whose API nobody reads never opens it, and a large store is not
-  loaded twice for nothing. The FIRST attach starts the app server,
-  backgrounded, when the store runs one at all: one per project, on the
-  branch the project opened on, as decided.
-
-  The session's oracle is LAZY: nothing boots until a call needs an image,
-  so a session that only reads — most of them — costs no child JVM; and
-  when one does boot it asks the machine-wide budget first. What this
-  session lands is announced to the project's other sessions.
-
-  Under the lock for the whole open, deliberately: two first-attaches on
-  one dir must not both mint the project."
-  [dir slug & {:keys [sid]}]
-  (locking state
-    (let [now     (System/currentTimeMillis)
-          sid     (or (not-empty (str sid)) (str (java.util.UUID/randomUUID)))
-          [proj first?] (ensure-project! dir slug)
-          owner   (delay (:reader (api! dir)))
-          session (external/open! {:slopp.ops/dir         dir
-                                   :slopp.ops/lazy-image? true
-                                   ;; the session's own label; the THREAD an
-                                   ;; agent writes on is what it passes
-                                   :slopp.ops/agent-id    (str "mcp-" (subs sid 0 (min 8 (count sid))))})]
-      (swap! session assoc :require-turns? true :daemon? true
-             :app-owner owner
-             :op-cards mcp/op-cards
-             :api-url (api-url proj)
-             :pages-url (pages-url proj)
-             :check-queue (:check-queue proj)
-             :image-permit image-permit
-             :on-landed (fn [land] (announce-landing! dir sid land)))
-      (swap! state #(-> %
-                        (update-in [:projects dir :sessions] (fnil conj #{}) sid)
-                        (assoc-in [:sessions sid] {:dir dir :session session
-                                                   :started now :last-seen now})))
-      (when (and first? (mcp/app-managed? session))
-        (future
-          (mcp/start-app! @owner)
-          ;; the project may have CLOSED while the boot ran — its last
-          ;; detach stopped \"the server the reader holds\", which was nil
-          ;; until this returned. Nothing else will ever stop this child.
-          (when-not (get-in @state [:projects dir])
-            (mcp/stop-app! @owner))))
-      {:sid sid :session session})))
-
-(defn- cli-session!
-  "The CLI session the write door runs a project's calls on, opened on
-  first use — opening the project under `slug` if nothing is attached —
-  and touched on every call so the reaper knows it is in use. Writable,
-  turn-gated like every real session, carrying the daemon's token as its
-  `:call-token`, the project's reader as its app owner (a delay, like every
-  session's) and the project's check queue; its oracle is lazy and
-  budgeted, like every daemon session's, and what it lands is announced."
-  [dir slug]
-  (locking state
-    (let [now (System/currentTimeMillis)
-          [proj _] (ensure-project! dir slug)]
-      (if-let [s (get-in @state [:projects dir :cli :session])]
-        (do (swap! state assoc-in [:projects dir :cli :last-seen] now)
-            s)
-        (let [session (external/open! {:slopp.ops/dir         dir
-                                       :slopp.ops/lazy-image? true
-                                       :slopp.ops/agent-id    (str "cli-" (subs (str (java.util.UUID/randomUUID)) 0 8))})]
-          (swap! session assoc :require-turns? true :daemon? true
-                 :call-token (token)
-                 :app-owner (delay (:reader (api! dir)))
-                 :op-cards mcp/op-cards
-                 :api-url (api-url proj)
-                 :pages-url (pages-url proj)
-                 :check-queue (:check-queue proj)
-                 :image-permit image-permit
-                 :on-landed (fn [land] (announce-landing! dir :cli land)))
-          (swap! state assoc-in [:projects dir :cli] {:session session :last-seen now})
-          session)))))
-
-(defn- mcp-doors
-  "This server's doors, lent to the MCP envelope: sessions by id, attach by
-  the dir a request names (`X-Slopp-Dir`), detach. No path slug: the door is
-  slug-free and the project's display name is the dir's basename."
-  []
-  {:slopp.mcp.http/lookup  lookup!
-   :slopp.mcp.http/attach! (fn [req]
-                             (let [{:keys [dir error]} (project-dir req)]
-                               (if error
-                                 {:error error}
-                                 (attach! dir nil :sid (get-in req [:headers "mcp-session-id"])))))
-   :slopp.mcp.http/detach! detach!})
-
-^:unsafe (defn ^{:http/method :post :rest/path "/api/mcp" :http/auth :public
-                 :rest/request jsonrpc-contract
-                 :rest/response :any
-                 :rest/unconstrained-ok "the answer is the JSON-RPC envelope's, whatever the message asked"}
-  mcp-post-endpoint
-  "`POST /api/mcp` — MCP over streamable HTTP: one JSON-RPC message in, its
-  answer out, the session id riding a header and the project named by
-  `X-Slopp-Dir`. The envelope is [[slopp-server.mcp.http/endpoint]], lent this
-  server's doors."
-  [req]
-  (mcp.http/endpoint (mcp-doors) req))
-
-^:unsafe (defn ^{:http/method :delete :rest/path "/api/mcp" :http/auth :public
-                 :rest/response :any
-                 :rest/unconstrained-ok "the envelope's own acknowledgement, or its 404"}
-  mcp-delete-endpoint
-  "`DELETE /api/mcp` — detach the session the header names; the last detach
-  closes the project."
-  [req]
-  (mcp.http/endpoint (mcp-doors) req))
-
 (defn spit-private!
   "Write `content` to `f` readable and writable by its OWNER only, creating
   the parents. The daemon file carries the write door's token, and `spit`
@@ -792,62 +670,6 @@
    :headers {"Content-Type" "text/plain; charset=utf-8"}
    :body (str s)})
 
-(defn- door!
-  "The write door's checks, then the call: the token BEFORE any work (a
-  403 that had opened the project and minted a CLI session for it left
-  both held for ten minutes on a dir nobody authenticated for), then a
-  WRITE naming no thread refused as an ANSWER — 200 with `isError`, the
-  shape every refusal on this door has — because it would land on the CLI
-  session's own line, which nothing a shell knows about ever lands. `b` is
-  `{tool arguments token agent}`; the answer is [[slopp.mcp/http-call!]]'s."
-  [req dir b]
-  (let [raw  (fn [status m]
-               {:status status :http/raw true
-                :headers {"Content-Type" "application/json"}
-                :body (json/generate-string m)})
-        tool (:tool b)
-        args (or (:arguments b) {})]
-    (cond
-      (not= (str (:token b)) (str (token)))
-      (raw 403 {:error "bad or missing token — read it from ~/.slopp/daemon.json"})
-
-      (and (string? tool)
-           (mcp/write-tool? tool)
-           (nil? (:thread args)) (nil? (:agent args)) (nil? (:agent b)))
-      (raw 200 {:isError true
-                :text (str "error: a write through the daemon names no thread — it would land"
-                           " on a line nothing you know about ever lands. Pass {thread \"…\"}:"
-                           " the id from your [slopp] block, or one minted by"
-                           " thread_open {} and carried on every later call.")})
-
-      :else
-      (mcp/http-call! (assoc req :body b)
-                      (cli-session! dir (let [slug (get-in req [:path-params :slug])]
-                                          (when (not= "_" slug) slug)))))))
-
-^:unsafe (defn ^{:http/method :post :rest/path "/api/call" :http/auth :public
-                 :rest/request call-contract
-                 :rest/response :any
-                 :rest/unconstrained-ok "the op's own answer as the CLI prints it: {isError text}"}
-  call-endpoint
-  "`POST /api/call` — the write door: `{tool arguments token}` runs on the
-  project named by `X-Slopp-Dir`, on its CLI session. The token is the
-  server's and [[slopp-server.mcp/http-call!]] checks it. A WRITE naming no
-  thread is refused here with the same words a one-shot uses, because the
-  alternative is the same stranding: the call would land on the CLI session's
-  own line, which nothing a shell knows about ever lands. Refused as an
-  ANSWER — 200 with `isError`, the shape every refusal on this door has —
-  because a 4xx reads to the CLI as a failed route, and it falls back to
-  booting a one-shot JVM that refuses again after loading the whole store
-  (the first end-to-end run did exactly that)."
-  [req]
-  (let [{:keys [dir error]} (project-dir req)]
-    (if error
-      {:status 400 :http/raw true
-       :headers {"Content-Type" "application/json"}
-       :body (json/generate-string {:error error})}
-      (door! req dir (or (:body req) {})))))
-
 (defn- mailbox!
   "Record an ask for the next write to open its turn from: this session's
   own `pending-intent.<sid>` and the unscoped `pending-intent` an older
@@ -929,70 +751,6 @@
      [:session_id {:optional true :doc "the harness session — the agent's thread id"} :string]
      [:prompt {:optional true :doc "the verbatim ask, on UserPromptSubmit"} :string]
      [:tool_input {:optional true :doc "the tool's input, on PreToolUse/PostToolUse; `command` for Bash"} [:map [:command {:optional true :doc "the shell command the Bash tool ran or is about to run"} :string]]]]]])
-
-^:unsafe (defn ^{:http/method :post :rest/path "/api/hook" :http/auth :public
-                 :rest/request hook-contract
-                 :rest/media-type "text/plain"
-                 :rest/response :string}
-  hook-endpoint
-  "`POST /api/hook` — the plugin's hooks, one door: the Claude Code hook
-  payload in, what the hook prints out, as text; the project by `X-Slopp-Dir`.
-  On `UserPromptSubmit` the ask is recorded and the map returned; on
-  `PreToolUse`/`PostToolUse` the Bash verdict, as the hook's JSON or
-  nothing; on `Stop` the session-pause `done` on the agent's thread — a
-  write, so it needs the server's token in `X-Slopp-Token` like every
-  write from a shell. `X-Slopp-Cli: 1` asks for the CLI voice in the map.
-  Any other event is an empty answer. The rules are
-  [[slopp-server.process.hooks]]'s; the shell side has none to keep in step."
-  [req]
-  (let [{:keys [dir error]} (project-dir req)
-        b     (or (:hook (:body req)) {})
-        event (:hook_event_name b)
-        sid   (not-empty (str (:session_id b)))]
-    (cond
-      error (text 400 error)
-
-      (= "UserPromptSubmit" event)
-      (text 200 (prompt-hook! dir b (= "1" (get-in req [:headers "x-slopp-cli"]))))
-
-      (#{"PreToolUse" "PostToolUse"} event)
-      (text 200 (bash-hook! dir b))
-
-      (= "Stop" event)
-      (cond
-        (not (store-file? dir)) (text 200 "")
-        (not= (str (get-in req [:headers "x-slopp-token"])) (str (token)))
-        (text 403 "bad or missing token — read it from ~/.slopp/daemon.json")
-        :else (do (door! req dir {:tool "done" :token (token)
-                                  :arguments {:agent sid :thread sid :label "session pause"}})
-                  (text 200 "")))
-
-      :else (text 200 ""))))
-
-^:unsafe (defn ^{:http/method :post :rest/path "/api/cli" :http/auth :public
-                 :rest/request :string
-                 :rest/media-type "text/plain"
-                 :rest/response :string}
-  cli-endpoint
-  "`POST /api/cli` — `slopp <op>` from a shell: the TEXT frame
-  [[slopp-server.process.hooks/cli-frame]] reads (header lines, a blank line,
-  the payload — the op's arguments as JSON or EDN, or a verb's raw source
-  blob), the token in `X-Slopp-Token`, the project by `X-Slopp-Dir`. It is
-  [[call-endpoint]] for a client that builds no JSON and prints what it gets:
-  the op's answer as text, 200 when it answered, 409 when it refused, 400 for
-  a frame that is not a call, 403 without the token."
-  [req]
-  (let [{:keys [dir error]} (project-dir req)
-        call (hooks/cli-call (hooks/cli-frame (:body req)))]
-    (cond
-      error         (text 400 error)
-      (:error call) (text 400 (:error call))
-      :else
-      (let [r (door! req dir (assoc call :token (get-in req [:headers "x-slopp-token"])))
-            b (try (json/parse-string (:body r) true) (catch Exception _ nil))]
-        (if (= 200 (:status r))
-          (text (if (:isError b) 409 200) (:text b))
-          (text (:status r) (or (:error b) (:body r))))))))
 
 (defn reserve-decision
   "What the app-refresh poll does for one served project, given the
@@ -1216,3 +974,262 @@
 
                                :else (ex-message e))))
               (System/exit 1))))))))
+
+(defn- boot-app-on-first-open!
+  "Start the project's app server, backgrounded, when `first?` — this call
+  is the one that opened the project — and the store runs one at all. ONE
+  place for both doors: `attach!` (an MCP session) and `cli-session!` (the
+  write door, which the prompt hook and every `slopp <op>` go through). The
+  first open is decided by `ensure-project!` exactly once per project, so a
+  door that opened without booting left the OTHER door's later open no
+  longer first — a project the hook reached before the MCP attach never got
+  its dev instance until some `done` refreshed it.
+
+  The project may have CLOSED while the boot ran — its last detach stopped
+  \"the server the reader holds\", which was nil until this returned.
+  Nothing else will ever stop this child."
+  [dir session owner first?]
+  (when (and first? (mcp/app-managed? session))
+    (future
+      (mcp/start-app! @owner)
+      (when-not (get-in @state [:projects dir])
+        (mcp/stop-app! @owner)))))
+
+(defn ^:export attach!
+  "Open an MCP session on the project at `dir`, opening the project itself
+  when this is its first — under the display name `slug` the client asked
+  for, or the dir's basename: `{:sid :session}`.
+
+  ONE slopp session per MCP session, on the shared store. A session holds a
+  thread, a line, a store value and a read ledger, and a write naming a
+  different thread reloads all of it — which is one agent's business, not
+  every agent's on the project. What the project shares lives on the
+  project record: its registry row, its check queue (so two whole-store
+  checks at one content are one run), and its READER — the session the
+  read API answers from and the app server's owner, which every session
+  names as its `:app-owner` as a DELAY: a project whose app nobody serves
+  and whose API nobody reads never opens it, and a large store is not
+  loaded twice for nothing. The FIRST attach starts the app server,
+  backgrounded, when the store runs one at all: one per project, on the
+  branch the project opened on, as decided.
+
+  The session's oracle is LAZY: nothing boots until a call needs an image,
+  so a session that only reads — most of them — costs no child JVM; and
+  when one does boot it asks the machine-wide budget first. What this
+  session lands is announced to the project's other sessions.
+
+  Under the lock for the whole open, deliberately: two first-attaches on
+  one dir must not both mint the project."
+  [dir slug & {:keys [sid]}]
+  (locking state
+    (let [now     (System/currentTimeMillis)
+          sid     (or (not-empty (str sid)) (str (java.util.UUID/randomUUID)))
+          [proj first?] (ensure-project! dir slug)
+          owner   (delay (:reader (api! dir)))
+          session (external/open! {:slopp.ops/dir         dir
+                                   :slopp.ops/lazy-image? true
+                                   ;; the session's own label; the THREAD an
+                                   ;; agent writes on is what it passes
+                                   :slopp.ops/agent-id    (str "mcp-" (subs sid 0 (min 8 (count sid))))})]
+      (swap! session assoc :require-turns? true :daemon? true
+             :app-owner owner
+             :op-cards mcp/op-cards
+             :api-url (api-url proj)
+             :pages-url (pages-url proj)
+             :check-queue (:check-queue proj)
+             :image-permit image-permit
+             :on-landed (fn [land] (announce-landing! dir sid land)))
+      (swap! state #(-> %
+                        (update-in [:projects dir :sessions] (fnil conj #{}) sid)
+                        (assoc-in [:sessions sid] {:dir dir :session session
+                                                   :started now :last-seen now})))
+            (boot-app-on-first-open! dir session owner first?)
+      {:sid sid :session session})))
+
+(defn- cli-session!
+  "The CLI session the write door runs a project's calls on, opened on
+  first use — opening the project under `slug` if nothing is attached —
+  and touched on every call so the reaper knows it is in use. Writable,
+  turn-gated like every real session, carrying the daemon's token as its
+  `:call-token`, the project's reader as its app owner (a delay, like every
+  session's) and the project's check queue; its oracle is lazy and
+  budgeted, like every daemon session's, and what it lands is announced."
+  [dir slug]
+  (locking state
+    (let [now (System/currentTimeMillis)
+          [proj first?] (ensure-project! dir slug)]
+      (if-let [s (get-in @state [:projects dir :cli :session])]
+        (do (swap! state assoc-in [:projects dir :cli :last-seen] now)
+            s)
+        (let [owner   (delay (:reader (api! dir)))
+              session (external/open! {:slopp.ops/dir         dir
+                                       :slopp.ops/lazy-image? true
+                                       :slopp.ops/agent-id    (str "cli-" (subs (str (java.util.UUID/randomUUID)) 0 8))})]
+          (swap! session assoc :require-turns? true :daemon? true
+                 :call-token (token)
+                 :app-owner owner
+                 :op-cards mcp/op-cards
+                 :api-url (api-url proj)
+                 :pages-url (pages-url proj)
+                 :check-queue (:check-queue proj)
+                 :image-permit image-permit
+                 :on-landed (fn [land] (announce-landing! dir :cli land)))
+          (swap! state assoc-in [:projects dir :cli] {:session session :last-seen now})
+          ;; the write door is a first open as often as an MCP attach is — the
+          ;; prompt hook reaches the project before the plugin's pipe does
+          (boot-app-on-first-open! dir session owner first?)
+          session)))))
+
+(defn- mcp-doors
+  "This server's doors, lent to the MCP envelope: sessions by id, attach by
+  the dir a request names (`X-Slopp-Dir`), detach. No path slug: the door is
+  slug-free and the project's display name is the dir's basename."
+  []
+  {:slopp.mcp.http/lookup  lookup!
+   :slopp.mcp.http/attach! (fn [req]
+                             (let [{:keys [dir error]} (project-dir req)]
+                               (if error
+                                 {:error error}
+                                 (attach! dir nil :sid (get-in req [:headers "mcp-session-id"])))))
+   :slopp.mcp.http/detach! detach!})
+
+^:unsafe (defn ^{:http/method :post :rest/path "/api/mcp" :http/auth :public
+                 :rest/request jsonrpc-contract
+                 :rest/response :any
+                 :rest/unconstrained-ok "the answer is the JSON-RPC envelope's, whatever the message asked"}
+  mcp-post-endpoint
+  "`POST /api/mcp` — MCP over streamable HTTP: one JSON-RPC message in, its
+  answer out, the session id riding a header and the project named by
+  `X-Slopp-Dir`. The envelope is [[slopp-server.mcp.http/endpoint]], lent this
+  server's doors."
+  [req]
+  (mcp.http/endpoint (mcp-doors) req))
+
+^:unsafe (defn ^{:http/method :delete :rest/path "/api/mcp" :http/auth :public
+                 :rest/response :any
+                 :rest/unconstrained-ok "the envelope's own acknowledgement, or its 404"}
+  mcp-delete-endpoint
+  "`DELETE /api/mcp` — detach the session the header names; the last detach
+  closes the project."
+  [req]
+  (mcp.http/endpoint (mcp-doors) req))
+
+(defn- door!
+  "The write door's checks, then the call: the token BEFORE any work (a
+  403 that had opened the project and minted a CLI session for it left
+  both held for ten minutes on a dir nobody authenticated for), then a
+  WRITE naming no thread refused as an ANSWER — 200 with `isError`, the
+  shape every refusal on this door has — because it would land on the CLI
+  session's own line, which nothing a shell knows about ever lands. `b` is
+  `{tool arguments token agent}`; the answer is [[slopp.mcp/http-call!]]'s."
+  [req dir b]
+  (let [raw  (fn [status m]
+               {:status status :http/raw true
+                :headers {"Content-Type" "application/json"}
+                :body (json/generate-string m)})
+        tool (:tool b)
+        args (or (:arguments b) {})]
+    (cond
+      (not= (str (:token b)) (str (token)))
+      (raw 403 {:error "bad or missing token — read it from ~/.slopp/daemon.json"})
+
+      (and (string? tool)
+           (mcp/write-tool? tool)
+           (nil? (:thread args)) (nil? (:agent args)) (nil? (:agent b)))
+      (raw 200 {:isError true
+                :text (str "error: a write through the daemon names no thread — it would land"
+                           " on a line nothing you know about ever lands. Pass {thread \"…\"}:"
+                           " the id from your [slopp] block, or one minted by"
+                           " thread_open {} and carried on every later call.")})
+
+      :else
+      (mcp/http-call! (assoc req :body b)
+                      (cli-session! dir (let [slug (get-in req [:path-params :slug])]
+                                          (when (not= "_" slug) slug)))))))
+
+^:unsafe (defn ^{:http/method :post :rest/path "/api/call" :http/auth :public
+                 :rest/request call-contract
+                 :rest/response :any
+                 :rest/unconstrained-ok "the op's own answer as the CLI prints it: {isError text}"}
+  call-endpoint
+  "`POST /api/call` — the write door: `{tool arguments token}` runs on the
+  project named by `X-Slopp-Dir`, on its CLI session. The token is the
+  server's and [[slopp-server.mcp/http-call!]] checks it. A WRITE naming no
+  thread is refused here with the same words a one-shot uses, because the
+  alternative is the same stranding: the call would land on the CLI session's
+  own line, which nothing a shell knows about ever lands. Refused as an
+  ANSWER — 200 with `isError`, the shape every refusal on this door has —
+  because a 4xx reads to the CLI as a failed route, and it falls back to
+  booting a one-shot JVM that refuses again after loading the whole store
+  (the first end-to-end run did exactly that)."
+  [req]
+  (let [{:keys [dir error]} (project-dir req)]
+    (if error
+      {:status 400 :http/raw true
+       :headers {"Content-Type" "application/json"}
+       :body (json/generate-string {:error error})}
+      (door! req dir (or (:body req) {})))))
+
+^:unsafe (defn ^{:http/method :post :rest/path "/api/hook" :http/auth :public
+                 :rest/request hook-contract
+                 :rest/media-type "text/plain"
+                 :rest/response :string}
+  hook-endpoint
+  "`POST /api/hook` — the plugin's hooks, one door: the Claude Code hook
+  payload in, what the hook prints out, as text; the project by `X-Slopp-Dir`.
+  On `UserPromptSubmit` the ask is recorded and the map returned; on
+  `PreToolUse`/`PostToolUse` the Bash verdict, as the hook's JSON or
+  nothing; on `Stop` the session-pause `done` on the agent's thread — a
+  write, so it needs the server's token in `X-Slopp-Token` like every
+  write from a shell. `X-Slopp-Cli: 1` asks for the CLI voice in the map.
+  Any other event is an empty answer. The rules are
+  [[slopp-server.process.hooks]]'s; the shell side has none to keep in step."
+  [req]
+  (let [{:keys [dir error]} (project-dir req)
+        b     (or (:hook (:body req)) {})
+        event (:hook_event_name b)
+        sid   (not-empty (str (:session_id b)))]
+    (cond
+      error (text 400 error)
+
+      (= "UserPromptSubmit" event)
+      (text 200 (prompt-hook! dir b (= "1" (get-in req [:headers "x-slopp-cli"]))))
+
+      (#{"PreToolUse" "PostToolUse"} event)
+      (text 200 (bash-hook! dir b))
+
+      (= "Stop" event)
+      (cond
+        (not (store-file? dir)) (text 200 "")
+        (not= (str (get-in req [:headers "x-slopp-token"])) (str (token)))
+        (text 403 "bad or missing token — read it from ~/.slopp/daemon.json")
+        :else (do (door! req dir {:tool "done" :token (token)
+                                  :arguments {:agent sid :thread sid :label "session pause"}})
+                  (text 200 "")))
+
+      :else (text 200 ""))))
+
+^:unsafe (defn ^{:http/method :post :rest/path "/api/cli" :http/auth :public
+                 :rest/request :string
+                 :rest/media-type "text/plain"
+                 :rest/response :string}
+  cli-endpoint
+  "`POST /api/cli` — `slopp <op>` from a shell: the TEXT frame
+  [[slopp-server.process.hooks/cli-frame]] reads (header lines, a blank line,
+  the payload — the op's arguments as JSON or EDN, or a verb's raw source
+  blob), the token in `X-Slopp-Token`, the project by `X-Slopp-Dir`. It is
+  [[call-endpoint]] for a client that builds no JSON and prints what it gets:
+  the op's answer as text, 200 when it answered, 409 when it refused, 400 for
+  a frame that is not a call, 403 without the token."
+  [req]
+  (let [{:keys [dir error]} (project-dir req)
+        call (hooks/cli-call (hooks/cli-frame (:body req)))]
+    (cond
+      error         (text 400 error)
+      (:error call) (text 400 (:error call))
+      :else
+      (let [r (door! req dir (assoc call :token (get-in req [:headers "x-slopp-token"])))
+            b (try (json/parse-string (:body r) true) (catch Exception _ nil))]
+        (if (= 200 (:status r))
+          (text (if (:isError b) 409 200) (:text b))
+          (text (:status r) (or (:error b) (:body r))))))))

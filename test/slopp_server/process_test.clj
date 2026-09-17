@@ -250,10 +250,21 @@
             b  (get-in (post nil init) [:headers "Mcp-Session-Id"])
             sa (daemon/lookup! a)
             sb (daemon/lookup! b)]
-        (testing "reading boots nothing"
+                (testing "reading boots nothing"
           (call a "query_search" {:pattern "defn"})
           (is (nil? (:image @sa)) "a read needs no image")
           (is (nil? (:image @sb))))
+        (testing "nor do the calls the skill makes FIRST: explore over reads, the thread bookkeeping"
+          ;; measured on a fresh daemon: the first tool call cost 10.6 s, all of
+          ;; it an oracle JVM booting for a thread_list. explore was classified
+          ;; conservative although each inner op awaits the image itself.
+          (call a "explore" {:ops [{:op "query_search" :pattern "defn"}
+                                   {:op "query_source" :targets ["lz.core/f"]}]})
+          (is (nil? (:image @sa)) "explore over read ops needs no image")
+          (call a "thread_list" {})
+          (call a "thread_open" {:thread "t-looker"})
+          (is (nil? (:image @sa)) "thread bookkeeping needs no image"))
+
         (testing "a write in one session boots its image, and its landed work reaches the other without one"
           (call b "ns_create" {:ns "lz.core" :thread "t-b" :prompt "lazy fixture"
                                :source "(ns lz.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n"})
@@ -262,7 +273,10 @@
           (let [seen (call a "query_search" {:pattern "unused-ok f" :branch "main"})]
             (is (re-find #"lz\.core" (str seen)) (str seen))
             (is (nil? (:image @sa)) "still no image on the reader")))
-        (testing "an eval boots the reader's image, once, at the current head"
+                (testing "an explore that carries a check DOES boot — the inner op asks for the image"
+          (call a "explore" {:ops [{:op "check" :code "(+ 1 1)"}]})
+          (is (some? (:image @sa))))
+        (testing "and an eval answers from that image, at the current head"
           (call a "query_eval" {:code "(+ 1 1)"})
           (is (some? (:image @sa)))))
       (finally (daemon/reset-all!)))))
@@ -989,3 +1003,33 @@
     (is (= :touch (daemon/reserve-decision 5 "h1" 6 nil))))
   (testing "first sight (nothing served yet): a head present is an advance"
     (is (= :reserve (daemon/reserve-decision nil nil 1 "h1")))))
+
+(deftest ^:external a-project-first-opened-by-the-cli-door-boots-its-app-like-an-attach
+  ;; `attach!` boots the project's app server on the FIRST open, and
+  ;; `ensure-project!` answers first? exactly once per project — so a project
+  ;; the CLI door (or the prompt hook, which is a CLI call) reached first was
+  ;; opened without its app, and the MCP attach that followed was no longer
+  ;; first. The dev instance then waited for a `done` nobody knew to run.
+  ;; The boot is pretended, as in the attach test: the order is the fact.
+  (let [d      (tmp-dir!)
+        ctx    (daemon/context)
+        booted (atom [])]
+    (try
+      (with-redefs [mcp/app-managed? (constantly true)
+                    mcp/start-app!   (fn [owner]
+                                       (swap! booted conj (:dir @owner))
+                                       (swap! owner assoc :app-server {:image :pretend})
+                                       {:serving? true})
+                    mcp/stop-app!    (fn [owner] (swap! owner dissoc :app-server) {:stopped true})]
+        (let [r (slopp.http/handle! ctx {:request-method :post
+                                         :uri "/api/call"
+                                         :headers {"x-slopp-dir" d}
+                                         :body {:tool "thread_list" :arguments {}
+                                                :token (daemon/token)}})]
+          (is (= 200 (:status r)) (pr-str r)))
+        (is (= 1 (count (projects! ctx))) "the call opened the project")
+        (Thread/sleep 1500)
+        (is (= [d] @booted)
+            (str "the first open through the CLI door must boot the app exactly as an"
+                 " attach does — start-app! saw " (pr-str @booted))))
+      (finally (daemon/reset-all!)))))

@@ -52,7 +52,12 @@
                                                           :properties {:ns {:type "string"}
                                                                        :name {:type "string"}}
                                                           :required ["ns"]}]}}}}}
-   {:name "explore" :image-free false :read-only true
+   {:name "explore" :image-free true :read-only true
+    ;; image-free because each INNER op goes through call-op! and awaits the
+    ;; image itself when it is an oracle op — so an explore over reads boots
+    ;; nothing and one carrying a check boots exactly as check alone would.
+    ;; Measured before this: the first call of every session cost a 10 s
+    ;; oracle boot, for reads.
     :description "THE question verb — several questions, ONE call: ops = [{op …args} …] with any read op (check, query_source, query_search, query_depends, query_history, report, orient, …) — answers [{:op :result} …], each entry through the same already-sent/ledger door as the single call. At most 6 entries; a write op is refused before anything runs. Models do not emit parallel tool calls, so the batch lives inside the call — bring every independent question you have."
     :inputSchema {:type "object"
                   :properties {:ops {:type "array" :items {:type "object"}}}
@@ -350,13 +355,13 @@
 
 (def flow-tools
   "Session-flow tool descriptors: turns, tests, done-points, commit-points, build. (Q4: the registry is per-group \u2014 editable without touching a monolith.)"
-  [{:name "turn_begin"
+  [{:name "turn_begin" :image-free true
     :description "Open a turn manually (records the verbatim user ask as intent). Turns are normally opened FOR you by the plugin's hooks — only needed if a write is refused."
     :inputSchema {:type "object"
                   :properties {:intent {:type "string"}
                                :user {:type "string"}}
                   :required ["intent"]}}
-   {:name "turn_end"
+   {:name "turn_end" :image-free true
     :description "Close the turn (usually automatic)."
     :inputSchema {:type "object"
                   :properties {:note {:type "string"}}}}
@@ -583,13 +588,13 @@
     :description "Delete a branch (never the one you are on)."
     :inputSchema {:type "object" :properties {:name {:type "string"}}
                   :required ["name"]}}
-   {:name "thread_list"
+   {:name "thread_list" :image-free true
     :description "The live THREADS on this branch — the private lines agents write to before a done lands them. Each row: :agent, :unlanded (deltas written since it forked), :idle-ms, :held (a LIVE process holds the write lease — a different question from idle, and usually the one you are asking), and :mine on your own. Across all agents on purpose: the question this answers is whether there is work here nobody is going to finish, and an idle thread is by definition somebody else's. Nothing reaps a thread on a timer; a drop is a decision somebody makes."
     :inputSchema {:type "object" :properties {}}}
    {:name "thread_drop"
     :description "START OVER: abandon a thread and take its work off your store and image. NO ARGUMENT means your own — reach for this when you have gone down a wrong path and want to be back where the branch is. Not undo/episode_revert: those are forward-only (they append revert deltas, so the work stays in your history) and episode-bounded, while this settles the LINE and covers everything since the last thing that LANDED — several red done points, which is when start-over gets asked. The deltas stay walkable either way. Pass {id} from thread_list to drop somebody else's."
     :inputSchema {:type "object" :properties {:id {:type "string"}}}}
-   {:name "thread_open"
+   {:name "thread_open" :image-free true
     :description "Get a THREAD to write on: {thread \"id\"} adopts that thread (the same id is the same line, every time — carry it across restarts and compactions); no argument MINTS one (t-xxxxxxxx) and answers with it. Answers {:thread :line :unlanded}. A hooked ask already has its thread printed in the [slopp] block at its top; this is the door for a script, another harness, or a subagent handed an id by its parent. {parent \"id\"} makes a CHILD: it forks from that thread's head and its done lands INTO that thread rather than the branch, so the parent's done grades and lands the lot — hand each subagent its own child id in its prompt. One level. Appends nothing and opens no turn — the first write does."
     :inputSchema {:type "object" :properties {:thread {:type "string"} :parent {:type "string"}}}}
    {:name "merge_from"

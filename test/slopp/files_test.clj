@@ -296,3 +296,20 @@ X-Slopp-Main: slopp.kernel.boot/-main
         (is (= {:retracted "roughjs"} (ops/js-dep! sess "roughjs" nil :remove true)))
         (is (nil? (get-in (:store @sess) [:js-deps "roughjs"]))))
       (finally (.delete tmp) (ops/close! sess)))))
+
+(deftest config-renders-and-parses-round-trip
+  ;; A projected tree carries a config entry as its RENDERING (`K: V` lines).
+  ;; The clone path has to read that back into the semantic entry the store
+  ;; holds, or an import turns every declaration into an opaque file — which
+  ;; is exactly how a fresh clone of slopp's own repo lost `app.main`.
+  (let [entry {:format :manifest
+               :values {"http.port" "7357" "app.main" "shop.core/-main"
+                        "http.static./assets" "public"}}]
+    (is (= entry (store/parse-config :manifest (store/render-config entry))))
+    (testing "a value may itself contain ': ' — only the FIRST separator splits"
+      (is (= {"generated-from" "http://x:1/api: y"}
+             (:values (store/parse-config :manifest "generated-from: http://x:1/api: y\n")))))
+    (testing "blank lines are not keys"
+      (is (= {"a" "1"} (:values (store/parse-config :manifest "\na: 1\n\n")))))
+    (testing "an unknown format refuses, like the serializer"
+      (is (thrown? clojure.lang.ExceptionInfo (store/parse-config :toml "a = 1"))))))

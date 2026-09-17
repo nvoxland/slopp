@@ -2475,3 +2475,14 @@
                       (line-head conn line-id) base base]
                      names)))
         0)))
+
+^:reads (defn ^:export store-empty?
+  "True when this store holds NOTHING — no delta, no element on any line —
+  in two `LIMIT 1` probes. The question `sync/empty-store?` asks on every
+  project open, which used to be answered by folding the whole store: on a
+  57 MB store, two seconds to learn it is not empty. Both tables are probed
+  because compaction can settle lines without every delta surviving, and a
+  file-put is a delta with no element."
+  [conn]
+  (and (nil? (jdbc/execute-one! conn ["SELECT 1 AS one FROM deltas LIMIT 1"]))
+       (nil? (jdbc/execute-one! conn ["SELECT 1 AS one FROM elements LIMIT 1"]))))

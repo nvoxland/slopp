@@ -913,20 +913,21 @@
   Every projected tree carries these: `render-config` turns a `:config` entry
   into its file format, and the module manifest projects as `modules`. So a
   git remote always shows them, and an importer that treats them as ordinary
-  files writes a SECOND copy of a fact the store already holds semantically —
-  in `:files`, which the projection also reads, so the two can then disagree.
-  `modules` is the sharpest case: `config_file` refuses that path outright
-  because the manifest is edge-grain, while a file write had no such
-  objection.
+  files writes a SECOND copy of a fact the store already holds, in a field the
+  projection reads beside the first — the two then disagree about what the
+  store declares.
 
-  DECLARED rather than derived from `(:config store)`, because the store that
-  needs the answer is often the one missing the entry: a fresh clone holds no
-  config at all, and that is exactly when an incoming change would be blobbed.
-  Callers should treat a path as projected if it is in here OR the store
-  already has `:config` for it — the set covers slopp's own paths on a store
-  that has never seen them, and the store's own keys cover a project's."
-  #{"capabilities" "client" "gates" "rules" "vocabulary"
-    "META-INF/MANIFEST.MF" "modules"})
+  `dev` is here because it is the project's SHARED dev setup — what runs, on
+  which port, while somebody works on it — and a fresh clone has to arrive
+  with it or its dev instance cannot come up. A developer's own override of
+  that setup is `dev.local`, declared in [[local-config-paths]] instead.
+
+  DECLARED rather than derived: the store that needs the answer is often the
+  one missing the entry (a fresh clone holds no config at all), and the
+  symptom of a missing declaration is silent — the path blobs and the
+  importer reports \"file updated\"."
+  #{"capabilities" "gates" "modules" "META-INF/MANIFEST.MF" "rules" "client"
+    "vocabulary" "dev"})
 
 (defn ^:export name-lost?
   "True when `node` renders to source that NAMES something while the node
@@ -959,15 +960,15 @@
   projected one.
 
   Every other config path ships: `ops.external/build!` writes each `:config`
-  entry as a file at its own path, and `git/commit-paths` puts each one in
-  every projected tree. That is right for `capabilities`, `rules` and `gates`,
-  which configure the PRODUCT and must travel with it.
+  entry as a file at its own path (less [[unbuilt-config-paths]]), and
+  `git/commit-paths` puts each one in every projected tree. That is right for
+  `capabilities`, `rules` and `gates`, which configure the PRODUCT, and for
+  `dev`, the project's shared dev setup.
 
-  `dev` does not. It says what to RUN while somebody is working on this
-  project — an entry point, arguments, a port — which is a fact about a
-  development session rather than about the program. Shipping it would put a
-  developer's port number in a jar and a git tree, and a second developer's
-  pull would then carry the first one's choices.
+  `dev.local` does not ship. It is ONE developer's override of `dev` on ONE
+  machine — a port this box has free, an entry point being tried — which is a
+  fact about a development session rather than about the project. Projecting
+  it would push that developer's choices at everyone who pulls.
 
   DECLARED rather than derived, for the same reason
   [[projected-config-paths]] is: the store that needs the answer is often the
@@ -975,9 +976,9 @@
 
   **This set WINS over the has-config fallback.** That docstring tells callers
   to treat a path as projected if it is in the projected set OR the store
-  already holds `:config` for it — which is true of every dev entry somebody
-  has set. Read naively, the fallback projects precisely the thing that must
-  never be projected, so the local check comes first:
+  already holds `:config` for it — which is true of every dev.local entry
+  somebody has set. Read naively, the fallback projects precisely the thing
+  that must never be projected, so the local check comes first:
 
       (and (not (local-config-paths path))
            (or (projected-config-paths path) (get-in st [:config path])))
@@ -985,7 +986,7 @@
   The two sets are disjoint, and a test asserts it — a path declared both ways
   has no sensible reading and would fail silently in whichever direction the
   caller happened to ask."
-  #{"dev"})
+  #{"dev.local"})
 
 (defn record-delta
   "THE door for appending delta `d` to the store value. Every writer and
@@ -2077,3 +2078,47 @@
   (hash (mapv (fn [nsx]
                 [nsx (mapv #(str (:node %)) (forms store nsx))])
               (sort (keys (:namespaces store))))))
+
+(def ^:export unbuilt-config-paths
+  "Config paths that never reach a BUILT artifact, whether or not they are
+  projected to git. `dev` rides every git tree (it is the shared dev setup a
+  clone needs) but a jar has no use for a dev port or a dev entry point, and
+  `dev.local` reaches nothing at all. `ops.external/build!` is the one reader;
+  `git/commit-paths` reads [[local-config-paths]] instead, which is the
+  narrower set — every local path is unbuilt, not every unbuilt path is local."
+  #{"dev" "dev.local"})
+
+(defn parse-config
+  "Read a config entry back from its file text — `render-config` backwards:
+  `{:format fmt :values {k v}}`. Formats: :manifest (`K: V` lines; the FIRST
+  `: ` splits, so a value may itself contain one; blank lines are skipped).
+  Unknown format → ex-info, the same refusal the serializer gives.
+
+  Exists for the clone path: a projected tree carries a declaration only as
+  its rendering, and reading it back is what keeps `capabilities` a
+  declaration rather than an opaque file after an import."
+  [fmt text]
+  (case fmt
+    :manifest {:format :manifest
+               :values (into {}
+                             (keep (fn [line]
+                                     (when-let [i (str/index-of line ": ")]
+                                       [(subs line 0 i) (subs line (+ i 2))])))
+                             (str/split-lines (str text)))}
+    (throw (ex-info (str "no parser for config format " fmt) {:format fmt}))))
+
+(defn blobbed-config-paths
+  "Projected config paths this store holds as tracked FILES with no
+  structured entry behind them — a rendering that was imported as a blob.
+  Sorted; empty when every rendering is backed by `:config`.
+
+  The shape an old clone left: `capabilities` in `:files`, `:config` empty,
+  and every capability reading nil while the projection shows the
+  declaration plainly. The repair is `config_file` per key, then
+  `file_remove` — `session-brief` names both."
+  [store]
+  (vec (sort (for [path (keys (:files store))
+                   :when (and (projected-config-paths path)
+                              (not= "modules" path)
+                              (nil? (get-in store [:config path])))]
+               path))))

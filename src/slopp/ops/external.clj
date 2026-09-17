@@ -656,11 +656,14 @@ client-deps (merge (:client-deps st) (:client provided))
                                  (some-> (:db @session) (db/get-blob (:sha entry))))]
           (io/copy bs file))
         (spit file entry))))
-  ;; every config entry EXCEPT the locally-declared ones. `capabilities`,
-  ;; `rules` and `gates` configure the PRODUCT and a built app reads them;
-  ;; `dev` says what to RUN while somebody works on this project, so shipping
-  ;; it would put one developer's port and entry point inside the artifact.
-  (doseq [[path entry] (remove (comp store/local-config-paths key)
+  ;; every config entry EXCEPT the unbuilt ones. `capabilities`, `rules`
+  ;; and `gates` configure the PRODUCT and a built app reads them; `dev` and
+  ;; `dev.local` say what to RUN while somebody works on this project, so
+  ;; shipping either would put a dev port and entry point inside the artifact
+  ;; — `dev` rides the git projection (a clone needs the shared setup) but a
+  ;; jar has no use for it, which is why this filter is wider than
+  ;; `commit-paths`'.
+  (doseq [[path entry] (remove (comp store/unbuilt-config-paths key)
                                (cond-> (:config st)
                                  (read.modules/modules-config-entry st)
                                  (assoc "modules" (read.modules/modules-config-entry st))))]

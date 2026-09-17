@@ -360,15 +360,14 @@
 
 ^:reads
 (defn- empty-store?
-  "True when `dir`'s existing store.db holds NOTHING — no namespaces, no
-  deltas, no files. The MCP server auto-creates exactly this when it serves
-  a fresh dir; clone/import must treat it as fresh, not refuse it."
+  "True when `dir`'s existing store.db holds NOTHING — no delta, no element.
+  The MCP server auto-creates exactly this when it serves a fresh dir;
+  clone/import must treat it as fresh, not refuse it. Asked on EVERY project
+  open, so it is two `LIMIT 1` probes ([[slopp.store.db/store-empty?]]) and
+  not a fold of the store it is about to decide against loading."
   [dir]
   (with-open [conn (db/open! dir)]
-    (let [st (db/load-store conn (slopp.store.db/trunk-line-id! conn))]
-      (and (empty? (:namespaces st))
-           (zero? (:line-pos st 0))
-           (empty? (:files st))))))
+    (db/store-empty? conn)))
 
 ^:reads (defn- slopp-branch?
   "Does the git checkout at `dir` carry any slopp/* mirror branch (local or
@@ -634,9 +633,27 @@
                       (db/set-meta! conn "git-remote" (str url))
                       (doseq [[path text] tree
                               :when (and (nil? (path-ns path))
-                                         (not= "deps.edn" path))]
+                                         (not= "deps.edn" path)
+                                         ;; a RENDERING of store state is not a
+                                         ;; file: `:config` entries are restored
+                                         ;; below and the module manifest is
+                                         ;; derived by adoption. Blobbing one
+                                         ;; writes a second copy of a fact the
+                                         ;; store holds, in a field the
+                                         ;; projection reads beside the first —
+                                         ;; and left `:config` EMPTY, so a fresh
+                                         ;; clone of slopp's own repo declared no
+                                         ;; app and its dev instance never came
+                                         ;; up, silently.
+                                         (not (store/projected-config-paths path)))]
                         (ops/file-put! sess path text :agent agent
                                        :prompt (str "clone: file from " url)))
+                      (doseq [[path text] tree
+                              :when (and (store/projected-config-paths path)
+                                         (not= "modules" path))]
+                        (ops/config-restore! sess path (store/parse-config :manifest text)
+                                             :agent agent
+                                             :prompt (str "clone: config from " url)))
                       (db/set-meta! conn "git-base-sha" tip)
                       ;; what git had before the import — the records answer
                       ;; an agent otherwise shells out for (eval27 opus)
@@ -656,6 +673,14 @@
                     ;; README); saying which ones is what makes the ordinary case
                     ;; checkable instead of indistinguishable from the bug.
                     (let [ignored (vec (sort (remove path-ns (keys tree))))
+                          ;; and for the DECLARATIONS it restored — a config path
+                          ;; that blobbed is invisible in `:namespaces` and the
+                          ;; store looks complete while every capability reads nil
+                          restored (into (sorted-map)
+                                         (for [[path text] tree
+                                               :when (and (store/projected-config-paths path)
+                                                          (not= "modules" path))]
+                                           [path (count (:values (store/parse-config :manifest text)))]))
                           ;; ACCOUNT for the shape of what came in, not just the
                           ;; count. Adoption derives the manifest from the code
                           ;; as it stands, and an imported codebase can arrive
@@ -669,7 +694,8 @@
                                                 (:modules (:store @sess)))))]
                       (cond-> {:dir (str dir) :namespaces (count sources)
                                :base tip :branch used}
-                        (seq ignored) (assoc :ignored ignored)
+                                                (seq ignored) (assoc :ignored ignored)
+                        (seq restored) (assoc :config restored)
                         (seq cycles) (assoc :cycles cycles)))
                     (catch clojure.lang.ExceptionInfo e
                       {:error (str "clone failed at " (ex-message e)

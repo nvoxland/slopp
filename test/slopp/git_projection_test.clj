@@ -402,30 +402,34 @@
       (finally (ops/close! sess)))))
 
 (deftest a-LOCAL-config-path-never-reaches-a-projected-tree
-  ;; `commit-paths` renders EVERY config entry into every projected tree, and
-  ;; its own docstring says why that is right: \"they all ride EVERY projected
-  ;; tree, so a slopp push never deletes them.\" True of `capabilities`,
-  ;; `rules` and `gates`, which configure the product.
+  ;; `commit-paths` renders every config entry into every projected tree, and
+  ;; its own docstring says why that is right: "they all ride EVERY projected
+  ;; tree, so a slopp push never deletes them." True of `capabilities`,
+  ;; `rules`, `gates` — and of `dev`, the project's SHARED dev setup, which a
+  ;; clone must arrive with or it cannot serve.
   ;;
-  ;; Not true of `dev`, which OVERRIDES capabilities for the dev instance.
-  ;; Projecting it pushes one developer's dev port at everyone who pulls.
+  ;; Not true of `dev.local`, one developer's override of that setup on one
+  ;; machine. Projecting it pushes that developer's port at everyone who pulls.
   (let [configs {"capabilities" {:format :manifest :values {"http.port" "8080"}}
-                 "dev"          {:format :manifest
-                                 :values {"http.port" "7399"}}}
+                 "dev"          {:format :manifest :values {"http.port" "7358"}}
+                 "dev.local"    {:format :manifest :values {"http.port" "7399"}}}
         tree    (#'git/commit-paths {} {} {} configs (constantly nil))]
 
     (testing "the product's config still rides, as it always did"
       (is (contains? tree "capabilities"))
       (is (str/includes? (get tree "capabilities") "http.port")))
 
-    (testing "and the dev section does NOT"
-      (is (not (contains? tree "dev"))
-          (str "a dev entry reached the projected tree: "
-               (pr-str (get tree "dev")))))
+    (testing "the shared dev setup rides too"
+      (is (= "http.port: 7358\n" (get tree "dev"))))
+
+    (testing "and the local override does NOT"
+      (is (not (contains? tree "dev.local"))
+          (str "a dev.local entry reached the projected tree: "
+               (pr-str (get tree "dev.local")))))
 
     (testing "nor does its content arrive under some other path"
       (is (not-any? #(str/includes? (str %) "7399") (vals tree))
-          (str "dev content is in the tree under another path: "
+          (str "dev.local content is in the tree under another path: "
                (pr-str (into {} (filter (fn [[_ v]]
                                           (str/includes? (str v) "7399"))
                                         tree))))))))

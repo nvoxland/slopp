@@ -11,7 +11,7 @@
             [slopp.store.db :as db]
             [slopp.git :as git]
             [slopp.store :as store]
-            [slopp.sync :as sync] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history] [clojure.edn :as edn])
+            [slopp.sync :as sync] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history] [clojure.edn :as edn] [slopp.project.capabilities :as capabilities] [slopp.project.dev :as dev])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]
            [org.eclipse.jgit.api Git]
@@ -919,37 +919,47 @@
       (is (not (str/includes? n "never")) (str "nothing measured that: " n)))))
 
 (deftest a-LOCAL-config-path-stays-in-the-db
-  ;; Every config path ships today. `build!` spits each `(:config st)` entry
-  ;; into the built tree as a file and `commit-paths` puts each one in every
-  ;; projected tree, with no filter anywhere. That is right for `capabilities`
-  ;; and `rules` — they configure the PRODUCT — and wrong for anything that
-  ;; configures a DEVELOPMENT session, which is a fact about this machine and
-  ;; this checkout rather than about the program.
+  ;; `build!` spits each `(:config st)` entry into the built tree as a file and
+  ;; `commit-paths` puts each one in every projected tree. Right for
+  ;; `capabilities` and `rules` — they configure the PRODUCT — and right for
+  ;; `dev` too: it is the project's shared answer to "what runs while somebody
+  ;; works on this", complete enough that a fresh clone serves without setup.
+  ;; What must NOT travel is a developer's own override of it, which is a
+  ;; second path, `dev.local`, declared LOCAL: it stays in the db and reaches
+  ;; no tree.
   ;;
-  ;; So a second declared set, beside `projected-config-paths` and read the
-  ;; same way: declared rather than derived, because the store that needs the
-  ;; answer is often the one missing the entry.
+  ;; Declared rather than derived, because the store that needs the answer is
+  ;; often the one missing the entry.
   (testing "the two sets are DISJOINT"
     (is (empty? (filter store/projected-config-paths store/local-config-paths))
         (str "a config path is declared BOTH projected and local: "
              (pr-str (filter store/projected-config-paths
                              store/local-config-paths)))))
 
-  (testing "`dev` is local"
-    (is (contains? store/local-config-paths "dev")))
+  (testing "`dev` is projected — the shared default anyone clones"
+    (is (contains? store/projected-config-paths "dev"))
+    (is (not (contains? store/local-config-paths "dev"))))
+
+  (testing "`dev.local` is local — this machine's override of it"
+    (is (contains? store/local-config-paths "dev.local")))
+
+  (testing "neither reaches a BUILT artifact"
+    (is (contains? store/unbuilt-config-paths "dev"))
+    (is (contains? store/unbuilt-config-paths "dev.local"))
+    (is (every? store/unbuilt-config-paths store/local-config-paths)
+        "a local path that could ship in a jar has no sensible reading"))
 
   (testing "and LOCAL wins over the has-config fallback"
     (let [st (-> (store/empty-store)
-                 (assoc-in [:config "dev" :values "http.port"] "7399")
+                 (assoc-in [:config "dev.local" :values "http.port"] "7399")
                  (assoc-in [:config "capabilities" :values "http.port"] "8080"))
           projected? (fn [path]
                        (and (not (store/local-config-paths path))
                             (or (contains? store/projected-config-paths path)
                                 (some? (get-in st [:config path])))))]
-      (is (not (projected? "dev"))
-          "a dev entry the store HOLDS was still treated as projected")
-      (is (projected? "capabilities")
-          "the fallback stopped working for an ordinary path"))))
+      (is (projected? "capabilities"))
+      (is (not (projected? "dev.local"))
+          "the fallback would project dev.local because the store holds :config for it"))))
 
 (deftest ^:external a-clone-records-where-each-imported-form-came-from
   ;; clone! ingested every namespace WITHOUT a prompt while its sibling
@@ -1046,3 +1056,56 @@
       (is (= 4 (sync/test-args "/tmp/x" "4")))
       (is (nil? (sync/test-args "/tmp/x" nil)) "absent means auto, as before")
       (is (thrown? Exception (sync/test-args "/tmp/x" "four")) "a count that is not one refuses"))))
+
+(deftest ^:external a-clone-restores-projected-config-as-declarations
+  ;; `clone!` used to hand every non-code path in the tree to `file-put!`, so
+  ;; `capabilities`, `rules`, `gates`, `dev` and `META-INF/MANIFEST.MF` — all
+  ;; RENDERINGS of `:config` — arrived as opaque `:files` blobs and `:config`
+  ;; stayed empty. Everything that reads a capability (`app.main`,
+  ;; `http.enabled`, the dev port) then saw a store declaring nothing: a fresh
+  ;; clone of slopp's own repo could not bring its dev instance up, and no
+  ;; surface said why. The pull path (`apply-files!`) already refused to blob
+  ;; these; the clone path is where they enter first.
+  (let [dir-a (temp-dir)
+        dir-b (str (temp-dir) "/clone")
+        bare  (bare-repo! (str (temp-dir) "/remote.git"))
+        sa    (external/open! {:slopp.ops/dir dir-a})]
+    (try
+      (ops/ingest! sa 'gc.core seed)
+      (doseq [[path k v] [["capabilities" "http.enabled" "true"]
+                          ["capabilities" "app.main" "gc.core/-main"]
+                          ["dev" "http.port" "7358"]
+                          ["rules" "bare-throw" "error"]]]
+        (let [c (ops/config-file! sa path :key k :value v :prompt "fixture" :agent "alice")]
+          (is (nil? (:error c)) (str "fixture: " path " " k " must land: " (pr-str c)))))
+      (external/commit-point! sa "v1" :agent "alice")
+      (is (nil? (:error (sync/push! dir-a :url bare))))
+
+      (let [c (sync/clone! bare dir-b :agent "bob")]
+        (is (nil? (:error c)) (pr-str c))
+        (testing "the clone ACCOUNTS for what it restored, path by path"
+          (is (= #{"capabilities" "dev" "rules"}
+                 (set (remove #{"META-INF/MANIFEST.MF" "modules"} (keys (:config c)))))
+              (pr-str (:config c)))))
+
+      (let [sb (external/open! {:slopp.ops/dir dir-b})]
+        (try
+          (let [st (:store @sb)]
+            (testing "the declarations are back as structured config, key for key"
+              (is (= "true" (get-in st [:config "capabilities" :values "http.enabled"])))
+              (is (= "gc.core/-main" (get-in st [:config "capabilities" :values "app.main"])))
+              (is (= "7358" (get-in st [:config "dev" :values "http.port"])))
+              (is (= "error" (get-in st [:config "rules" :values "bare-throw"]))))
+            (testing "and the readers that matter see them"
+              (is (true? (capabilities/effective st "http.enabled")))
+              (is (= 7358 (dev/override st "http.port"))))
+            (testing "and NOT as a second copy in :files"
+              (is (empty? (filter store/projected-config-paths (keys (:files st))))
+                  (str "renderings landed as files: "
+                       (pr-str (filter store/projected-config-paths (keys (:files st))))))))
+          (finally (ops/close! sb))))
+      (finally
+        (ops/close! sa)
+        (rm-rf! dir-a)
+        (rm-rf! (.getParentFile (io/file dir-b)))
+        (rm-rf! (.getParentFile (io/file bare)))))))

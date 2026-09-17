@@ -2739,3 +2739,73 @@
         (is (nil? (get (:deps r) dep))
             (str "with no framework deps declared, the family's coord must be"
                  " ABSENT from deps.edn: " (pr-str (:deps r))))))))
+
+(deftest ^:external dev-local-validates-at-write-like-dev
+  ;; `dev.local` mirrors `dev` key for key, so it is checked by the same
+  ;; registry: a mistyped local override that landed unchecked would govern
+  ;; nothing and report nothing — the hole the `rules` registry closed.
+  (let [sess (external/open!)]
+    (try
+      (testing "an unknown key is refused by name"
+        (let [r (ops/config-file! sess "dev.local" :key "http.prot" :value "8080"
+                                  :prompt "typo'd field")]
+          (is (re-find #"http\.prot" (str (:error r))) (pr-str r))))
+      (testing "a good local override lands, is reported as registry-checked, and wins"
+        (is (nil? (:error (ops/config-file! sess "dev" :key "http.port"
+                                            :value "7358" :prompt "the shared dev port"))))
+        (let [r (ops/config-file! sess "dev.local" :key "http.port"
+                                  :value "7399" :prompt "this box has 7358 taken")]
+          (is (nil? (:error r)) (pr-str r))
+          (is (= [:registry] (:verified r)) (pr-str r)))
+        (is (= 7399 (dev/override (:store @sess) "http.port"))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external the-brief-always-says-why-no-app-is-running
+  ;; A store with no app server used to get NOTHING in the brief — deliberate,
+  ;; since most stores are not web projects — and that silence made "the dev
+  ;; server is broken" read as "this project has no dev server". The brief is
+  ;; where an agent asks what is going on, so it answers in both directions.
+  (let [sess (external/open!)]
+    (try
+      (testing "nothing declared: the note says so and names the verb"
+        (let [b (ops/session-brief sess)]
+          (is (nil? (:app b)))
+          (is (re-find #"declares neither" (str (:app-note b))) (pr-str (:app-note b)))
+          (is (re-find #"config_file" (str (:app-note b))))))
+      (testing "declared but not running here: the note says it is declared, and by what"
+        (ops/config-file! sess "capabilities" :key "app.main" :value "x.core/-main"
+                          :prompt "an entry")
+        (let [b (ops/session-brief sess)]
+          (is (nil? (:app b)))
+          (is (re-find #"app\.main" (str (:app-note b))) (pr-str (:app-note b)))
+          (is (re-find #"none is running" (str (:app-note b))))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-blobbed-config-twin-is-named-by-the-brief-and-the-config-read
+  ;; The failure this closes: an import wrote `capabilities` into `:files` as an
+  ;; opaque blob, `:config` stayed empty, and every reader of a capability saw
+  ;; nil. The brief said nothing; `config_file {path "capabilities"}` said
+  ;; "no structured config" with the twin sitting one field over.
+  (let [sess (external/open!)]
+    (try
+      (ops/file-put! sess "capabilities" "http.enabled: true\napp.main: x.core/-main\n"
+                     :prompt "what an old clone did")
+      (testing "the brief names the blobbed path and the repair"
+        (let [b (ops/session-brief sess)]
+          (is (= ["capabilities"] (:config-blobbed b)) (pr-str b))
+          (is (re-find #"config_file" (str (:config-blobbed-note b))))
+          (is (re-find #"file_remove" (str (:config-blobbed-note b))))
+          (testing "and the app note connects the two"
+            (is (re-find #"capabilities" (str (:app-note b))) (pr-str (:app-note b))))))
+      (testing "the config read points at the twin instead of saying nothing exists"
+        (let [r (ops/config-file! sess "capabilities")]
+          (is (:error r))
+          (is (re-find #"tracked FILE" (str (:error r))) (pr-str r))
+          (is (re-find #"config_file" (str (:error r))))))
+      (testing "a store with structured config and no twin reports nothing"
+        (ops/file-remove! sess "capabilities" :prompt "repaired")
+        (ops/config-file! sess "capabilities" :key "http.enabled" :value "true"
+                          :prompt "restored")
+        (let [b (ops/session-brief sess)]
+          (is (nil? (:config-blobbed b)) (pr-str (:config-blobbed b)))))
+      (finally (ops/close! sess)))))

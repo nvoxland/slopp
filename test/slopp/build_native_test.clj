@@ -346,10 +346,12 @@
         (is (some #(and (seq? %) (= 'defonce (first %))) forms))))))
 
 (deftest ^:external a-LOCAL-config-path-never-reaches-a-BUILT-tree
-  ;; `build!` writes every `:config` entry as a file at its own path, with no
-  ;; filter — which is right for `capabilities`, since a built app reads the
-  ;; rendered file, and wrong for `dev`, which OVERRIDES capabilities for the
-  ;; dev instance. A developer's dev port has no business in a jar.
+  ;; `build!` writes every `:config` entry as a file at its own path — right
+  ;; for `capabilities`, since a built app reads the rendered file, and wrong
+  ;; for the dev layers: `dev` is the project's shared dev setup and `dev.local`
+  ;; one developer's override of it. A dev port has no business in a jar,
+  ;; whichever layer it came from — even though `dev` DOES ride the git
+  ;; projection, so this is a different filter from `commit-paths`'.
   ;;
   ;; Asserted against the TREE rather than against the filter, because the
   ;; tree is what ships and the filter is one line that could be correct while
@@ -363,7 +365,9 @@
                         "(defn run-cli [args] (doseq [a args] (println a)))\n"))
       (ops/config-file! sess "capabilities" :key "app.main" :value "calc.core/run-cli"
                         :prompt "the product's entry point")
-      (ops/config-file! sess "dev" :key "http.port" :value "7399"
+      (ops/config-file! sess "dev" :key "http.port" :value "7358"
+                        :prompt "the project's shared dev port")
+      (ops/config-file! sess "dev.local" :key "http.port" :value "7399"
                         :prompt "a dev port this developer chose")
 
       (let [r (external/build! sess dir)]
@@ -373,21 +377,24 @@
           (is (.exists (io/file dir "capabilities"))
               "capabilities stopped shipping — the filter is too wide"))
 
-        (testing "and the dev section does NOT"
+        (testing "and neither dev layer does"
           (is (not (.exists (io/file dir "dev")))
-              "a dev entry was written into the built tree"))
+              "the shared dev entry was written into the built tree")
+          (is (not (.exists (io/file dir "dev.local")))
+              "a dev.local entry was written into the built tree"))
 
-        (testing "nor does its content arrive in any other file"
+        (testing "nor does their content arrive in any other file"
           (let [hits (for [^java.io.File f (file-seq (io/file dir))
                            :when (.isFile f)
-                           :when (try (str/includes? (slurp f) "7399")
+                           :when (try (let [s (slurp f)]
+                                        (or (str/includes? s "7399") (str/includes? s "7358")))
                                       (catch Exception _ false))]
                        (str f))]
             (is (empty? hits)
                 (str "dev content shipped inside: " (pr-str (vec hits)))))))
 
-      (testing "and it is still IN THE STORE — local means unshipped, not unsaved"
-        (is (= "7399"
-               (get-in (:store @sess) [:config "dev" :values "http.port"]))))
+      (testing "and both are still IN THE STORE — unshipped, not unsaved"
+        (is (= "7358" (get-in (:store @sess) [:config "dev" :values "http.port"])))
+        (is (= "7399" (get-in (:store @sess) [:config "dev.local" :values "http.port"]))))
 
       (finally (ops/close! sess)))))

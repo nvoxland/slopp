@@ -1301,6 +1301,8 @@
                          (catalog/config-refusal (str key) (str value))
                          "dev"
                          (dev/config-refusal (str key) (str value))
+                         "dev.local"
+                         (dev/config-refusal (str key) (str value))
                          nil)]
         {:error refusal}
         (let [fmt      (or (some-> format clojure.core/keyword)
@@ -1309,7 +1311,7 @@
               ;; whether a REGISTRY stood behind this write, which is a
               ;; different question from which path it was — and stopped being
               ;; the same question the moment `rules` gained one
-              checked? (contains? #{"capabilities" "rules" "dev"} (str path))
+              checked? (contains? #{"capabilities" "rules" "dev" "dev.local"} (str path))
               ;; the prerequisites this write turns on WITH it, computed
               ;; against the PRE-write store so the report names only what
               ;; actually changed rather than restating the graph
@@ -1340,8 +1342,8 @@
             (assoc :note (str "recorded as given — no registry governs the "
                               path " config, so neither the key nor the value"
                               " was validated. `capabilities` (query_capabilities),"
-                              " `rules` (query_rules) and `dev` are the checked"
-                              " paths."))
+                              " `rules` (query_rules), `dev` and `dev.local` are the"
+                              " checked paths."))
 
             ;; ABSENT when nothing was implied, the way the module manifest's
             ;; :debt is: an empty vector on every write would train the reader
@@ -1362,7 +1364,17 @@
       (if entry
         {:path (str path) :format (:format entry) :values (:values entry)
          :rendered (store/render-config entry)}
-        {:error (str path " has no structured config")}))))
+                {:error (str path " has no structured config"
+                     (when-let [twin (get-in (:store @session) [:files (str path)])]
+                       ;; the twin an old clone left: the rendering as a FILE,
+                       ;; the declaration gone. Say so, or the reader concludes
+                       ;; the project never declared anything.
+                       (str " — but a tracked FILE at that path exists (an"
+                            " import blobbed the rendering instead of restoring"
+                            " the declaration). Restore it: config_file {path \""
+                            path "\" key K value V} per line, then file_remove"
+                            " {path \"" path "\"}. Its lines:\n"
+                            (if (map? twin) (pr-str twin) twin))))}))))
 
 ^:reads (defn draft-test
   "Rock 5: a ready-to-EDIT deftest draft for `ns-sym/nm`. With `:code` (a
@@ -3455,6 +3467,24 @@
         ;; one store-wide scan, not two — the cond-> below tests and reports the
         ;; same value
         unread   (orient/unread-declarations st)
+        ;; a projected config rendering held as a FILE with nothing behind it —
+        ;; what an import before the clone path learned to restore config left.
+        ;; Every capability reads nil while the projection shows the declaration
+        ;; plainly, which is why it has to be said HERE, beside the app line.
+        blobbed  (not-empty (store/blobbed-config-paths st))
+        ;; under the daemon the app server is the PROJECT's, held by its owner
+        ;; session; this session mirrors it only after a refresh it ran itself.
+        ;; Read the owner's when it is already open — never force it: an
+        ;; orientation must not be the thing that opens a reader.
+        app      (or (:app-server @session)
+                     (when-let [o (:app-owner @session)]
+                       (when (or (not (delay? o)) (realized? o))
+                         (:app-server @(force o)))))
+        declared (cond
+                   (capabilities/effective st "app.main")
+                   (str "app.main = " (capabilities/effective st "app.main"))
+                   (capabilities/effective st "http.enabled")
+                   "http.enabled")
         ;; the line this session WRITES to, when it is a private one. Read from
         ;; the session rather than resolved, deliberately: resolving ADOPTS,
         ;; and orientation must not be the thing that creates a workspace.
@@ -3538,15 +3568,15 @@
       ;; Its only other announcement is a line on the server's stderr, which
       ;; most clients never show anyone — so an agent asked "what is going
       ;; on" is where a human finds out the app has an address at all.
-      (:url (:app-server @session)) (assoc :app (:url (:app-server @session)))
+            (:url app) (assoc :app (:url app))
       ;; and what the image cost to come up. It rides HERE rather than only on
       ;; the banner because the comment two lines up is the whole reason: an
       ;; agent asked "what is going on" is where a human finds out. The first
       ;; app to want this number had to watch for the child process and diff
       ;; its bind against its start time — hand-measuring a figure slopp had
       ;; already computed, because the only place it was written was stderr.
-      (:boot-ms (:app-server @session))
-      (assoc :app-boot-ms (:boot-ms (:app-server @session)))
+            (:boot-ms app)
+      (assoc :app-boot-ms (:boot-ms app))
       ;; and whether that image is built from what you just wrote. `full_check`
       ;; has carried this for a while and the BRIEF is where a reader looks —
       ;; a consumer read this brief through a twenty-minute window in which
@@ -3558,14 +3588,47 @@
       ;; to look at built from what I just wrote", and silence on yes puts the
       ;; reader back to hand-checking something slopp knows. Silence is for
       ;; nothing-is-serving, which `behind` answers nil for.
-      (some? (app-behind session (:app-server @session)))
-      (assoc :app-behind (app-behind session (:app-server @session)))
+            (some? (app-behind session app))
+      (assoc :app-behind (app-behind session app))
       ;; and a managed app server that FAILED is not the same as one nobody
       ;; asked for. Silence on both is how "the dev server is broken" reads
       ;; as "this project has no dev server", which sends the reader nowhere.
-      (and (:app-server @session) (not (:serving? (:app-server @session))))
+            (and app (not (:serving? app)))
       (assoc :app-note (str "slopp is running this project's app server and it"
-                            " is DOWN: " (:reason (:app-server @session))))
+                            " is DOWN: " (:reason app)))
+      ;; and NO app at all is said in both directions. Silence here was
+      ;; deliberate once — most stores are not web projects — and it hid a
+      ;; LOST declaration for an hour: the brief said nothing, the registry
+      ;; said app null, and the reader concluded the project had no dev
+      ;; server rather than that its declaration had been blobbed.
+      (and (nil? app) declared)
+      (assoc :app-note (str "this store declares an app (" declared ") but none is"
+                            " running in this session's view: the daemon"
+                            " starts it on the project's first attach and"
+                            " re-serves it at each done. If it stays absent, the"
+                            " daemon's stderr carries the boot verdict"
+                            (when blobbed
+                              (str " — and see :config-blobbed: " (str/join ", " blobbed)
+                                   " exist only as tracked files"))))
+      (and (nil? app) (nil? declared))
+      (assoc :app-note (str "no app server: this store declares neither app.main"
+                            " nor http.enabled — config_file {path \"capabilities\""
+                            " key \"http.enabled\" value \"true\"} opts it into web,"
+                            " or key \"app.main\" value \"my.ns/-main\" declares"
+                            " an entry to run"
+                            (when blobbed
+                              (str ". BUT " (str/join ", " blobbed)
+                                   " exist as tracked FILES with no structured"
+                                   " config behind them — an import blobbed the"
+                                   " declaration; see :config-blobbed"))))
+      blobbed
+      (assoc :config-blobbed blobbed
+             :config-blobbed-note
+             (str "projected config held as opaque files, not declarations —"
+                  " every reader of those keys sees nil. An import before the"
+                  " clone path restored config did this. Repair each: file_get"
+                  " {path P}, config_file {path P key K value V} per line, then"
+                  " file_remove {path P}."))
       relevant   (assoc :relevant relevant))))
 
 (defn ^:export journal
@@ -5273,6 +5336,34 @@
   (swap! session update :events
          (fn [evs] (vec (take-last 5 (conj (or evs []) event)))))
   nil)
+
+(defn config-restore!
+  "Land a whole config entry at `path` as structured config, key by key —
+  the clone path's verb: a projected tree carries a declaration only as its
+  RENDERING, and `store/parse-config` read it back. Returns `{:path :keys}`.
+
+  Deliberately NOT through `config-file!`'s registries. A clone is replaying
+  what another store declared, possibly under a different slopp version, and
+  refusing a key this version does not know would abort the whole import over
+  a declaration nobody here made. The key lands as given; `session_brief`'s
+  `:unread-declarations` is the surface that names a declaration this slopp
+  no longer reads, which is the honest outcome — visible, not fatal.
+
+  `modules` is not a config entry (edge-grain, derived by adoption) and is
+  refused here as `config-file!` refuses it."
+  [session path {:keys [format values]} & {:keys [prompt agent]}]
+  (if (= "modules" (str path))
+    {:error "the module manifest is derived by adoption, not restored as config"}
+    (do (engine/commit-appended!
+         session
+         (fn [st]
+           (reduce (fn [s [k v]]
+                     (first (store/record-config-put s path (or format :manifest) k v
+                                                     :prompt prompt :agent agent)))
+                   st
+                   (sort-by key values)))
+         [])
+        {:path (str path) :keys (count values)})))
 
 (defn create-ns!
   "F4: bring a brand-new namespace into being — two modes:

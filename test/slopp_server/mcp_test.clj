@@ -2031,9 +2031,15 @@
   (testing "and neither marker reaches the wire"
     (is (not-any? #(contains? % :image-free) tools/registry))
     (is (not-any? #(contains? % :read-only) tools/registry)))
-  (testing "the classification did not change — this is a refactor"
-    ;; positive control: same answer, different home
-    (is (= 28 (count tools/image-free-tools)))
+  (testing "the classification is the deliberate one"
+    ;; 28 at the refactor that derived this set; 33 since explore (each inner
+    ;; op awaits the image itself), thread_list, thread_open, turn_begin and
+    ;; turn_end stopped waiting for an oracle they never touch — measured as
+    ;; a 10 s boot on every session's FIRST call
+    (is (= 33 (count tools/image-free-tools)))
+    (is (every? tools/image-free-tools ["explore" "thread_list" "thread_open" "turn_begin" "turn_end"]))
+    (is (not (contains? tools/image-free-tools "thread_drop"))
+        "a drop takes work off the image — conservative")
     (is (contains? tools/image-free-tools "session_brief"))
     (is (contains? tools/image-free-tools "query_git") "a sync-group exception")
     (is (not (contains? tools/image-free-tools "query_eval"))

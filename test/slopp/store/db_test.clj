@@ -1744,3 +1744,33 @@
           (is (= [0 1 2] (mapv :rank (store/forms (db/load-store conn trunk) 'hs.core)))
               "and the healed column carries what the write put there")))
       (finally (.close conn)))))
+
+(deftest ^:external an-empty-store-is-known-without-loading-it
+  ;; `sync/empty-store?` used to `load-store` — fold every delta and reparse
+  ;; every element — to answer a yes/no it asks on EVERY project open; on
+  ;; slopp's own store that is two seconds per open, spent learning the store
+  ;; is not empty. Two LIMIT 1 probes answer the same question in microseconds.
+  (let [dir (temp-dir)
+        conn (db/open! dir)]
+    (try
+      (testing "a freshly created store is empty"
+        (is (true? (db/store-empty? conn))))
+      (testing "content in either table makes it not empty"
+        (let [sess (external/open! {:slopp.ops/dir dir})]
+          (try
+            (ops/ingest! sess 'e.core "(ns e.core)\n(defn f \"F.\" [] 1)\n")
+            (finally (ops/close! sess))))
+        (with-open [c2 (db/open! dir)]
+          (is (false? (db/store-empty? c2)))))
+      (finally (.close conn)))))
+
+(deftest ^:external a-store-holding-only-a-file-is-not-empty
+  ;; a file-put is a delta with no element — the deltas probe is what sees it,
+  ;; and an importer treating such a store as fresh would re-import over it
+  (let [dir (temp-dir)
+        sess (external/open! {:slopp.ops/dir dir})]
+    (try
+      (ops/file-put! sess "README" "hi\n" :prompt "a file only")
+      (finally (ops/close! sess)))
+    (with-open [c (db/open! dir)]
+      (is (false? (db/store-empty? c))))))

@@ -203,9 +203,10 @@
                        files)
                   ;; every config entry EXCEPT the locally-declared ones. The
                   ;; rest ride every projected tree so a push never deletes
-                  ;; them; `dev` must not ride any, because it says what to RUN
-                  ;; while somebody works on this project — projecting it
-                  ;; pushes one developer's port and entry point at everyone
+                  ;; them — `dev` included, since it is the project's shared
+                  ;; dev setup and a clone needs it; `dev.local` must not ride
+                  ;; any, because it is one developer's override on one
+                  ;; machine, and projecting it pushes that port at everyone
                   ;; who pulls.
                   (map (fn [[p entry]] [p (store/render-config entry)])
                        (remove (comp store/local-config-paths key) configs))))))
