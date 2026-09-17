@@ -2,55 +2,63 @@
 
 ## Running the project so a human can watch it
 
-**When someone asks to "see it running", "start the app", or "give me a URL",
-this is the answer.** A slopp project declares what it wants RUN while
-somebody is working on it, and slopp keeps that running and refreshes it at
-every `done`.
+**When someone asks to "start the dev server", "see it running", "start the
+app", or "give me a URL", this is the answer** — and the first call is
+`session_brief`: `:app` is the running instance's url, and when there is
+none `:app-note` says WHY (nothing declared, declared but not started, boot
+failed, or a declaration that exists only as a blobbed file — see
+`:config-blobbed`). Read that before touching anything; the answer is
+usually one config write or one daemon restart away.
 
-Declare it once, in the `dev` config path:
+A slopp project declares what it wants RUN while somebody is working on it,
+and slopp keeps that running and refreshes it at every `done`. The
+declaration is the `app.main` CAPABILITY — the same entry a built app runs:
 
 ```clojure
-config_file {path "dev" key "run.app.main"  value "shop.core/-main"}
-config_file {path "dev" key "run.app.args"  value "--port,8080"}
-config_file {path "dev" key "run.app.url"   value "http://127.0.0.1:8080"}
+config_file {path "capabilities" key "app.main"  value "shop.core/-main"}
 ```
 
-That is the whole setup. From the next `done`, slopp starts `shop.core/-main`
-with those arguments in a dedicated child image and re-serves it whenever work
-lands.
+A project that serves HTTP (`http.enabled`) and declares no entry gets the
+server slopp derives instead. Either is reason enough for a dev instance;
+`app.main` is what a worker, a scheduler, or slopp's own daemon declares.
 
-| key | what it says |
-|---|---|
-| `run.<name>.main` | the entry fn. The NAME is the key's own middle segment — `run.admin.main` declares `admin` |
-| `run.<name>.args` | arguments, comma-separated and **in order** (`--port,8080` → `["--port" "8080"]`) |
-| `run.<name>.url` | where a human should open it — see below, this is DECLARED |
-| `run.<name>.enabled` | `false` silences one without deleting its entry point |
-| `run.<name>.port` | the port this entry should listen on IN DEVELOPMENT. The manager tells the child before the entry runs (`slopp.run.<name>.port`, and `slopp.app-port` when it is the only ported entry) and derives the url from it, so an entry that reads the property needs no `args` and no `url`. A dev setting rather than `http.port`, which is the PRODUCTION address |
+**The `dev` config is an OVERLAY of the capability keys for the dev
+instance**, in two layers:
 
-**Named, because projects grow a second process.** A worker, an admin port, a
-scheduler — declare each under its own name and they all start. There is no
-anonymous single entry to redesign later.
+| path | what it is | where it goes |
+|---|---|---|
+| `dev` | the project's SHARED dev setup — `config_file {path "dev" key "http.port" value "7358"}` moves the dev instance off the production `http.port`; any capability key works the same way | projects to git with the code, so a clone serves without a step; never into a built jar |
+| `dev.local` | THIS machine's override of `dev`, same keys — a port this box has free, an entry point being tried | stays in the db; reaches no tree |
+
+Precedence, highest first: a per-process `SLOPP_DEV_<KEY>` env override
+(`SLOPP_DEV_HTTP_PORT=7360`), then `dev.local`, then `dev`, then the
+capability's own value. Both paths validate at the write against the
+capabilities registry, so a mistyped key refuses rather than governing
+nothing. Keep `dev` COMPLETE — it is what anyone who clones the project gets,
+and the normal setup should need no local override at all.
+
+**This is why the dev port is a `dev` setting and not `http.port`:**
+`http.port` is the PRODUCTION address (for slopp's own store, the machine
+daemon's), and the in-progress copy must not take it.
 
 ### Four things worth knowing before you set this up
 
-**`dev` never ships.** It is in `slopp.store/local-config-paths`, so it
-reaches neither a built tree nor a git projection. A port a developer chose
-stays that developer's business; `capabilities`, `rules` and `gates` still
-travel with the product as they always did. This is why the port belongs here
-and not in `http.port`.
+**ONE process per project.** A built app is one jar and one `-main`; the dev
+supervisor starts that one entry. (`run.<name>.*` entries are retired —
+declare the entry as `app.main`.)
 
 **The URL is DECLARED or DERIVED, never observed.** For a project with no
 `dev` entries slopp GENERATES the `serve!` call and reads the bound port back,
 so it knows the address. A declared entry is an arbitrary function and hands
-nothing back, so either say what its url is (`run.<name>.url`) or give it a
-`run.<name>.port` and slopp derives `http://<host>:<port>/` from that. Absent
-is honest for a worker.
+nothing back, so slopp derives `http://<host>:<port>/` from the dev-overlaid
+`http.host`/`http.port`. A worker with no port has no url, and absent is
+honest.
 
 **What the manager tells a declared entry.** Before any entry runs, the child
 is handed what only the manager knows, as system properties: `slopp.managed-for`
 (the store dir it is the declared entry OF), `slopp.static-dir` (where the
-mounts' bytes were materialized), `slopp.run.<name>.port` per ported entry and
-`slopp.app-port` when exactly one is. A process that finds itself
+mounts' bytes were materialized) and `slopp.app-port` (the dev-overlaid
+port). A process that finds itself
 `slopp.managed-for` a store never manages that store's app server — it would
 be booting a child of itself onto its own port.
 

@@ -60,13 +60,33 @@ ignored.
 paths for the owned-image launcher before trusting PATH, and forcing the bare
 name makes child images inherit mise's pinned clojure.
 
-## Run mcp
+## Run mcp, and "the dev server"
 
-The MCP server is the development surface, and "mcp" is what to call it. It is
-NOT "the dev server": since 2026-08-01 that phrase means the APP server slopp
-runs for a web project under development (`slopp.webdev.live`, and whether it
-runs is derived, not configured), which mcp is what STARTS. Two servers, one of them serving your
-code and the other serving you.
+**"Start the dev server" means this checkout's DEV INSTANCE**: the
+in-progress slopp (`app.main = slopp-server.process/-main`) booted from this
+store by the machine daemon on 7358, refreshed at every `done`. The whole
+procedure, in order — and `session_brief`'s `:app` / `:app-note` tells you
+which step you are on:
+
+1. A machine daemon must be running: `SLOPP_JAR=… slopp daemon` (see below
+   for which jar). It attaches this checkout on the first call from here.
+2. The store must DECLARE the instance: `app.main` in `capabilities` and
+   `http.port 7358` in the `dev` config — both project to git, so a clone
+   has them. If `session_brief` says `:config-blobbed`, an old import turned
+   them into files: repair as the note says.
+3. On the project's first attach the daemon boots the instance and prints
+   `slopp app: http://127.0.0.1:7358/…` (or `slopp app unavailable: …`) on
+   ITS stderr. `session_brief :app` carries the url; `/api/projects` on
+   7357 shows it under `:app`.
+4. To drive it, give a second agent `SLOPP_PORT=7358`.
+
+A port already taken on this box? `config_file {path "dev.local" key
+"http.port" value "7359"}` overrides `dev` for this machine only.
+
+The MCP server itself — what the plugin talks to — is a different thing:
+the daemon on 7357 serving YOU, not the dev instance serving the code under
+development. Two servers, one of them serving your code and the other
+serving you.
 
 From a checkout:
 

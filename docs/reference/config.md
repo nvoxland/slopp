@@ -199,37 +199,33 @@ key.
 Prefer this over `file_put` for anything key-shaped: you get per-key history
 and a merge that resolves at key grain instead of line grain.
 
-## The dev file — what to run, and it stays here
+## The dev overlay — how the project runs while you work on it
 
-`dev` declares what this project wants RUN while somebody is working on it.
+What a project RUNS while somebody works on it is the `app.main` capability —
+the same entry a built app runs. The `dev` config OVERLAYS the capability
+keys for that dev instance, so it can sit on a different port from production:
 
 ```clj
-config_file {path "dev" key "run.app.main"    value "shop.core/-main"}
-config_file {path "dev" key "run.app.args"    value "--port,8080"}
-config_file {path "dev" key "run.app.url"     value "http://127.0.0.1:8080"}
-config_file {path "dev" key "run.worker.main" value "shop.jobs/-main"}
-config_file {path "dev" key "run.worker.enabled" value "false"}
+config_file {path "capabilities" key "app.main"  value "shop.core/-main"}
+config_file {path "dev"          key "http.port" value "7358"}
 ```
 
-| key | type | default | meaning |
-|---|---|---|---|
-| `run.*.main` | qualified symbol | — | the entry fn; the NAME is the key's middle segment |
-| `run.*.args` | ordered CSV | — | arguments, in order (`--port,8080`) |
-| `run.*.url` | string | — | where a human should open it; DECLARED, not observed |
-| `run.*.enabled` | boolean | `true` | `false` silences an entry without deleting it |
-| `run.*.port` | int | — | the port this entry's dev instance binds (e.g. `run.daemon.port`) |
+Two layers, same keys, both validated against the capabilities registry:
 
-Validated at the write, like `capabilities` and `rules` — an unregistered key
-refuses rather than recording a setting that governs nothing.
+| path | what it is | where it goes |
+|---|---|---|
+| `dev` | the project's shared dev setup — complete, the normal way to run it | every git projection, so a clone serves without a step; never a built tree |
+| `dev.local` | this machine's override of `dev` — a port this box has free | the database only; reaches no tree |
 
-**It never leaves the database.** `dev` is the one path in
-`slopp.store/local-config-paths`: `build!` does not write it into a built tree
-and `slopp.git/commit-paths` does not put it in a projected one. What to run
-on a laptop, on which port, is a fact about a development session and not
-about the program — shipping it would put one developer's choices in a jar,
-and a second developer's pull would carry them back.
+Precedence is **env override → `dev.local` → `dev` → the capability**. Keep
+`dev` complete: it is what anyone who clones the project gets, and the
+ordinary case needs no `dev.local` at all. `session_brief` reports the
+running instance under `:app`, and under `:app-note` why there is none.
 
-Every other config path ships and always has.
+`dev` and `dev.local` are `slopp.store/unbuilt-config-paths`: `build!` writes
+neither into a built tree — a jar has no use for a dev port. `dev.local` is
+also `slopp.store/local-config-paths`, so `slopp.git/commit-paths` leaves it
+out of every projected tree. Every other config path ships and always has.
 
 ### Overriding a config value per process
 
@@ -237,12 +233,12 @@ An environment variable overrides a config value for THAT process only, above
 the store value and the registry default:
 
 ```sh
-SLOPP_DEV_RUN_DAEMON_PORT=7360 slopp daemon
+SLOPP_DEV_HTTP_PORT=7360 slopp daemon
 ```
 
 The name is `SLOPP_` + the config path (file, then key) UPPERCASED with every
-dot and dash as `_` — so `SLOPP_DEV_RUN_DAEMON_PORT` overrides the `dev` file's
-`run.daemon.port`, and `SLOPP_CAPABILITIES_HTTP_PORT` a served port.
+dot and dash as `_` — so `SLOPP_DEV_HTTP_PORT` overrides the `dev` file's
+`http.port`, and `SLOPP_CAPABILITIES_HTTP_PORT` a served port.
 Precedence is **override → store → default**; an override that fails the key's
 type check falls back like any bad value. It is per-PROCESS, so two daemons
 sharing one `store.db` can run their dev instances on different ports (the

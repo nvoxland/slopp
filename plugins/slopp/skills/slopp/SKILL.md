@@ -160,6 +160,7 @@ text replace; say `text: true` next time.
 | what a fn really does with real inputs | `eval {op query_observe ns name code}` |
 | is the whole store green, and what artifact is behind | a close already says (`:whole-store` on done / a closing change) when the store is small; `verify {op full_check}` is for a store too big to check in a close. A green answer carries `:test` and `:external` counts: quote them, never `test_run` after a green |
 | how the teammate runs the suite | `slopp --call test_run '{"external":true}'` from the project dir |
+| is the project's dev server (its app / dev instance) up, and why not | `session_brief` — `:app` is its url; `:app-note` says why there is none (nothing declared, not started yet, boot failed, or a declaration blobbed as a file — `:config-blobbed`). Setup and the `dev` / `dev.local` overlay: `help {topic "running"}` |
 
 ## Refusals teach
 

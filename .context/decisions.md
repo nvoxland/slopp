@@ -7493,3 +7493,50 @@ its old spelling on purpose — it records what was decided then. Installed
 marketplaces registered as `nvoxland/slopp3` must be re-added as
 `nvoxland/slopp`; a cached jar keeps running meanwhile.
 
+
+**Amendment (2026-09-17, user decision).** The server MAY read the kernel's
+boot record: `slopp-server.process` declares the `slopp.kernel` module edge,
+because `own-store!` and `asset-reader` ask "which dir did this process boot
+from" through `store/late-ref 'slopp.kernel.boot/current-boot-info` — the
+same reach `slopp.ops`, `slopp.webdev`, `slopp.image` and `slopp.sync` already
+declare. The edge had been on the retired `slopp.daemon` row; the 2026-09-15
+rename moved the forms and not the edge, and `full_check`'s `:module-debt`
+sweep was the first thing to ask. The purer reading of this decision — one
+framework `^:export` accessor for the boot dir, so the server never names the
+kernel — is the move to make if a third such reach appears.
+
+## D-dev-config-two-layers (2026-09-16, user decision) — `dev` is the project's shared dev setup and PROJECTS; `dev.local` is the per-machine override and stays in the db
+
+**Decision.** The `dev` config path (the capability overlay for the dev
+instance, `D-daemon-is-an-app`) is part of the project: it rides every git
+projection like `capabilities`, and a clone arrives with it. It must be
+COMPLETE — the normal setup anyone uses, no local step. A second path,
+`dev.local`, mirrors its keys and is the one that stays local
+(`slopp.store/local-config-paths`), for a port this box has free or an entry
+being tried. Precedence: `SLOPP_DEV_<KEY>` env → `dev.local` → `dev` →
+capability. Neither reaches a BUILT tree (`slopp.store/unbuilt-config-paths`;
+`build!` reads it, `commit-paths` reads the narrower local set).
+
+Nathan, 2026-09-16: "We should be able to have a local dev config which
+overrides what is stored. But the stored version should be complete and the
+normal setup for anyone to use."
+
+**Why.** This reverses the "dev never ships" half of the 2026-09-1x dev-config
+design, and what reversed it was a fresh clone of slopp's own repo: the dev
+port (7358) lived only in slopp2's db, so the new checkout's dev instance
+would have bound the machine daemon's 7357. A setting every developer of the
+project needs identically is a project fact, not a session fact. The
+per-developer half of the old reasoning ("a second developer's pull carries
+the first one's port") is exactly what `dev.local` is for — the layer that
+never travels.
+
+**Found with it, fixed with it.** `sync/clone!` wrote every non-code tree
+path through `file-put!`, so `capabilities`, `rules`, `gates`, `dev` and
+`META-INF/MANIFEST.MF` — renderings of `:config` — arrived as `:files` blobs
+and `:config` stayed EMPTY: a clone lost every capability and nothing said
+so (the daemon prints nothing for a store that declares no app, by design).
+`clone!` now restores each projected rendering through `store/parse-config`
++ `ops/config-restore!` and reports it under `:config`; `session_brief`
+carries `:app-note` in both directions and `:config-blobbed` for the shape an
+old clone left; `config_file {path}` names the blobbed twin. Observation:
+`.context/findings-log.md` 2026-09-16.

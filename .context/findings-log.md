@@ -3205,3 +3205,80 @@ with no args), which the pipe had masked by always passing the port; the
 launcher passes it now. And the auto-require displaced an existing alias for
 the second time (`slopp.rest.contract-test`, `rest.contract` → `contract`),
 breaking the file at load — recorded in `ideas/`.
+
+## 2026-09-16 — "start the slopp dev server" took an hour: a lossy clone and three silent surfaces
+
+- **The store was a fresh auto-import.** `slopp/.slopp/store.db` did not
+  exist; the first daemon attach ran `maybe-auto-import!` from
+  `origin/slopp/main`. The real store (348 MB, full history) was in
+  `../slopp2`. Nothing was unpushed — the history simply lives in a db.
+- **`clone!` blobbed every projected config rendering.** `capabilities`,
+  `rules`, `gates`, `modules`, `client`, `META-INF/MANIFEST.MF` landed in
+  `:files`; `:config` was `{}`. `capabilities/effective` reads `:config`, so
+  `app.main` and `http.enabled` were nil: the daemon decided the store ran
+  no app and, by design, said nothing. The pull path (`apply-files!`) had
+  learned not to blob these on 2026-08; the clone path never had.
+- **Three surfaces stayed silent, and each would have ended the search:**
+  `session_brief` had no `:app` line for a store with nothing running;
+  `/api/projects` said `"app": null` with no reason; `config_file {path
+  "capabilities"}` said "no structured config" while a file by that name sat
+  in `:files`. The daemon's only announcement is stderr, on the user's
+  terminal — and it announces nothing for an undeclared app.
+- **The docs steered away from the phrase.** DEV.md opened "Run mcp" with
+  "it is NOT the dev server", then spread the procedure over 100 lines and a
+  reference topic that still documented the retired `run.<name>.*` keys.
+- **The plugin's MCP connect timed out** (30 s) against a ~90 s first store
+  load, so the session started with no tools and no `[slopp]` block.
+- **The CLI door opened the project without its app.** `attach!` booted the
+  dev instance on first open; `cli-session!` did not, and `ensure-project!`
+  answers first? once — so a project the prompt hook or a `slopp <op>`
+  reached before the plugin's pipe never got its dev instance until a
+  `done`. Both doors now share `boot-app-on-first-open!`; verified on a
+  fresh daemon: one `slopp session_brief` → `slopp app: …:7358/` in 6 s.
+- **A stale plan on the old daemon.** After the config repair, the running
+  0.3.1 daemon's `done` refresh reported the app at 7357 (the plan it
+  computed before `dev` existed) while the live store derived 7358; a
+  declared entry reports `:started` and then fails to bind. Not chased —
+  the restart onto the rebuilt jar was the fix and the current code's
+  refresh re-reads the branch — but worth a test if it recurs.
+- **Fixed:** `D-dev-config-two-layers`; `clone!` restores config;
+  `session_brief :app-note` / `:config-blobbed`; `config_file` read names the
+  twin; `running` reference and DEV.md rewritten around `session_brief :app`.
+  Not fixed: the 30 s MCP timeout vs. first-load time (the daemon could
+  answer `initialize` before the store loads — it already boots the image
+  async; the store VALUE load is the remaining wait).
+
+## 2026-09-17 — "it shouldn't take 60 or 90 seconds for anything": where a cold start went
+
+Measured on slopp's own store (57 MB, 277 namespaces), fresh daemon, first
+CLI call. Before: daemon boot 5.6 s, first call **14.5 s**, dev instance up
+at 21 s. Split with a script against the jar:
+
+| step | ms | what |
+|---|---|---|
+| `sync/empty-store?` | 2072 | folded the WHOLE store to answer yes/no, on every open |
+| `sync/maybe-auto-import!` | 799 | the `.git` + slopp-branch checks |
+| `cli-session!` (`external/open!`) | 2126 | the real store open |
+| force `:app-owner` (project reader) | 1342 | a second open, for the app server |
+| first tool call (`thread_list`) | **10600** | booted the ORACLE IMAGE — a child JVM loading every namespace — for a read that never touches it |
+
+The 10.6 s: `image-free-tools` is right, but `explore`, `thread_list`,
+`thread_open`, `turn_begin`, `turn_end` were not in it. `explore` was
+classified conservatively although each inner op goes through `call-op!`
+and awaits the image itself; the thread/turn ops touch no image at all. So
+the FIRST call the skill tells every session to make paid a 10 s boot, and
+the daemon's "reads never boot it" promise held only for a session whose
+first call happened to be `query_search`. Fixed: the five are image-free
+(`a-daemon-session-boots-no-image-until-something-needs-one` now makes those
+calls first); `empty-store?` is two `LIMIT 1` probes (`db/store-empty?`).
+
+After: daemon boot 4.6 s, first call **2.7 s**, explore 1.4 s, brief 0.3 s,
+`images {:up 0}`; dev instance up at 17 s (6.2 s of it the child's own boot,
+backgrounded).
+
+The 90 s on 2026-09-16 was neither: the dir had no store, so the first attach
+ran a full `clone!` from `origin/slopp/main` — one-time onboarding — and that
+is what outran the plugin's 30 s MCP connect timeout. Still open: a first
+attach that imports will still exceed 30 s on a store this size; the
+handshake could answer before the import, or the timeout could be raised in
+the plugin's `.mcp.json`.
