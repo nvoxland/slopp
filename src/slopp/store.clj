@@ -2122,3 +2122,18 @@
                               (not= "modules" path)
                               (nil? (get-in store [:config path])))]
                path))))
+
+(defn governing-declaration
+  "The most specific row of name-keyed register `reg` that governs `ns-sym` —
+  `[key value]`: the namespace itself, else each enclosing prefix, longest
+  first — or nil when nothing declares it. This is [[platform-for]]'s lookup
+  as DATA: a rename needs to ask what governed a name before it moved, and
+  whether the same declaration will govern the new name, which a resolver
+  that answers only the value cannot say."
+  [store reg ns-sym]
+  (let [rows (get store reg)
+        segs (str/split (str ns-sym) #"\.")]
+    (some (fn [n]
+            (let [k (str/join "." (take n segs))]
+              (when (contains? rows k) [k (get rows k)])))
+          (range (count segs) 0 -1))))

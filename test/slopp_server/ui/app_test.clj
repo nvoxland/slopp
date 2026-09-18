@@ -415,7 +415,7 @@
         ;; reader who types a project url gets is this.
         ;;
         ;; **The gap it exposes is real.** Reaching a project FROM the landing
-        ;; is a client navigation — `hub-picker` renders an ordinary in-app
+        ;; is a client navigation — `project-picker` renders an ordinary in-app
         ;; link — and session loads start once and never re-run, so that path
         ;; still gets an empty rail. `:modules` is project-scoped and a session
         ;; load is session-scoped; only the framework can close that, by
@@ -1810,3 +1810,22 @@
       (is (thrown? Exception (cljnx/fill! s "switch project" "nonesuch")))
       (is (= ["/p/slopp2" "/p/demo"] @left)
           "a refused fill left for nowhere"))))
+
+(deftest a-hard-load-of-the-root-lands-in-the-only-open-project
+  ;; The same fact one level up, through the entry a browser and the `screen`
+  ;; tool open: typed `/`, the address bar shows the project. `page/page`
+  ;; cans TWO projects on purpose (the switcher's fixture), so this wires the
+  ;; same declaration with a registry of one.
+  (let [only  [{:slug "only" :dir "/w/only" :opened-at 0 :sessions 1 :cli false :app nil}]
+        entry (app/wiring
+               {:state  (atom {})
+                :call   (fn [request ok _err]
+                          (ok (when (= "/api/projects" (str (:http/url request))) only)))
+                :render (fn [_])})
+        s     (cljnx/open! (cljnx/driver-for entry) "/")]
+    ;; the SWITCHER rather than the main pane: the destination page asks for
+    ;; its own timeline, which this fixture does not can, so its pane says
+    ;; so — and that is the project's screen honestly loading, not the landing
+    (is (re-find #"only" (cljnx/text s "nav/switcher")) (cljnx/text s))
+    (is (= "/p/only" (cljnx/url s))
+        "the address bar shows the project, not the landing that sent the reader there")))

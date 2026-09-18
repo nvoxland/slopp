@@ -149,7 +149,7 @@
                    :ns   (views/ns-rail value show)
                    nil))]
     (if (= :projects subject)
-      ;; the LANDING is in no SECTION and belongs to no project. `hub-picker`
+      ;; the LANDING is in no SECTION and belongs to no project. `project-picker`
       ;; is a page in its own right — its own heading, nothing to be inside,
       ;; nothing to switch away from — so it gets no shell. Wrapping it would
       ;; draw a section bar whose every link points into a project the reader
@@ -167,7 +167,7 @@
                          ;; inside the room
                          :nav/search   (views/search-box (:q params))
                          ;; the HUB's answer rather than a project's, which is
-                         ;; why [[slopp-server.ui.views/hub-projects]] names an empty
+                         ;; why [[slopp-server.ui.views/daemon-projects]] names an empty
                          ;; base instead of going through `at-project`.
                          ;; **the current project comes from the ADDRESS, not from state.** It
                          ;; was `(:project state)`, written by the browser entry's
@@ -178,7 +178,7 @@
                          ;; same fact without the DOM read, and removing that read
                          ;; is what lets slopp generate this app's browser entry.
                          :nav/switcher (views/project-switcher
-                                        (:value (webapp/ask! page views/hub-projects {}))
+                                        (:value (webapp/ask! page views/daemon-projects {}))
                                         slug)
                          ;; nil for a subject with no lenses, which app-shell
                          ;; leaves out entirely rather than rendering empty. The
@@ -235,22 +235,34 @@
              [:p (str error)]]
     [:main {:class "load-pending"} [:p [:small "Loading…"]]]))
 
-(defn ^{:webapp/path "/" :unused-ok "the route table RESOLVES this at runtime — cljnx/marked-pages scans loaded vars for :webapp/path, and the build reads the same marker — so no form names it and none should"} hub-picker-page
-  "The landing screen at `/` — the list of projects the hub fronts.
+(defn ^{:webapp/path "/"} landing-page
+  "The landing screen at `/` — the projects open on this daemon, or the one
+  project when there is exactly one.
 
   **`/` is a client route.** It was a server-rendered page: `hub/picker` read
   the registry and answered HTML, because the app was mounted per project and
   the landing sat outside every mount. With one shell at the root the landing
-  is an ordinary page, fed by the hub's own `/api/projects`.
+  is an ordinary page, fed by the daemon's own `/api/projects`.
+
+  **One open project is not a choice, so the reader is sent into it.** The
+  page answers `{:webapp/redirect \"/p/<slug>\"}` and the framework performs
+  it with a REPLACE, so the back button skips the landing rather than bouncing
+  the reader forward again — the trap a navigate-on-arrival by hand set, and
+  the reason this listed a single project for a while. Two or more are a
+  choice and list; none is the empty state; a registry still loading has
+  nothing to decide on and shows the list's pending state.
 
   The one page that does NOT go through [[slopp-server.ui.views/at-project]]: there is
-  no project in the address to measure against, and the endpoint is the hub's."
+  no project in the address to measure against, and the endpoint is the daemon's."
   [page]
-  (let [answer (webapp/ask! page views/hub-projects {})]
-    (chrome page :projects answer
-            (answered answer #(views/hub-picker (:value answer))))))
+  (let [answer   (webapp/ask! page views/daemon-projects {})
+        projects (:value answer)]
+    (if (and (= :ready (:status answer)) (= 1 (count projects)))
+      {:webapp/redirect (str "/p/" (:slug (first projects)))}
+      (chrome page :projects answer
+              (answered answer #(views/project-picker projects))))))
 
-(defn ^{:webapp/path "/p/:slug" :unused-ok "runtime-resolved entry — see hub-picker-page"} timeline-page
+(defn ^{:webapp/path "/p/:slug" :unused-ok "runtime-resolved entry — see landing-page"} timeline-page
   "The Review screen — a project's recent work, at its root address.
 
   The shape every page here follows: ask for one endpoint measured against the
@@ -263,7 +275,7 @@
     (chrome page :timeline answer
             (answered answer #(views/timeline-main (:value answer))))))
 
-(defn ^{:webapp/path "/p/:slug/store" :unused-ok "runtime-resolved entry — see hub-picker-page"} code-page
+(defn ^{:webapp/path "/p/:slug/store" :unused-ok "runtime-resolved entry — see landing-page"} code-page
   "The Code index — the module diagram and the store's shape.
 
   **The diagram is laid out HERE rather than in the view.** It was a route
@@ -284,7 +296,7 @@
                                (some-> (:value answer) views/with-store-picture)
                                (:lens state))))))
 
-(defn ^{:webapp/path "/p/:slug/store/table" :unused-ok "runtime-resolved entry — see hub-picker-page"} code-table-page
+(defn ^{:webapp/path "/p/:slug/store/table" :unused-ok "runtime-resolved entry — see landing-page"} code-table-page
   "The Code index at `/store/table` — the same data as rows.
 
   A lens BINDING, and a different kind of form from [[code-page]]: that one
@@ -299,7 +311,7 @@
                                (some-> (:value answer) views/with-store-picture)
                                "table")))))
 
-(defn ^{:webapp/path "/p/:slug/store/gaps" :unused-ok "runtime-resolved entry — see hub-picker-page"} code-gaps-page
+(defn ^{:webapp/path "/p/:slug/store/gaps" :unused-ok "runtime-resolved entry — see landing-page"} code-gaps-page
   "The Code index at `/store/gaps` — the same diagram, tinted by what is
   missing. A lens BINDING; see [[code-table-page]]."
   [{:keys [params] :as page}]
@@ -309,7 +321,7 @@
                                (some-> (:value answer) views/with-store-picture)
                                "gaps")))))
 
-(defn ^{:webapp/path "/p/:slug/store/search" :unused-ok "runtime-resolved entry — see hub-picker-page"} search-page
+(defn ^{:webapp/path "/p/:slug/store/search" :unused-ok "runtime-resolved entry — see landing-page"} search-page
   "The search results.
 
   The query comes from the ADDRESS rather than from the response: the url is
@@ -328,7 +340,7 @@
     (chrome page :search answer
             (answered answer #(views/search-main (:value answer) (:q params))))))
 
-(defn ^{:webapp/path "/p/:slug/rest/paths" :unused-ok "runtime-resolved entry — see hub-picker-page"} endpoints-page
+(defn ^{:webapp/path "/p/:slug/rest/paths" :unused-ok "runtime-resolved entry — see landing-page"} endpoints-page
   "The API index — every `:rest/path` endpoint the project publishes.
 
   **The ENVELOPE is stripped here.** It was a row's `:derive :paths`, so no
@@ -348,7 +360,7 @@
     (chrome page :rest-paths rows
             (answered rows #(views/endpoints-main (:value rows))))))
 
-(defn ^{:webapp/path "/p/:slug/rest/paths/:method/**" :unused-ok "runtime-resolved entry — see hub-picker-page"} endpoint-page
+(defn ^{:webapp/path "/p/:slug/rest/paths/:method/**" :unused-ok "runtime-resolved entry — see landing-page"} endpoint-page
   "One endpoint, and the form for calling it ad hoc.
 
   Three inputs from three places: the document from the ask, the endpoint's
@@ -371,7 +383,7 @@
                                                  (views/routed-address params)
                                                  (:call state))))))
 
-(defn ^{:webapp/path "/p/:slug/http/paths" :unused-ok "runtime-resolved entry — see hub-picker-page"} content-index-page
+(defn ^{:webapp/path "/p/:slug/http/paths" :unused-ok "runtime-resolved entry — see landing-page"} content-index-page
   "The **Pages** section index — the static content a project serves.
 
   The CONTENT half of the api/content partition: a `:http/path` form is a
@@ -389,7 +401,7 @@
     (chrome page :http-paths rows
             (answered rows #(views/pages-main (:value rows))))))
 
-(defn ^{:webapp/path "/p/:slug/http/paths/:ns/:name" :unused-ok "runtime-resolved entry — see hub-picker-page"} content-page
+(defn ^{:webapp/path "/p/:slug/http/paths/:ns/:name" :unused-ok "runtime-resolved entry — see landing-page"} content-page
   "One static page's detail — what it serves and what its value is.
 
   **Addressed by VAR, not by path.** `hub/shell` is served at `/`, so under a
@@ -407,7 +419,7 @@
             (answered rows #(views/page-main (:value rows)
                                              (select-keys params [:ns :name]))))))
 
-(defn ^{:webapp/path "/p/:slug/change/:range" :unused-ok "runtime-resolved entry — see hub-picker-page"} change-page
+(defn ^{:webapp/path "/p/:slug/change/:range" :unused-ok "runtime-resolved entry — see landing-page"} change-page
   "One range of change — what moved, and whether it went red on the way."
   [{:keys [params] :as page}]
   (let [answer (webapp/ask! page (views/at-project params api/change)
@@ -415,7 +427,7 @@
     (chrome page :change answer
             (answered answer #(views/change-main (:value answer))))))
 
-(defn ^{:webapp/path "/p/:slug/store/ns/:ns" :unused-ok "runtime-resolved entry — see hub-picker-page"} ns-page
+(defn ^{:webapp/path "/p/:slug/store/ns/:ns" :unused-ok "runtime-resolved entry — see landing-page"} ns-page
   "One namespace's outline — its forms, in source order.
 
   `:show` is the doc-expansion state, which is SESSION-scoped and survives
@@ -427,7 +439,7 @@
     (chrome page :ns answer
             (answered answer #(views/ns-outline-main (:value answer) (:show state))))))
 
-(defn ^{:webapp/path "/p/:slug/store/module/:module" :unused-ok "runtime-resolved entry — see hub-picker-page"} module-page
+(defn ^{:webapp/path "/p/:slug/store/module/:module" :unused-ok "runtime-resolved entry — see landing-page"} module-page
   "One module — its internal diagram, its boundary, what it depends on.
 
   **The one page that DECIDES rather than unpacks, and Move A is what makes it
@@ -455,7 +467,7 @@
                              {:modules (or (:modules (:value index)) [])}
                              (:module params))))))))
 
-(defn ^{:webapp/path "/p/:slug/store/form/:id" :unused-ok "runtime-resolved entry — see hub-picker-page"} form-page
+(defn ^{:webapp/path "/p/:slug/store/form/:id" :unused-ok "runtime-resolved entry — see landing-page"} form-page
   "One form — what it is, what it calls, and its source behind a lens.
 
   `:depth 2` is this app's choice rather than the endpoint's default: the page
@@ -467,7 +479,7 @@
     (chrome page :form answer
             (answered answer #(views/form-main (:value answer) (:lens state) nil)))))
 
-(defn ^{:webapp/path "/p/:slug/store/form/:id/through/:through" :unused-ok "runtime-resolved entry — see hub-picker-page"} form-through-page
+(defn ^{:webapp/path "/p/:slug/store/form/:id/through/:through" :unused-ok "runtime-resolved entry — see landing-page"} form-through-page
   "One form with a second form beside it — the same page as [[form-page]], seen
   through another rung of the call path.
 
@@ -485,7 +497,7 @@
             (answered answer #(views/form-main (:value answer) (:lens state)
                                                (when-let [t (:through params)] #{t}))))))
 
-(defn ^{:webapp/path "/p/:slug/store/form/:id/source" :unused-ok "runtime-resolved entry — see hub-picker-page"} form-source-page
+(defn ^{:webapp/path "/p/:slug/store/form/:id/source" :unused-ok "runtime-resolved entry — see landing-page"} form-source-page
   "One form's page at `/store/form/:id/source` — the source lens.
 
   A lens BINDING; see [[code-table-page]]. No `:through` set, and that is the
@@ -498,7 +510,7 @@
     (chrome page :form answer
             (answered answer #(views/form-main (:value answer) "source" nil)))))
 
-(defn ^{:webapp/path "/p/:slug/store/source/:ns/:name" :unused-ok "runtime-resolved entry — see hub-picker-page"} source-page
+(defn ^{:webapp/path "/p/:slug/store/source/:ns/:name" :unused-ok "runtime-resolved entry — see landing-page"} source-page
   "One form's source, addressed by namespace and name.
 
   The address a HANDLER link points at — an endpoint's page links to the form
@@ -511,7 +523,7 @@
             (answered answer #(views/source-main (:value answer))))))
 
 (defn ^{:webapp/path "/p/:slug/webapp/pages"
-        :unused-ok "runtime-resolved entry — see hub-picker-page"}
+        :unused-ok "runtime-resolved entry — see landing-page"}
   webapp-index-page
   "The **Webapp** section's index — every screen a project's browser app
   declares.
@@ -534,7 +546,7 @@
             (answered rows #(views/webapp-pages-main (:value rows))))))
 
 (defn ^{:webapp/path "/p/:slug/webapp/pages/:ns/:name"
-        :unused-ok "runtime-resolved entry — see hub-picker-page"}
+        :unused-ok "runtime-resolved entry — see landing-page"}
   webapp-page
   "One webapp page in full — what it answers, what answers it, and what it
   fetches.
@@ -557,7 +569,7 @@
                                                     (select-keys params [:ns :name]))))))
 
 (defn ^{:webapp/path "/p/:slug/config"
-        :unused-ok "runtime-resolved entry — see hub-picker-page"}
+        :unused-ok "runtime-resolved entry — see landing-page"}
   config-page
   "The **Config** section — every setting this project has, whoever owns it.
 

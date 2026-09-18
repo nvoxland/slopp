@@ -520,7 +520,8 @@
    :view     (fn [state] hiccup)    ; state -> hiccup, re-derived every read
    :navigate (fn [state path] state')
    :dispatch (fn [action value] …)
-   :boot     (fn [state url] state')}
+   :boot     (fn [state url] state')
+   :location (fn [] url)}            ; the app's OWN address bar, when it has one
   ```
 
   An app needs SOME way to produce a screen — a `:view` over state, a
@@ -606,14 +607,14 @@
                           " same contract can be produced from a browser app's"
                           " wiring by slopp.webapp/driver.")
                      {:unknown [:http/routes]})))
-   (let [allowed #{:state :view :navigate :dispatch :boot :document}
+   (let [allowed #{:state :view :navigate :dispatch :boot :document :location}
          unknown (remove allowed (keys app))]
      (when (seq unknown)
        (throw (ex-info (str "unknown page key"
                             (when (next unknown) "s") " "
                             (str/join ", " (map pr-str (sort-by str unknown)))
                             " — a page declares :document, :state, :view,"
-                            " :navigate, :dispatch and :boot. (A typo here used"
+                            " :navigate, :dispatch, :boot and :location. (A typo here used"
                             " to render a BLANK page; refusing is the favour.)")
                        {:unknown (vec unknown)})))
      ;; SOME way to produce a screen. An app declaring neither renders nothing
@@ -648,6 +649,13 @@
                             " the entry point's state transform — got "
                             (pr-str (:boot app)))
                        {:boot (:boot app)})))
+     ;; the app's own address bar — read by [[url]] in preference to the path
+     ;; the last visit recorded, because a client route can move the reader
+     ;; after the visit and a browser shows where they ENDED UP
+     (when (and (contains? app :location) (not (ifn? (:location app))))
+       (throw (ex-info (str ":location must be callable — (fn [] url), the app's"
+                            " own address bar — got " (pr-str (:location app)))
+                       {:location (:location app)})))
      (when (and (:boot app) (not (:state app)))
        (throw (ex-info ":boot needs :state — an entry point with no state to change has nothing to say headlessly" {}))))
    (when-let [b (:boot app)]
@@ -833,9 +841,18 @@
   "The address this session is showing — its address bar.
 
   After a redirect chain this is where it ENDED UP, not what was asked for,
-  which is the whole reason it is worth reading. nil before the first visit."
+  which is the whole reason it is worth reading. nil before the first visit.
+
+  **An app with a `:location` is ASKED**, and its answer wins over the path
+  the last visit recorded. A client-routed app can move the reader after a
+  visit — a page that redirects while rendering — and the address a browser
+  shows is the app's, not the caller's. `slopp.webapp/driver` supplies one; a
+  served app has no client state to move and answers from the session."
   [session]
-  (:path @session))
+  (let [{:keys [app path]} @session]
+    (if-let [location (:location app)]
+      (location)
+      path)))
 
 (defn ^:export status
   "The http status of the screen this session is showing, or nil.

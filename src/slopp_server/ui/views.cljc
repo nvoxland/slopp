@@ -1916,7 +1916,7 @@
                            (tier-mark (:tier m))
                            (conj " " (tier-mark (:tier m)))))))))])))
 
-(defn hub-picker
+(defn project-picker
   "The landing page: one row per project the daemon holds, each a link into
   it.
 
@@ -1925,29 +1925,39 @@
   last-seen to age; the row says what is attached and, when the daemon runs
   the project's app, where that answers."
   [projects]
-  ;; `:data-region \"main\"` because this screen gets no `app-shell` — it is a
+  ;; `:data-region "main"` because this screen gets no `app-shell` — it is a
   ;; page in its own right — and the shell is what marks every other screen's
   ;; panes. Without it the landing declared NO regions, so nothing could
   ;; address its content: not a test, and not the `screen` tool.
-  [:div {:class "hub" :data-region "main"}
+  [:div {:class "landing" :data-region "main"}
    [:h1 "slopp"]
+   [:p {:class "landing-tagline"}
+    (if (seq projects) "Projects open on this daemon" "Nothing is open on this daemon")]
    (if (seq projects)
      (into [:ul {:class "projects"}]
            (for [{:keys [slug dir sessions app]} projects]
              [:li {:class "project"}
-              [:a {:href (str "/p/" slug "/")} slug]
+              [:a {:class "project-name" :href (str "/p/" slug "/")} slug]
               ;; the separators are TEXT, not a CSS gap: three inline siblings
               ;; with only a margin between them read `slopp2/w/demo1 session`
               ;; to anything that does not apply the stylesheet — the `screen`
-              ;; tool included
+              ;; tool included. The row is a grid, which ignores whitespace-only
+              ;; text between its items, so the words stay separate both ways.
               " "
               [:span {:class "dir"} dir]
               " "
               [:span {:class "status"}
                (str sessions " session" (when (not= 1 sessions) "s")
                     (when-let [u (:url app)] (str " · app " u)))]]))
-     [:p "No project is open. Attach an agent to a slopp store — or run "
-      "`slopp <op>` in one — and the daemon lists it here."])])
+     ;; plain words, and the command as markup: the first cut said "or run
+     ;; `slopp <op>` in one", with the backticks rendered literally and the
+     ;; CLI's own placeholder standing in for a sentence
+     [:div {:class "landing-empty"}
+      [:p "No project is open. A project is listed here while something is"
+       " attached to it:"]
+      [:ul
+       [:li "start an agent session in a slopp checkout, or"]
+       [:li "run a " [:code "slopp"] " command from one."]]])])
 
 (defn module-from-index
   "The module screen's shape, assembled from `GET /api/modules` — everything
@@ -2974,7 +2984,7 @@
       (assoc data :picture pic)
       data)))
 
-(def hub-projects
+(def daemon-projects
   "The daemon's registry, as a descriptor measured from the ORIGIN — the one
   request this app makes that is not a project's.
 

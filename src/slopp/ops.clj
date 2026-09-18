@@ -969,7 +969,35 @@
                   by-reg  (into {} (for [[reg _] store/ns-grained-registers
                                          :let [rows (moved reg)]
                                          :when (seq rows)]
-                                     [reg rows]))]
+                                     [reg rows]))
+                  ;; and what an ANCESTOR's row governed by prefix. That row is
+                  ;; not moved — it governs the siblings too — so the renamed
+                  ;; namespace walks out from under it, and nothing says so: the
+                  ;; declaration is simply gone for that name. Twelve slopp.ui.*
+                  ;; namespaces lost :cljc this way on 2026-09-15. When the new
+                  ;; name would resolve differently, pin the old value on it.
+                  pinned  (into {} (for [[reg _] store/ns-grained-registers
+                                         :let [[k v] (store/governing-declaration st* reg old)
+                                               after  (second (store/governing-declaration st* reg new))]
+                                         :when (and k
+                                                    (not= k (str old))
+                                                    (not (str/starts-with? k (str old ".")))
+                                                    (not= v after))]
+                                     [reg [[(str new) v]]]))
+                  why-pin (str "declaration inherited by " old " from a prefix row, pinned"
+                               " on " new " — the rename would otherwise drop it")]
+              (when (seq pinned)
+                (engine/commit-appended!
+                 session
+                 (fn [base]
+                   (reduce-kv
+                    (fn [s reg rows]
+                      (let [record (get store/ns-grained-registers reg)]
+                        (reduce (fn [s [k' v]]
+                                  (first (record s k' v :prompt why-pin :agent agent)))
+                                s rows)))
+                    base pinned))
+                 []))
               (when (seq by-reg)
                 (engine/commit-appended!
                  session
@@ -3601,7 +3629,13 @@
       ;; LOST declaration for an hour: the brief said nothing, the registry
       ;; said app null, and the reader concluded the project had no dev
       ;; server rather than that its declaration had been blobbed.
-      (and (nil? app) declared)
+      ;; unless this process IS that app: a managed child never boots a child
+      ;; of itself, so "none is running" would describe the process answering
+      (and (nil? app) declared (:dev-instance-of @session))
+      (assoc :app-note (str "this process IS this store's dev instance (" declared "),"
+                            " booted by the machine daemon and refreshed at each done"
+                            " there; it serves you and manages no app of its own"))
+      (and (nil? app) declared (not (:dev-instance-of @session)))
       (assoc :app-note (str "this store declares an app (" declared ") but none is"
                             " running in this session's view: the daemon"
                             " starts it on the project's first attach and"

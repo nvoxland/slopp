@@ -83,7 +83,7 @@
               other way would pass while the real page fetched nothing"
       (is (str/includes? (text v :nav/local) "demo.core")))
 
-    (testing "and chrome does NOT prefix links. `derived-view` calls
+    (testing "and chrome does NOT prefix links. `derived-view!` calls
               `prefix-links` over the FINISHED tree, so a chrome that also
               prefixed would double every mount point — `/p/x/p/x/store`"
       (let [hrefs (->> (tree-seq coll? seq v)
@@ -262,3 +262,23 @@
               a dropped ask would look"
       (is (not (re-find #"(?i)not counted" t)))
       (is (not (re-find #"(?i)not exported" t))))))
+
+(deftest the-landing-goes-straight-into-the-only-open-project
+  ;; A list of ONE is not a choice: the reader clicks the only row every
+  ;; time, and the old hub answered `/` with a 302 for exactly that reason.
+  ;; The shell's docstring recorded why the client-rendered landing stopped
+  ;; doing it — a navigate-on-arrival traps the back button — and a page
+  ;; ANSWERING a redirect the framework performs with a REPLACE is the form
+  ;; that reservation asked for. Two projects are a choice; none is the
+  ;; empty state; a registry still loading has nothing to decide on.
+  (let [one    [{:slug "only" :dir "/w/only" :opened-at 0 :sessions 1 :cli false :app nil}]
+        two    (conj one {:slug "other" :dir "/w/other" :opened-at 0 :sessions 2 :cli true :app nil})
+        render (fn [projects]
+                 (pages/landing-page
+                  (probe! {:path "/"} {} [[views/daemon-projects {} projects]])))]
+    (is (= {:webapp/redirect "/p/only"} (render one))
+        "one open project: the reader is sent into it, not shown a list of it")
+    (is (vector? (render two)) "two are a choice, and the list is the page")
+    (is (vector? (render [])) "none is the empty state, not a redirect to nowhere")
+    (testing "while the registry is still loading there is nothing to decide on"
+      (is (vector? (pages/landing-page (probe! {:path "/"} {} [])))))))

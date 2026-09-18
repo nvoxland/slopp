@@ -238,7 +238,7 @@
   exactly what `driver-for` is for.
 
   `:webapp/session-loads` is deleted from the framework. The two loads that
-  belong to no screen — the module index and the hub's project list — are asked
+  belong to no screen — the module index and the daemon's project list — are asked
   for by [[slopp-server.ui.pages/chrome]], which is the only thing that ever read
   them. `ask!` is start-if-absent, so the first page to render starts them and
   every later one finds them: the same single fetch, without an entry-level

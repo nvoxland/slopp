@@ -62,7 +62,7 @@
     (testing "the derived driver is the shape the fake browser accepts"
       ;; if this drifts, every assertion below fails in a way that looks like
       ;; an app bug rather than a derivation bug
-      (is (= #{:state :view :navigate :dispatch :boot}
+      (is (= #{:navigate :boot :state :dispatch :view :location}
              (set (keys (webapp/driver app))))
           (pr-str (keys (webapp/driver app)))))
 
@@ -1560,7 +1560,7 @@
   ;; stayed on the loading branch. No console error, because nothing failed.
   ;;
   ;; `:webapp/view` is DERIVED, so a browser entry cannot supply a render until
-  ;; after `wiring` — it needs the view to render. But `derived-view` closed
+  ;; after `wiring` — it needs the view to render. But `derived-view!` closed
   ;; over the app map AS IT WAS, so the map a PAGE receives carried the
   ;; DECLARED render. `ask!` takes its app from the page, `fetch!` from `ask!`,
   ;; `load!` calls `(render @state)` on it — the declared one. For any store
@@ -1699,3 +1699,62 @@
       (reset! went nil)
       (webapp/dispatch! app [:project/goto] "")
       (is (nil? @went) "an empty selection navigated somewhere"))))
+
+(deftest a-page-may-answer-a-REDIRECT-and-the-framework-follows-it-in-place
+  ;; The daemon's landing lists the open projects, and a list of ONE is not a
+  ;; choice: the reader clicks the only row every time. A page can send them
+  ;; on — but a page is pure and the framework owns navigation, so the page
+  ;; ANSWERS the redirect as data and the framework performs it here, where a
+  ;; test can watch. Two things a hand-rolled navigate-on-arrival gets wrong:
+  ;; the url is REPLACED, never pushed, so the back button skips the page that
+  ;; sent the reader on instead of bouncing them forward again; and the
+  ;; destination renders in the SAME pass, so nothing paints the sender first.
+  (let [state    (atom {:only "x"})
+        replaced (atom [])
+        pushed   (atom [])
+        landing  (fn [{:keys [state]}]
+                   (if-let [o (:only state)]
+                     {:webapp/redirect (str "/p/" o)}
+                     [:p "pick one"]))
+        project  (fn [{:keys [params]}] [:h1 (str "project " (:slug params))])
+        ping     (fn [_] {:webapp/redirect "/pong"})
+        pong     (fn [_] {:webapp/redirect "/ping"})
+        app      (webapp/wiring
+                  {:webapp/state        state
+                   :webapp/base         "/m"
+                   :webapp/routes       [["/" landing] ["/p/:slug" project]
+                                         ["/ping" ping] ["/pong" pong]]
+                   :webapp/push-url!    (fn [u] (swap! pushed conj u))
+                   :webapp/replace-url! (fn [u] (swap! replaced conj u))})
+        view     (:webapp/view app)]
+
+    (testing "arriving at a page that redirects shows the DESTINATION, in one render"
+      (webapp/navigate! app "/" true)
+      (is (= [:h1 "project x"] (view @state)))
+      (is (= "/p/x" (:path @state)) "the app's own address moved with it"))
+
+    (testing "the url is REPLACED under the mount point, and the arrival's push stands alone"
+      (is (= ["/m/p/x"] @replaced)
+          "replace, not push: back must go to where the reader came FROM, not to the page that sent them on")
+      (is (= ["/m/"] @pushed) (pr-str @pushed)))
+
+    (testing "a page with nothing to redirect for renders as it always did"
+      (swap! state dissoc :only)
+      (webapp/navigate! app "/" true)
+      (is (= [:p "pick one"] (view @state)))
+      (is (= 1 (count @replaced))))
+
+    (testing "two pages sending the reader to each other is named as a LOOP, not left to hang"
+      (let [m (try (webapp/navigate! app "/ping" true) nil
+                   (catch clojure.lang.ExceptionInfo e (ex-message e)))]
+        (is (some? m) "a bounce forever is a hang, and a hang has no message")
+        (is (str/includes? (str m) "/ping") m)
+        (is (str/includes? (str m) "/pong") m)
+        (is (str/includes? (str m) "loop") m)))
+
+    (testing "driven headlessly, the address bar is the app's own — so it follows"
+      (reset! state {:only "y"})
+      (let [s (cljnx/open! (webapp/driver app) "/m/")]
+        (is (str/includes? (cljnx/of (cljnx/tree s)) "project y") (cljnx/text s))
+        (is (= "/m/p/y" (cljnx/url s))
+            "a browser's address bar shows where the reader ENDED UP")))))

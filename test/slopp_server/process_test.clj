@@ -1033,3 +1033,55 @@
             (str "the first open through the CLI door must boot the app exactly as an"
                  " attach does — start-app! saw " (pr-str @booted))))
       (finally (daemon/reset-all!)))))
+
+(deftest ^:external a-serving-dev-server-keeps-its-project-open-through-the-idle-reap
+  ;; The reaper closes every project left holding no session. Twice tonight
+  ;; that closed the project a human was LOOKING AT: "start the dev server"
+  ;; was asked, the agent's CLI session idled past ten minutes, and the close
+  ;; stopped the child that answered on 7358. A browser is not an attachment.
+  ;; A serving app is the human's attachment, and it keeps the project.
+  (let [d     (tmp-dir!)
+        ctx   (daemon/context)
+        token (daemon/token)
+        owner (atom nil)
+        call  (fn [body]
+                (slopp.http/handle! ctx {:request-method :post :uri "/api/call"
+                                         :headers {"x-slopp-dir" d} :body body}))]
+    (try
+      (with-redefs [mcp/app-managed? (constantly true)
+                    mcp/start-app!   (fn [o]
+                                       (reset! owner o)
+                                       (swap! o assoc :app-server
+                                              {:serving? true :url "http://127.0.0.1:7399/"})
+                                       {:serving? true})
+                    mcp/stop-app!    (fn [o] (swap! o dissoc :app-server) {:stopped true})]
+        (is (= 200 (:status (call {:tool "thread_list" :arguments {} :token token}))))
+        (Thread/sleep 800)
+        (is (some? (:app (first (projects! ctx)))) "fixture: the app is serving")
+        (testing "an hour later the CLI session is reaped, and the project stays for its app"
+          (let [r (daemon/reap-idle! (+ (System/currentTimeMillis) (* 60 60 1000)))]
+            (is (= [d] (:cli r)) "the idle CLI session went")
+            (is (empty? (:projects r)) (pr-str r))
+            (let [ps (projects! ctx)]
+              (is (= [d] (mapv :dir ps)) "the project is still listed")
+              (is (false? (:cli (first ps))))
+              (is (some? (:app (first ps))) "and its app still answers"))))
+        (testing "with the app stopped, the same reap closes it as before"
+          (mcp/stop-app! @owner)
+          (daemon/reap-idle! (+ (System/currentTimeMillis) (* 60 60 1000)))
+          (is (empty? (projects! ctx)))))
+      (finally (daemon/reset-all!)))))
+
+(deftest ^:external a-session-on-a-managed-child-is-marked-as-being-on-the-dev-instance
+  ;; the daemon is what knows its role: a process the manager told
+  ;; `slopp.managed-for` this dir is that store's dev instance, and every
+  ;; session it opens on that dir carries the fact for the brief to say
+  (let [d   (tmp-dir!)
+        was (System/getProperty "slopp.managed-for")]
+    (try
+      (System/setProperty "slopp.managed-for" d)
+      (let [{:keys [session]} (daemon/attach! d "child")]
+        (is (= d (:dev-instance-of @session))))
+      (finally
+        (if was (System/setProperty "slopp.managed-for" was) (System/clearProperty "slopp.managed-for"))
+        (daemon/reset-all!)))))

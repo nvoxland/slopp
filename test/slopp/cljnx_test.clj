@@ -1555,7 +1555,7 @@
       (let [d (cljnx/driver-for
                {:webapp/state  state
                 :webapp/routes [["/things" (fn [_s] [:main [:h1 "things"]])]]})]
-        (is (= #{:state :view :navigate :dispatch :boot} (set (keys d)))
+        (is (= #{:navigate :boot :state :dispatch :view :location} (set (keys d)))
             (pr-str (keys d)))
         (is (some? (cljnx/open! d)) "and what comes back opens")))
 
@@ -1917,3 +1917,18 @@
         (is (= [:MINE] @seen) (pr-str @seen))
         (is (re-find #"ready" (cljnx/text s nil {:detail :prose}))
             "the app's own checker accepted it and the driver's did not run")))))
+
+(deftest an-app-with-its-OWN-address-bar-is-asked-where-it-is
+  ;; `url` reported the path the caller VISITED. A client-routed app can move
+  ;; after that — a page that redirects while rendering — and a browser's
+  ;; address bar is never wrong about where you ended up. So an app may
+  ;; declare `:location`, its own address bar, and `url` asks it.
+  (let [where (atom "/start")
+        app   {:state    (atom {})
+               :view     (fn [_] [:p "x"])
+               :navigate (fn [s p] (reset! where (str p "/landed")) s)
+               :location (fn [] @where)}
+        s     (cljnx/open! app "/a")]
+    (is (= "/a/landed" (cljnx/url s)) "the app's own answer, not the visited path")
+    (is (thrown? clojure.lang.ExceptionInfo (cljnx/open! (assoc app :location "/x")))
+        "a :location that cannot be called is refused at the constructor")))

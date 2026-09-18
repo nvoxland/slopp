@@ -789,6 +789,31 @@
                   :font-size "0.9rem" :background "transparent"
                   :color "inherit"}]
     [:main {:padding "1.25rem" :max-width "60rem"}]
+    ;; the landing is a page of its own — no app-shell, no main — so it takes
+    ;; main's gutter and measure here, or it sits on the viewport edge
+        ;; the landing is a page of its own — no app-shell, no main — so it gets
+    ;; its own column: narrow and centred, because it is a list of a few
+    ;; names and a sentence, not a document. Without a rule it sat on the
+    ;; viewport edge in the browser's defaults.
+    [:.landing {:padding "4rem 1.25rem 3rem" :max-width "44rem" :margin "0 auto"}]
+    [:.landing [:h1 {:font-size "1.9rem" :margin "0 0 0.25rem" :letter-spacing "-0.01em"}]]
+    [:.landing-tagline {:color "#777" :margin "0 0 2rem"}]
+    [:.landing [:ul.projects {:list-style "none" :margin 0 :padding 0}]]
+    [:.landing [:li.project {:display "grid"
+                             :grid-template-columns "minmax(7rem,auto) minmax(0,1fr) auto"
+                             :gap "1rem" :align-items "baseline"
+                             :padding "0.8rem 1rem" :margin-bottom "0.5rem"
+                             :border "1px solid #ddd" :border-radius "6px"}]]
+    [:.landing [:.project-name {:font-weight 600 :font-size "1.05rem" :text-decoration "none"}]]
+    [:.landing [:.project-name:hover {:text-decoration "underline"}]]
+    [:.landing [:.dir {:color "#777" :font-family "ui-monospace,monospace" :font-size "0.85rem"
+                       :overflow "hidden" :text-overflow "ellipsis" :white-space "nowrap"}]]
+    [:.landing [:.status {:color "#777" :font-size "0.9rem" :white-space "nowrap"}]]
+    [:.landing-empty {:border "1px dashed #ccc" :border-radius "6px" :padding "1.25rem 1.5rem"
+                      :color "#555"}]
+    [:.landing-empty [:p {:margin "0 0 0.5rem"}]]
+    [:.landing-empty [:ul {:margin 0 :padding-left "1.25rem"}]]
+    [:.landing-empty [:li {:margin "0.2rem 0"}]]
     [:aside {:border-left "1px solid #ddd" :padding "1rem" :width "20rem"
              :font-size "0.9rem" :overflow-y "auto"}]
 ;; the rail's rows: a metadata line under each name, tight enough that six
@@ -860,6 +885,11 @@ search-styles
                  [:.app>nav {:border-right-color "#333"}]
                  [:aside {:border-left-color "#333"}]
                  [:#ns-filter {:border-color "#444"}]
+                 [:.landing-tagline {:color "#999"}]
+                 [:.landing [:li.project {:border-color "#333"}]]
+                 [:.landing [:.dir {:color "#999"}]]
+                 [:.landing [:.status {:color "#999"}]]
+                 [:.landing-empty {:border-color "#444" :color "#aaa"}]
                  [:header [:.project-switcher:hover {:border-color "#444"}]]
 [:header [:.store-search [:input {:border-color "#444"}]]]
                  [:header [:.store-search [:button:hover {:border-color "#444"}]]]

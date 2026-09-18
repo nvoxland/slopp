@@ -129,3 +129,32 @@
     (testing "the dark counterpart goes WITH it, or it outlives the thing it
               styled — the failure `spine-styles` already recorded once"
       (is (not (str/includes? css ".endpoint{border-top-color"))))))
+
+(deftest the-landing-is-a-centred-column-with-its-own-rules
+  ;; Seen at localhost:7358 with nothing attached: "slopp" and one line of
+  ;; text flush against the viewport's left edge, in the browser's defaults.
+  ;; The landing is a page in its own right — `project-picker` renders no
+  ;; `app-shell` and no `main` — so it had no rule at all. It gets a narrow
+  ;; centred column, a project row that reads as a row, and an empty state
+  ;; that reads as a panel rather than a stray sentence.
+  (let [css styles/stylesheet
+        landing (decls css ".landing")
+        row     (decls css ".landing li.project")
+        empty   (decls css ".landing-empty")]
+    (testing "the column"
+      (is (some? landing))
+      (is (contains? landing "margin:0 auto") "centred")
+      (is (some #(re-find #"^max-width:" %) landing) "with a measure")
+      (is (some #(re-find #"^padding:" %) landing) "and a gutter"))
+    (testing "a project row is laid out, not run together inline"
+      (is (some? row))
+      (is (contains? row "display:grid")))
+    (testing "the empty state is a panel"
+      (is (some? empty))
+      (is (some #(re-find #"^border:" %) empty)))
+    (testing "and it follows the dark theme — a light border in a dark page is the one thing a reader notices"
+      (let [dark (subs css (str/index-of css "@media(prefers-color-scheme:dark)"))]
+        (is (re-find #"\.landing li\.project\{border-color:#[0-9a-f]{3,6}\}" dark))
+        (is (re-find #"\.landing-empty\{[^}]*border-color:#[0-9a-f]{3,6}" dark))))
+    (testing "nothing is named hub any more"
+      (is (nil? (decls css ".hub"))))))

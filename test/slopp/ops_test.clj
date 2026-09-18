@@ -2809,3 +2809,17 @@
         (let [b (ops/session-brief sess)]
           (is (nil? (:config-blobbed b)) (pr-str (:config-blobbed b)))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-session-on-the-stores-own-dev-instance-is-told-so
+  ;; A second agent attached to the dev instance (SLOPP_PORT=7358) read
+  ;; "declares an app (app.main = …) but none is running" — from the process
+  ;; that IS that app. A managed child never boots a child of itself, so the
+  ;; honest note is that this process is the instance, serving the reader.
+  (let [sess (external/open!)]
+    (try
+      (ops/config-file! sess "capabilities" :key "app.main" :value "x.core/-main" :prompt "an entry")
+      (swap! sess assoc :dev-instance-of "/w/this-store")
+      (let [b (ops/session-brief sess)]
+        (is (re-find #"IS this store's dev instance" (str (:app-note b))) (pr-str (:app-note b)))
+        (is (not (re-find #"none is running" (str (:app-note b))))))
+      (finally (ops/close! sess)))))

@@ -21,7 +21,7 @@
             ;; the stylesheet (the v0.3.0 jar answered 404 everywhere).
             [slopp-server.ui.pages]
             [slopp-server.ui.shell]
-            [slopp-server.ui.styles] [slopp-server.process.hooks :as hooks] [slopp.read.history :as history] [slopp.ops.engine :as engine] [clojure.java.io :as io] [slopp.rules.http :as rules.http] [slopp.rules.webapp :as rules.webapp] [slopp.project.capabilities :as capabilities] [slopp-server.api.reads :as api.reads]))
+            [slopp-server.ui.styles] [slopp-server.process.hooks :as hooks] [slopp.read.history :as history] [slopp.ops.engine :as engine] [clojure.java.io :as io] [slopp.rules.http :as rules.http] [slopp.rules.webapp :as rules.webapp] [slopp.project.capabilities :as capabilities] [slopp-server.api.reads :as api.reads] [slopp.webdev.live :as live]))
 
 (defonce ^:private state
   ;; `:projects` {dir {:slug :dir :opened-at :sessions #{sid}
@@ -275,22 +275,30 @@
 (defn ^:export reap-idle!
   "Close what nothing has used: CLI sessions idle past [[cli-idle-ms]], MCP
   sessions idle past [[session-idle-ms]], and every project that is left
-  holding nothing. `now` is a parameter so a test can be the clock.
-  Answers what it closed."
+  holding nothing — where a SERVING dev server counts as holding something.
+  \"Start the dev server\" is asked by a human who then looks at it in a
+  browser, and a browser is not an attachment: twice the agent's CLI session
+  idled past ten minutes, the project closed on its last session, and the
+  close stopped the child answering on the port the human was looking at.
+  So the sessions go and the project stays, with its app, until the last
+  MCP session detaches on purpose or the daemon stops. `now` is a parameter
+  so a test can be the clock. Answers what it closed."
   [now]
   (locking state
     (let [st       @state
           stale-mcp (for [[sid s] (:sessions st)
                           :when (< session-idle-ms (- now (:last-seen s)))] sid)
           stale-cli (for [[dir p] (:projects st)
-                          :when (and (:cli p) (< cli-idle-ms (- now (get-in p [:cli :last-seen]))))] dir)]
+                          :when (and (:cli p) (< cli-idle-ms (- now (get-in p [:cli :last-seen]))))] dir)
+          serving? (fn [p] (boolean (some-> (get-in p [:api :reader]) deref :app-server :serving?)))]
       (doseq [dir stale-cli]
         (when-let [s (get-in @state [:projects dir :cli :session])]
           (try (ops/close! s) (catch Throwable _ nil)))
         (swap! state update-in [:projects dir] dissoc :cli))
       (let [ended  (vec (keep detach! stale-mcp))
             closed (vec (for [[dir p] (:projects @state)
-                              :when (and (empty? (:sessions p)) (nil? (:cli p)))]
+                              :when (and (empty? (:sessions p)) (nil? (:cli p))
+                                         (not (serving? p)))]
                           (close-project! dir)))]
         {:sessions (mapv :ended ended)
          :cli      (vec stale-cli)
@@ -1032,6 +1040,10 @@
                                    ;; agent writes on is what it passes
                                    :slopp.ops/agent-id    (str "mcp-" (subs sid 0 (min 8 (count sid))))})]
       (swap! session assoc :require-turns? true :daemon? true
+             ;; this process may BE the store's dev instance (the manager told
+             ;; it `slopp.managed-for` this dir); the brief says so rather than
+             ;; reporting the app it embodies as not running
+             :dev-instance-of (when (live/managed-child-of? dir) dir)
              :app-owner owner
              :op-cards mcp/op-cards
              :api-url (api-url proj)
@@ -1066,6 +1078,7 @@
                                        :slopp.ops/lazy-image? true
                                        :slopp.ops/agent-id    (str "cli-" (subs (str (java.util.UUID/randomUUID)) 0 8))})]
           (swap! session assoc :require-turns? true :daemon? true
+                 :dev-instance-of (when (live/managed-child-of? dir) dir)
                  :call-token (token)
                  :app-owner owner
                  :op-cards mcp/op-cards

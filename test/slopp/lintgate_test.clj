@@ -79,7 +79,7 @@
 (deftest a-red-first-test-may-name-an-arity-that-does-not-exist-yet
   ;; Four instances across two stores: twice here on 2026-08-04 (adding a
   ;; parameter to store.render/source-path and to build/deps-edn) and twice in
-  ;; slopp-ui, most recently views/hub-picker gaining a `now`.
+  ;; slopp-ui, most recently views/project-picker gaining a `now`.
   ;;
   ;; A test calling a var that does NOT EXIST is the red-first case and lands
   ;; stubbed. A test calling an EXISTING var at a NEW arity is the SAME

@@ -52,15 +52,15 @@
   route, which is where it belonged — a project switcher changes it without a
   page load, and nothing re-stamps an attribute mid-page.
 
-  **The landing screen LISTS projects rather than redirecting into one**, which
-  is the one behaviour this wave did not preserve. `picker` answered `/` with a
-  302 to the first project answering, arguing that a list of one is not a
-  choice but a page you read once and click through. A stored value cannot
-  redirect. The behaviour is reachable client-side — the `projects` session load
-  already exists — but as a navigate-on-arrival it puts a trap on the back
-  button that a 302 did not. So the list, which `picker`'s own docstring called
-  the fallback, becomes the destination. Reversible if the click turns out to
-  matter more than the trap."
+  **The landing enters a lone project from the CLIENT, and this document never
+  redirects.** `picker` answered `/` with a 302 to the first project answering,
+  arguing that a list of one is not a choice but a page you read once and
+  click through. A stored value cannot redirect, and for a while the landing
+  LISTED a single project instead, because a navigate-on-arrival by hand puts
+  a trap on the back button that a 302 did not. The click did turn out to
+  matter more than the trap, and the trap had an answer: the landing page
+  ANSWERS `{:webapp/redirect …}` and the framework performs it with a
+  REPLACE, so back skips the landing exactly as it skipped the 302."
   [:html {:lang "en"}
    [:head
     [:meta {:charset "utf-8"}]

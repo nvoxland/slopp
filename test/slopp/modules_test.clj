@@ -2358,3 +2358,30 @@
       ;; that the row had lost the name, when the row never carried it
       (is (re-find #"a\.pub\.deep/thing" (:error (first (viol [base]))))
           (:error (first (viol [base])))))))
+
+(deftest ^:external a-rename-out-from-under-a-prefix-declaration-keeps-what-governed-it
+  ;; The registers re-key rows keyed by the renamed namespace and its
+  ;; descendants. A row keyed by an ANCESTOR — `pf.ui` :cljc governing every
+  ;; pf.ui.* — stays where it is, rightly (it governs the siblings too), and
+  ;; the renamed namespace walks out from under it: nothing lists it, nothing
+  ;; reports it, and the next compile says the namespace does not exist. Twelve
+  ;; slopp.ui.* namespaces lost :cljc this way on 2026-09-15.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'pf.ui.app "(ns pf.ui.app)\n(defn f \"F.\" [x] x)\n")
+      (ops/ingest! sess 'pf.ui.views "(ns pf.ui.views)\n(defn g \"G.\" [x] x)\n")
+      (ops/module-platform! sess "pf.ui" "cljc" :prompt "the whole ui is shared with the client")
+      (ops/module-tier! sess "pf.ui" :pure :prompt "and pure")
+      (is (= :cljc (store/platform-for (:store @sess) 'pf.ui.app)) "fixture: governed by the prefix row")
+      (is (nil? (:error (ops/ns-rename! sess 'pf.ui.app 'pf-server.ui.app :prompt "the split"))))
+      (let [st (:store @sess)]
+        (testing "the renamed namespace is still governed as it was"
+          (is (= :cljc (store/platform-for st 'pf-server.ui.app)))
+          (is (= :pure (tiers/tier-for st 'pf-server.ui.app))))
+        (testing "as a row of its own, since no prefix of the new name declares it"
+          (is (= :cljc (get-in st [:module-platforms "pf-server.ui.app"])))
+          (is (= :pure (get-in st [:module-tiers "pf-server.ui.app"]))))
+        (testing "and the ancestor row stays — it still governs the sibling"
+          (is (= :cljc (get-in st [:module-platforms "pf.ui"])))
+          (is (= :cljc (store/platform-for st 'pf.ui.views)))))
+      (finally (ops/close! sess)))))

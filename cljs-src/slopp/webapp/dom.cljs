@@ -208,6 +208,7 @@
   | `replicant.dom/render` in a loop | `:webapp/render`, below |
   | `js/fetch` for a screen's data  | [[call!]], via `:webapp/call` |
   | `history.pushState`             | `:webapp/push-url!` |
+  | `history.replaceState`          | `:webapp/replace-url!` |
   | `location.assign`               | `:webapp/leave!` |
   | a click listener with `.closest` and `preventDefault` | [[click-data]] + `slopp.webapp/click!` |
   | a popstate listener             | `slopp.webapp/navigate-url!` |
@@ -248,10 +249,11 @@
                (merge declared
                       {:webapp/base      (.getAttribute el "data-base")
                        :webapp/push-url! (fn [url] (.pushState js/history nil "" url))
+                       :webapp/replace-url! (fn [url] (.replaceState js/history nil "" url))
                        :webapp/leave!    (fn [url] (.assign js/location url))
                        :webapp/call      call!}))
         view  (:webapp/view wired)
-        ;; INSTALLED, not assoc'd. `derived-view` has already closed over
+        ;; INSTALLED, not assoc'd. `derived-view!` has already closed over
               ;; `wired`, so an assoc here produces a map this entry holds and
               ;; the PAGES do not — and a load resolving inside a page would
               ;; render through whatever the captured map carried. That is a

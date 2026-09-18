@@ -1005,3 +1005,12 @@
         "same length, different code")
     (is (= (store/content-signature e1) (store/content-signature e3))
         "and the same code, however it got there, is one signature")))
+
+(deftest governing-declaration-is-the-most-specific-prefix-row
+  (let [st (-> (store/empty-store)
+               (assoc :module-platforms {"a.b" :cljc "a.b.c.d" :cljs}))]
+    (is (= ["a.b.c.d" :cljs] (store/governing-declaration st :module-platforms 'a.b.c.d)))
+    (is (= ["a.b" :cljc] (store/governing-declaration st :module-platforms 'a.b.c)))
+    (is (= ["a.b" :cljc] (store/governing-declaration st :module-platforms 'a.b)))
+    (is (nil? (store/governing-declaration st :module-platforms 'a.x)))
+    (is (nil? (store/governing-declaration st :module-tiers 'a.b.c)))))

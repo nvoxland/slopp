@@ -419,7 +419,7 @@
   `:projects` is the odd one out and belongs here anyway: it is the HUB's
   answer rather than a project's, and it arrives outside the navigate loop —
   which is why nothing headless had it until [[page]] gained a `:boot`."
-  {;; the hub's own answer, not a project's. One project is STOPPED on purpose:
+  {;; the daemon's own answer, not a project's. One project is STOPPED on purpose:
    ;; the switcher's claim is that a project which stops answering stays listed,
    ;; disabled and labelled — disappearing from a control mid-session is how a
    ;; reader concludes they imagined it — and a fixture of three healthy
@@ -919,7 +919,7 @@
                     ;; the only endpoint this app asks the daemon for at the
                     ;; ORIGIN: its registry. Everything else is a project's and
                     ;; is reached through that project's mount.
-                    hub? (= "/api/projects" p)
+                    daemon? (= "/api/projects" p)
                     own  (some->> (re-matches #"^/api/projects/[^/]+(/.*)$" p) second (str "/api"))]
                 ;; **Matched as PATTERNS, through the app's own router.** [[answers]] is
                 ;; keyed `/api/form/:id`, which is what a reader of the fixture needs
@@ -934,7 +934,7 @@
                 ;; fixture's keys are paths with captures, which is exactly what
                 ;; that function already reads, and a private lookalike would be
                 ;; free to disagree with the router about what `:id` matches.
-                (ok (cond hub? (get responses (answer-for p))
+                (ok (cond daemon? (get responses (answer-for p))
                           own  (get responses (answer-for own))
                           ;; a project endpoint asked at the origin. The real
                           ;; daemon 404s it; answering nil here is what lets a

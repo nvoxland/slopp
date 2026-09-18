@@ -3372,8 +3372,11 @@
     (let [data {;; the LANDING, and the only screen here that is not inside a
                 ;; project. It answers the HUB's own `/api/projects`, so its
                 ;; data is a list of project rows rather than anything a store
-                ;; publishes.
-                :projects [{:slug "demo" :dir "/w/demo" :opened-at 0 :sessions 1 :cli false :app nil}]
+                ;; publishes. TWO rows, because a registry of one is not a
+                ;; screen at all — the landing answers a redirect into it, and
+                ;; the pane this test looks for is the destination's.
+                :projects [{:slug "demo" :dir "/w/demo" :opened-at 0 :sessions 1 :cli false :app nil}
+                           {:slug "other" :dir "/w/other" :opened-at 0 :sessions 1 :cli false :app nil}]
                 :timeline {:commit-points [] :working {:forms 0}}
                 :change   {:from "a" :to "b" :count 0 :modules []}
                 :code     {:modules [] :layers [] :cycles []}
@@ -4181,7 +4184,7 @@
   ;; would supply the very thing under test.
   (let [row (fn [p]
               (let [li (first (filter #(and (vector? %) (= :li (first %)))
-                                      (nodes (views/hub-picker [p]))))]
+                                      (nodes (views/project-picker [p]))))]
                 (str/join "" (filter string? (nodes li)))))]
     (testing "a project's slug, path and state stay three separate words"
       (is (= "slopp2 /w/demo 1 session"
@@ -5227,3 +5230,19 @@
     (is (= ["/store/form/x/source"]
            (hrefs (views/lens-bar "/store/form/x" :form nil)))
         "the control: the plain form page links the same lens")))
+
+(deftest the-empty-landing-says-how-a-project-gets-listed-in-plain-words
+  ;; "Attach an agent to a slopp store — or run `slopp <op>` in one" — the
+  ;; backticks rendered literally (a plain string, not a code element) and
+  ;; `<op>` is the CLI's own vocabulary, meaningless to someone who just
+  ;; opened the page. Say what an attachment IS: a session in a checkout, or
+  ;; a `slopp` command run from one.
+  (let [text (str/join "" (filter string? (nodes (views/project-picker []))))
+        code (vec (for [n (nodes (views/project-picker []))
+                        :when (and (vector? n) (= :code (first n)))]
+                    (last n)))]
+    (is (re-find #"No project is open" text))
+    (is (not (re-find #"`" text)) "backticks are markdown, not markup")
+    (is (not (re-find #"<op>" text)) "the CLI's placeholder is not a sentence")
+    (is (= ["slopp"] code) "the command is a code element, once")
+    (is (re-find #"checkout" text) "names where an agent attaches")))
