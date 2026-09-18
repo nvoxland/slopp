@@ -1570,3 +1570,25 @@
           (is (nil? (:dropped-note r)) (pr-str r))))
 
       (finally (ops/close! sess)))))
+
+(deftest a-store-that-runs-a-dev-instance-recompiles-its-client-without-being-asked
+  ;; The dev loop was a SETTING: `client`/`auto-compile`, off by default. A
+  ;; store that serves a dev instance has a browser looking at its bundle, and
+  ;; every client write left that page running JavaScript from before it — the
+  ;; redirect a done had landed was nowhere on screen until someone knew to
+  ;; run compile_client by hand. Serving is the request; the setting was the
+  ;; friction. A library with no dev instance still compiles nothing on a
+  ;; write, and opting OUT is still one line.
+  (let [put  (fn [st path k v] (first (store/record-config-put st path :manifest k v)))
+        base (store/ingest (store/empty-store) 'ac.core "(ns ac.core)\n")]
+    (is (false? (cljs/auto-compile? base))
+        "a store with no dev instance: nothing is looking at a bundle")
+    (is (true? (cljs/auto-compile? (put base "capabilities" "http.enabled" "true")))
+        "serving http IS a dev instance")
+    (is (true? (cljs/auto-compile? (put base "capabilities" "app.main" "ac.core/-main")))
+        "a declared entry is one too")
+    (is (true? (cljs/auto-compile? (put base "client" "auto-compile" "true")))
+        "asked for explicitly still works")
+    (is (false? (cljs/auto-compile? (put (put base "capabilities" "http.enabled" "true")
+                                        "client" "auto-compile" "false")))
+        "opting out is a setting, and it wins")))

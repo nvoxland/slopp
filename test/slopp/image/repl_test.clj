@@ -10,7 +10,7 @@
   CODE that will be sent across, as a value, before it is."
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.java.io :as io]
-            [clojure.string]
+            [clojure.string :as str]
             [slopp.kernel.boot :as boot]
             [slopp.image.repl :as repl] [nrepl.core :as nrepl]))
 
@@ -464,3 +464,22 @@
     ;; false verdict where a slow one is not; :auto degrades silently instead.
     (is (not (has? "-Xshare:on"))
         (str "-Xshare:on makes a stale archive a dead image: " budget))))
+
+(deftest the-runtime-source-falls-back-to-the-store-when-no-classpath-carries-it
+  ;; The dev instance — slopp's own in-progress daemon, booted from the store
+  ;; over nREPL into an empty temp dir — has NO slopp/kernel/rt.clj on its
+  ;; classpath: its code arrived as evaluated forms, not files. Every image it
+  ;; tried to boot died as `image boot failed: Cannot open <nil> as a Reader`,
+  ;; which is `slurp` of a resource that was not there — so an agent attached
+  ;; to the dev instance could read and never write. The store HOLDS
+  ;; slopp.kernel.rt, so the image door hands its rendering down as the
+  ;; fallback, and having neither is named rather than handed to slurp.
+  (let [none (fn [_] nil)
+        old  (fn [n] (when (= n "slopp/rt.clj") (java.io.StringReader. "OLD")))]
+    (is (= "OLD" (repl/rt-source old "STORE")) "a classpath copy still wins, either layout")
+    (is (= "STORE" (repl/rt-source none "STORE")) "no classpath copy: the store's own rendering")
+    (let [m (try (repl/rt-source none nil) nil
+                 (catch clojure.lang.ExceptionInfo e (ex-message e)))]
+      (is (some? m) "nothing at all is a refusal, not a nil handed to slurp")
+      (is (str/includes? (str m) "slopp/kernel/rt.clj") m)
+      (is (str/includes? (str m) "classpath") m))))

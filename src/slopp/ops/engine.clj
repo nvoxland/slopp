@@ -1681,6 +1681,20 @@
       (apply merge (concat (map #(get fw %) used) [(get fw "_") (:deps store)]))
       (:deps store))))
 
+(defn rt-fallback
+  "The store's own rendering of `slopp.kernel.rt`, for an image launched by a
+  process that has no rt.clj on its classpath — or nil when the store does
+  not hold the kernel, which is every store but slopp's own.
+
+  The dev instance is that process: booted from slopp's store over nREPL
+  into an empty dir, it carries no source files, and every oracle image it
+  launched died bootstrapping. The door hands this down so the image gets
+  the in-progress runtime — the same one `load-ns!` would load into it a
+  moment later anyway."
+  [store]
+  (when (contains? (:namespaces store) 'slopp.kernel.rt)
+    (store.render/render-ns store 'slopp.kernel.rt)))
+
 (defn ^:export start-image!
   "THE door: every owned image is launched here, for `store`.
 
@@ -1703,9 +1717,13 @@
   requirement shows up and you find yourself adding it to a caller, that is the
   bug repeating."
   [session store]
-  (let [dir (framework-dir! session store)]
+  (let [dir (framework-dir! session store)
+        rt  (rt-fallback store)]
     (repl/start! (cond-> {:slopp.image.repl/deps (image-deps store)}
-                   dir (assoc :slopp.image.repl/dir dir)))))
+                   dir (assoc :slopp.image.repl/dir dir)
+                   ;; a launching process with no rt.clj on its classpath — the
+                   ;; managed dev instance — bootstraps its images from the store
+                   rt  (assoc :slopp.image.repl/rt-fallback rt)))))
 
 (defn image-with-deps!
   "A ready owned image for `store`: adopt the bare `spare` and hot-`add-libs`

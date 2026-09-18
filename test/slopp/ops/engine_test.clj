@@ -831,3 +831,17 @@
       (is (contains? (get deps "http") 'cheshire/cheshire) (pr-str (keys (get deps "http"))))
       (is (contains? (get deps "http") 'http-kit/http-kit))
       (is (seq (engine/framework-deps*))))))
+
+(deftest the-image-door-hands-down-the-stores-own-runtime-when-it-holds-one
+  ;; slopp's own store carries slopp.kernel.rt; a process booted FROM that
+  ;; store over nREPL (the managed dev instance) carries no rt.clj on its
+  ;; classpath, so the door hands the rendering down for the image bootstrap.
+  ;; An ordinary project holds no kernel and gets nothing — the classpath
+  ;; copy the jar carries is its only one, exactly as before.
+  (let [with    (store/ingest (store/empty-store) 'slopp.kernel.rt
+                                    "(ns slopp.kernel.rt)\n\n(defn self-instrument! [] :from-store)\n")
+        without (store/ingest (store/empty-store) 'demo.core "(ns demo.core)\n")]
+    (is (str/includes? (str (engine/rt-fallback with)) "self-instrument!")
+        "the store's rendering of its own kernel runtime")
+    (is (nil? (engine/rt-fallback without))
+        "an ordinary project has no kernel of its own")))

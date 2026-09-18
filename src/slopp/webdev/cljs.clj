@@ -725,42 +725,6 @@
         (.setDaemon true)
         (.start)))))
 
-(defn maybe-recompile-client!
-  "Dev loop (D-web-cljs): when `client`/`auto-compile` is ON and `ns-sym` is a
-  CLIENT namespace (`:cljc`/`:cljs`), schedule an ASYNC background recompile of
-  the client bundle so a `--live` server serves fresh JS — WITHOUT blocking the
-  write. Single-flight + coalescing (a write during a compile triggers exactly
-  ONE more compile after it — the bundle always reflects the latest edit).
-  Returns `{:client-recompiling true}` immediately, plus `:client-recompile-prev`
-  (the previous background compile's outcome — `{:client-recompiled path}` or
-  `{:client-recompile-error msg}`) once one has finished; or nil when disabled or
-  `ns-sym` is not a client namespace.
-
-  The compile runs on a daemon thread and commits the served blob when done;
-  a compile error is captured on the guard and surfaces on a later write, never
-  thrown here.
-
-  Reached through `session/after-write!`, which the `defmethod`s below register
-  on the client platforms — so an ordinary `:jvm` write never arrives here at
-  all, and the write engine does not name this namespace (R6). This used to run
-  IN the engine and reach back for `compile-client!` through
-  `store/late-ref`, because THIS namespace requires `slopp.ops.external` →
-  `slopp.ops`, so a static require would have cycled. The escape hatch was
-  holding up the misplacement, not the load order: registering points the edge
-  the one way that never cycles, and the call below is now ordinary.
-
-  The platform check stays even though the dispatch already made it, because
-  `generate-client!` calls this directly — it is this function's own contract,
-  not the hook's."
-  [session ns-sym]
-  (let [st (:store @session)]
-    (when (and (= "true" (str (get-in st [:config "client" :values "auto-compile"])))
-               (#{:cljc :cljs} (store/platform-for st ns-sym)))
-      (schedule-client-recompile! session)
-      (let [prev (:last @(client-compile-guard! session))]
-        (cond-> {:client-recompiling true}
-          prev (assoc :client-recompile-prev prev))))))
-
 (defn- default-client-ns
   "Where a generated client goes when the caller does not name one: the
   `client` / `generated-ns` config, else `<family>.wire.api` for a store whose
@@ -1131,6 +1095,153 @@
                  :keys (vec (sort (map str (keys document))))
                  :expected :paths}]}))
 
+(defn ^:private schema-literal-for
+  "The literal schema a resolved `:var` reference points at, read out of the
+  store, or nil.
+
+  A contract declared inline hands its keys straight over; one declared as a
+  var — which is the shape the dialect prefers, and the shape `:rest/request`
+  usually takes — hides them behind a name. This is the difference between the
+  two producers: `contract->plan` receives schemas as VALUES from a published
+  document, while `client-wrapper-specs` receives a reference and has to look.
+
+  Anything other than a plain `(def name … <literal>)` answers nil, which the
+  caller treats as \"cannot enumerate\" and emits no guard."
+  [store {:keys [kind sym ns]}]
+  (when (= :var kind)
+    (when-let [e (store/form-named store ns (symbol (clojure.core/name sym)))]
+      (let [sx (try (store/form-sexpr (:node e)) (catch Exception _ nil))]
+        (when (and (seq? sx) (= 'def (first sx)))
+          (last sx))))))
+
+(defn ^:export client-wrapper-specs
+  "The generated-client plan (D-web-contracts part 2): one wrapper SPEC per web
+   endpoint (`edit.modules/web-endpoint-rows`), with its request/response schemas
+   resolved to shippable :cljc vars. Returns {:wrappers [spec …] :problems [p …]}.
+   A spec is {:fn-name :method :path :endpoint :request :response} — :fn-name gets
+   a ! on a mutating verb (post/put/patch/delete), :request/:response are
+   resolve-schema-ref results (only a body verb carries a request). An endpoint
+   whose schema can't ship to the client (non-:cljc, or a missing var) is SKIPPED
+   and reported as a problem {:endpoint :schema-ref :ns :issue :platform} so the
+   generated namespace always compiles. Pure function of the store value."
+  [store]
+  (reduce
+   (fn [acc {:keys [ns name meta kind path]}]
+     ;; CONTENT is not a client's business at all — a typed fetch wrapper whose
+     ;; (.json resp) runs against HTML is nonsense. That used to be
+     ;; `:rest/client false`'s job, on a page that had no way to say it WAS a
+     ;; page; `:kind` says it now.
+     ;;
+     ;; And there is no opt-out beyond that. `:rest/client false` also excluded
+     ;; a REAL api, which put one consumer's decision on the producer — an
+     ;; endpoint does not know who will call it, and the flag reached every
+     ;; other consumer too. What it was standing in for turned out to be
+     ;; `:rest/media-type` in the one case that was about the endpoint at all.
+     (if (not= :rest kind)
+       acc
+       (let [endpoint (symbol (str ns) (str name))
+             method   (:http/method meta)
+             req      (resolve-schema-ref store ns (:rest/request meta))
+             resp     (resolve-schema-ref store ns (:rest/response meta))
+             bad      (vals (into {} (map (juxt :sym identity))
+                                 (filter (comp #{:not-cljc :missing} :kind) [req resp])))]
+         (if (seq bad)
+           (update acc :problems into
+                   (for [b bad] {:endpoint endpoint :schema-ref (:sym b)
+                                 :ns (:ns b) :issue (:kind b) :platform (:platform b)}))
+           (update acc :wrappers conj
+                   {:fn-name  (symbol (str name
+                                       ;; not a second bang: a mutating endpoint
+                                       ;; named with one is already following the
+                                       ;; dialect's convention, and `pay!!` is the
+                                       ;; generator fighting the house style
+                                       (when (and (#{:post :put :patch :delete} method)
+                                                  (not (.endsWith (str name) "!")))
+                                         "!")))
+                    :method   method
+                    :path     path
+                    ;; what the endpoint ANSWERS, defaulting to JSON. A wrapper
+                    ;; decodes what it is given, and `.json` on anything else
+                    ;; fails on the first character — slopp's own
+                    ;; /api/contracts answers application/edn
+                    :media-type (or (:rest/media-type meta) "application/json")
+                    :endpoint endpoint
+                    ;; whatever the verb. WHETHER there is a request is the endpoint's
+                    ;; declaration; HOW it travels — body or query string — is
+                    ;; render-wrapper's decision from the method. Dropping it
+                    ;; here on a non-body verb removed the caller's only way to
+                    ;; say anything the PATH does not carry, which is how
+                    ;; `?depth=` came to answer on the wire while the generated
+                    ;; wrapper had nowhere to put it.
+                    :request  req
+                    ;; inline hands the keys over; a var hides them behind a
+                    ;; name and has to be read. Either way nil means "cannot
+                    ;; enumerate", and render-request then emits no guard —
+                    ;; the boundary still closes the same question
+                    :request-keys (or (declared-map-keys (:rest/request meta))
+                                      (declared-map-keys
+                                       (schema-literal-for store req)))
+                    :response resp})))))
+   {:wrappers [] :problems []}
+   (edit.http/web-endpoint-rows store)))
+
+(defn auto-compile?
+  "Whether a client write recompiles the browser bundle in the background.
+
+  YES when the store runs a dev instance — `http.enabled` or a declared
+  `app.main`, the same two facts [[slopp.webdev.live/serve-plan]] serves on —
+  unless `client`/`auto-compile` says `false`; and yes when that setting says
+  `true` whatever the store serves. A served dev instance has a browser looking
+  at its bundle, and a bundle from before the write is a page lying about the
+  store: slopp's own landing redirect was landed, refreshed and green while the
+  page served JavaScript from the day before, until someone knew to run
+  compile_client by hand. Making that a setting was the friction. A store with
+  no dev instance compiles nothing on a write, as before — nothing is looking."
+  [store]
+  (let [told (get-in store [:config "client" :values "auto-compile"])]
+    (cond
+      (= "true" (str told))  true
+      (= "false" (str told)) false
+      :else (boolean (or (capabilities/effective store "http.enabled")
+                         (capabilities/effective store "app.main"))))))
+
+(defn maybe-recompile-client!
+  "Dev loop (D-web-cljs): when the bundle is kept fresh — the store runs a dev
+  instance, or `client`/`auto-compile` says so, see [[auto-compile?]] — and
+  `ns-sym` is a CLIENT namespace (`:cljc`/`:cljs`), schedule an ASYNC
+  background recompile of the client bundle so the served page gets fresh JS
+  — WITHOUT blocking the write. Single-flight + coalescing (a write during a compile triggers exactly
+  ONE more compile after it — the bundle always reflects the latest edit).
+  Returns `{:client-recompiling true}` immediately, plus `:client-recompile-prev`
+  (the previous background compile's outcome — `{:client-recompiled path}` or
+  `{:client-recompile-error msg}`) once one has finished; or nil when disabled or
+  `ns-sym` is not a client namespace.
+
+  The compile runs on a daemon thread and commits the served blob when done;
+  a compile error is captured on the guard and surfaces on a later write, never
+  thrown here.
+
+  Reached through `session/after-write!`, which the `defmethod`s below register
+  on the client platforms — so an ordinary `:jvm` write never arrives here at
+  all, and the write engine does not name this namespace (R6). This used to run
+  IN the engine and reach back for `compile-client!` through
+  `store/late-ref`, because THIS namespace requires `slopp.ops.external` →
+  `slopp.ops`, so a static require would have cycled. The escape hatch was
+  holding up the misplacement, not the load order: registering points the edge
+  the one way that never cycles, and the call below is now ordinary.
+
+  The platform check stays even though the dispatch already made it, because
+  `generate-client!` calls this directly — it is this function's own contract,
+  not the hook's."
+  [session ns-sym]
+  (let [st (:store @session)]
+    (when (and (auto-compile? st)
+               (#{:cljc :cljs} (store/platform-for st ns-sym)))
+      (schedule-client-recompile! session)
+      (let [prev (:last @(client-compile-guard! session))]
+        (cond-> {:client-recompiling true}
+          prev (assoc :client-recompile-prev prev))))))
+
 (defn ^:export generate-client-from!
   "Generate a typed client for an API this app CONSUMES, from the contract
    published at `url` — the cross-store twin of [[generate-client!]].
@@ -1250,96 +1361,6 @@
 
 (defmethod engine/after-write! :cljc [session ns-sym]
   (maybe-recompile-client! session ns-sym))
-
-(defn ^:private schema-literal-for
-  "The literal schema a resolved `:var` reference points at, read out of the
-  store, or nil.
-
-  A contract declared inline hands its keys straight over; one declared as a
-  var — which is the shape the dialect prefers, and the shape `:rest/request`
-  usually takes — hides them behind a name. This is the difference between the
-  two producers: `contract->plan` receives schemas as VALUES from a published
-  document, while `client-wrapper-specs` receives a reference and has to look.
-
-  Anything other than a plain `(def name … <literal>)` answers nil, which the
-  caller treats as \"cannot enumerate\" and emits no guard."
-  [store {:keys [kind sym ns]}]
-  (when (= :var kind)
-    (when-let [e (store/form-named store ns (symbol (clojure.core/name sym)))]
-      (let [sx (try (store/form-sexpr (:node e)) (catch Exception _ nil))]
-        (when (and (seq? sx) (= 'def (first sx)))
-          (last sx))))))
-
-(defn ^:export client-wrapper-specs
-  "The generated-client plan (D-web-contracts part 2): one wrapper SPEC per web
-   endpoint (`edit.modules/web-endpoint-rows`), with its request/response schemas
-   resolved to shippable :cljc vars. Returns {:wrappers [spec …] :problems [p …]}.
-   A spec is {:fn-name :method :path :endpoint :request :response} — :fn-name gets
-   a ! on a mutating verb (post/put/patch/delete), :request/:response are
-   resolve-schema-ref results (only a body verb carries a request). An endpoint
-   whose schema can't ship to the client (non-:cljc, or a missing var) is SKIPPED
-   and reported as a problem {:endpoint :schema-ref :ns :issue :platform} so the
-   generated namespace always compiles. Pure function of the store value."
-  [store]
-  (reduce
-   (fn [acc {:keys [ns name meta kind path]}]
-     ;; CONTENT is not a client's business at all — a typed fetch wrapper whose
-     ;; (.json resp) runs against HTML is nonsense. That used to be
-     ;; `:rest/client false`'s job, on a page that had no way to say it WAS a
-     ;; page; `:kind` says it now.
-     ;;
-     ;; And there is no opt-out beyond that. `:rest/client false` also excluded
-     ;; a REAL api, which put one consumer's decision on the producer — an
-     ;; endpoint does not know who will call it, and the flag reached every
-     ;; other consumer too. What it was standing in for turned out to be
-     ;; `:rest/media-type` in the one case that was about the endpoint at all.
-     (if (not= :rest kind)
-       acc
-       (let [endpoint (symbol (str ns) (str name))
-             method   (:http/method meta)
-             req      (resolve-schema-ref store ns (:rest/request meta))
-             resp     (resolve-schema-ref store ns (:rest/response meta))
-             bad      (vals (into {} (map (juxt :sym identity))
-                                 (filter (comp #{:not-cljc :missing} :kind) [req resp])))]
-         (if (seq bad)
-           (update acc :problems into
-                   (for [b bad] {:endpoint endpoint :schema-ref (:sym b)
-                                 :ns (:ns b) :issue (:kind b) :platform (:platform b)}))
-           (update acc :wrappers conj
-                   {:fn-name  (symbol (str name
-                                       ;; not a second bang: a mutating endpoint
-                                       ;; named with one is already following the
-                                       ;; dialect's convention, and `pay!!` is the
-                                       ;; generator fighting the house style
-                                       (when (and (#{:post :put :patch :delete} method)
-                                                  (not (.endsWith (str name) "!")))
-                                         "!")))
-                    :method   method
-                    :path     path
-                    ;; what the endpoint ANSWERS, defaulting to JSON. A wrapper
-                    ;; decodes what it is given, and `.json` on anything else
-                    ;; fails on the first character — slopp's own
-                    ;; /api/contracts answers application/edn
-                    :media-type (or (:rest/media-type meta) "application/json")
-                    :endpoint endpoint
-                    ;; whatever the verb. WHETHER there is a request is the endpoint's
-                    ;; declaration; HOW it travels — body or query string — is
-                    ;; render-wrapper's decision from the method. Dropping it
-                    ;; here on a non-body verb removed the caller's only way to
-                    ;; say anything the PATH does not carry, which is how
-                    ;; `?depth=` came to answer on the wire while the generated
-                    ;; wrapper had nowhere to put it.
-                    :request  req
-                    ;; inline hands the keys over; a var hides them behind a
-                    ;; name and has to be read. Either way nil means "cannot
-                    ;; enumerate", and render-request then emits no guard —
-                    ;; the boundary still closes the same question
-                    :request-keys (or (declared-map-keys (:rest/request meta))
-                                      (declared-map-keys
-                                       (schema-literal-for store req)))
-                    :response resp})))))
-   {:wrappers [] :problems []}
-   (edit.http/web-endpoint-rows store)))
 
 (defn ^:export generate-client!
   "Generate the typed client (D-web-contracts part 2): read every web endpoint's

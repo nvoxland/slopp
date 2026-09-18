@@ -318,51 +318,6 @@
   earned. Anything that dirties an image in a new way must mark it here."
   "(boolean (resolve 'user/slopp-image-dirty))")
 
-(defn- inject-rt!
-  "Load slopp's runtime support (slopp.kernel.rt — traced test execution) into the
-  image, ensure the parent-death watchdog is aboard, wrap rt against itself
-  (#126), record the BASELINE namespace set, then return to `user`. Every
-  owned image carries all of it.
-
-  The self-instrument call is FEATURE-DETECTED, not assumed. `io/resource` reads
-  whichever rt source is on the READING process's classpath, and that differs
-  by caller: the external runner is a built project, so it gets the store's
-  rendered rt; the MCP server runs from the uberjar, so it gets whatever rt that
-  jar was built with — which lags the store by design. Calling a var the older
-  copy lacks would break every image the moment the jar fell behind.
-
-  The timing is the point: wrapping here — before anything calls in — is what
-  makes rt's own entry points visible. `traced-run` cannot wrap itself from the
-  inside; it is already on the stack by then, which is exactly why it measured
-  zero covering tests while 213 exercised it.
-
-  The same timing argument gives `:baseline` its only correct moment: the
-  namespace set here is the image with rt aboard and NO store code, which is
-  exactly what `reset!` must be able to return to before a second tenant may
-  have it. Failing to capture it is never fatal — an image with no baseline
-  simply refuses to be recycled.
-
-  The WATCHDOG (see `watchdog-src`) normally boards the child's own command
-  line, before nREPL starts — this re-run is the safety net for images
-  launched with a custom :cmd; the name guard makes it land exactly once."
-  [handle]
-  ;; BOTH paths, for the same reason the resolve below is feature-detected:
-  ;; the jar lags the store, and the kernel move changed where rt renders.
-  ;; A built project has slopp/kernel/rt.clj; a jar built before that move
-  ;; has slopp/rt.clj and nothing else. Ordered new-first so the current
-  ;; layout always wins; the second arm dies with the last jar predating
-  ;; the move, and until then it is what keeps every image startable.
-  (eval! handle (slurp (or (io/resource "slopp/kernel/rt.clj")
-                           (io/resource "slopp/rt.clj"))))
-  (eval! handle "(when-let [f (resolve 'slopp.kernel.rt/self-instrument!)] (f))")
-  (eval! handle watchdog-src)
-  (let [handle (assoc handle :baseline
-                      (try {:nses (first (eval! handle "(set (map ns-name (all-ns)))"))
-                            :cp   (first (eval! handle dirty-probe))}
-                           (catch Throwable _ nil)))]
-    (eval! handle "(in-ns 'user)")
-    handle))
-
 ^:unsafe (defn ^:export reset-to-baseline!
   "Return `image` to the state it recorded at boot, so the next tenant gets it
   as if freshly launched — or NIL, meaning it could not be proven clean and
@@ -667,6 +622,75 @@
               (pr-str {:deps (merge deps inherent-deps)})
               "-M" "-e" watchdog-src "-m" "nrepl.cmdline"]))))
 
+(defn rt-source
+  "The slopp.kernel.rt source an image is bootstrapped with: the copy on the
+  READING process's classpath — either layout, see [[inject-rt!]] — else
+  `fallback`, the store's own rendering, which the image door hands down when
+  the store holds the kernel.
+
+  REFUSES by name when there is neither. `slurp` of nil read as `image boot
+  failed: Cannot open <nil> as a Reader`, which is what every image the dev
+  instance tried to boot died of: a managed child gets its code over nREPL
+  into an empty dir and has no rt.clj on its classpath at all, so an agent
+  attached to it could read and never write."
+  [resource fallback]
+  (or (some-> (resource "slopp/kernel/rt.clj") slurp)
+      (some-> (resource "slopp/rt.clj") slurp)
+      fallback
+      (throw (ex-info (str "no slopp.kernel.rt source to bootstrap the image with:"
+                           " neither slopp/kernel/rt.clj nor slopp/rt.clj is on this"
+                           " process's classpath, and the store handed down no"
+                           " rendering of its own. A process booted from a store"
+                           " over nREPL (a managed dev instance) has no source"
+                           " files — the image door passes the store's"
+                           " slopp.kernel.rt when the store holds it")
+                      {:slopp.image.repl/rt-source :missing}))))
+
+(defn- inject-rt!
+  "Load slopp's runtime support (slopp.kernel.rt — traced test execution) into the
+  image, ensure the parent-death watchdog is aboard, wrap rt against itself
+  (#126), record the BASELINE namespace set, then return to `user`. Every
+  owned image carries all of it.
+
+  The self-instrument call is FEATURE-DETECTED, not assumed. `io/resource` reads
+  whichever rt source is on the READING process's classpath, and that differs
+  by caller: the external runner is a built project, so it gets the store's
+  rendered rt; the MCP server runs from the uberjar, so it gets whatever rt that
+  jar was built with — which lags the store by design. Calling a var the older
+  copy lacks would break every image the moment the jar fell behind.
+
+  The timing is the point: wrapping here — before anything calls in — is what
+  makes rt's own entry points visible. `traced-run` cannot wrap itself from the
+  inside; it is already on the stack by then, which is exactly why it measured
+  zero covering tests while 213 exercised it.
+
+  The same timing argument gives `:baseline` its only correct moment: the
+  namespace set here is the image with rt aboard and NO store code, which is
+  exactly what `reset!` must be able to return to before a second tenant may
+  have it. Failing to capture it is never fatal — an image with no baseline
+  simply refuses to be recycled.
+
+  The WATCHDOG (see `watchdog-src`) normally boards the child's own command
+  line, before nREPL starts — this re-run is the safety net for images
+  launched with a custom :cmd; the name guard makes it land exactly once."
+  [handle]
+  ;; BOTH paths, for the same reason the resolve below is feature-detected:
+  ;; the jar lags the store, and the kernel move changed where rt renders.
+  ;; A built project has slopp/kernel/rt.clj; a jar built before that move
+  ;; has slopp/rt.clj and nothing else. Ordered new-first so the current
+  ;; layout always wins; the second arm dies with the last jar predating
+  ;; the move, and until then it is what keeps every image startable.
+  (eval! handle (rt-source io/resource (:rt-fallback handle)))
+  (eval! handle "(when-let [f (resolve 'slopp.kernel.rt/self-instrument!)] (f))")
+  (eval! handle watchdog-src)
+  (let [handle (assoc handle :baseline
+                      (try {:nses (first (eval! handle "(set (map ns-name (all-ns)))"))
+                            :cp   (first (eval! handle dirty-probe))}
+                           (catch Throwable _ nil)))]
+    (eval! handle "(in-ns 'user)")
+    ;; the fallback was for the bootstrap above and is not part of the handle
+    (dissoc handle :rt-fallback)))
+
 (defn ^:export ^{:live-handle true
         :malli/schema
         [:=> {:throws [[:map [:pid {:optional true} [:maybe :int]]]]}
@@ -674,7 +698,8 @@
                         [:slopp.image.repl/cmd {:optional true} [:maybe [:sequential :string]]]
                         [:slopp.image.repl/dir {:optional true} [:maybe :some]]
                         [:slopp.image.repl/timeout-ms {:optional true} :int]
-                        [:slopp.image.repl/deps {:optional true} [:maybe :map]]]]]
+                        [:slopp.image.repl/deps {:optional true} [:maybe :map]]
+                        [:slopp.image.repl/rt-fallback {:optional true} [:maybe :string]]]]]
          :map]}
   start!
   "Launch a fresh owned image (with slopp.kernel.rt support loaded); returns a handle
@@ -700,7 +725,7 @@
   oracle-check. Nothing will catch it drifting from the impl — keep it
   honest by hand."
   ([] (start! {}))
-  ([{:slopp.image.repl/keys [cmd dir timeout-ms deps] :or {timeout-ms 60000}}]
+  ([{:slopp.image.repl/keys [cmd dir timeout-ms deps rt-fallback] :or {timeout-ms 60000}}]
    (let [cmd (or cmd (default-cmd deps))
          dir (or dir (temp-dir))
          pb  (doto (ProcessBuilder. ^java.util.List cmd)
@@ -715,7 +740,10 @@
              session (nrepl/new-session client)]
          (inject-rt! {:process proc :port port :conn conn :client client
                       :session session :reader rdr :dir dir
-                      :currency (image.currency/new-registry)}))
+                      :currency (image.currency/new-registry)
+                      ;; the store's own slopp.kernel.rt, for a launching process
+                      ;; with no rt.clj on its classpath — see [[rt-source]]
+                      :rt-fallback rt-fallback}))
        (catch Throwable t
          (.destroyForcibly proc)
          (throw (ex-info (str "image boot failed: " (ex-message t))
