@@ -1034,44 +1034,6 @@
                  " attach does — start-app! saw " (pr-str @booted))))
       (finally (daemon/reset-all!)))))
 
-(deftest ^:external a-serving-dev-server-keeps-its-project-open-through-the-idle-reap
-  ;; The reaper closes every project left holding no session. Twice tonight
-  ;; that closed the project a human was LOOKING AT: "start the dev server"
-  ;; was asked, the agent's CLI session idled past ten minutes, and the close
-  ;; stopped the child that answered on 7358. A browser is not an attachment.
-  ;; A serving app is the human's attachment, and it keeps the project.
-  (let [d     (tmp-dir!)
-        ctx   (daemon/context)
-        token (daemon/token)
-        owner (atom nil)
-        call  (fn [body]
-                (slopp.http/handle! ctx {:request-method :post :uri "/api/call"
-                                         :headers {"x-slopp-dir" d} :body body}))]
-    (try
-      (with-redefs [mcp/app-managed? (constantly true)
-                    mcp/start-app!   (fn [o]
-                                       (reset! owner o)
-                                       (swap! o assoc :app-server
-                                              {:serving? true :url "http://127.0.0.1:7399/"})
-                                       {:serving? true})
-                    mcp/stop-app!    (fn [o] (swap! o dissoc :app-server) {:stopped true})]
-        (is (= 200 (:status (call {:tool "thread_list" :arguments {} :token token}))))
-        (Thread/sleep 800)
-        (is (some? (:app (first (projects! ctx)))) "fixture: the app is serving")
-        (testing "an hour later the CLI session is reaped, and the project stays for its app"
-          (let [r (daemon/reap-idle! (+ (System/currentTimeMillis) (* 60 60 1000)))]
-            (is (= [d] (:cli r)) "the idle CLI session went")
-            (is (empty? (:projects r)) (pr-str r))
-            (let [ps (projects! ctx)]
-              (is (= [d] (mapv :dir ps)) "the project is still listed")
-              (is (false? (:cli (first ps))))
-              (is (some? (:app (first ps))) "and its app still answers"))))
-        (testing "with the app stopped, the same reap closes it as before"
-          (mcp/stop-app! @owner)
-          (daemon/reap-idle! (+ (System/currentTimeMillis) (* 60 60 1000)))
-          (is (empty? (projects! ctx)))))
-      (finally (daemon/reset-all!)))))
-
 (deftest ^:external a-session-on-a-managed-child-is-marked-as-being-on-the-dev-instance
   ;; the daemon is what knows its role: a process the manager told
   ;; `slopp.managed-for` this dir is that store's dev instance, and every
@@ -1084,4 +1046,105 @@
         (is (= d (:dev-instance-of @session))))
       (finally
         (if was (System/setProperty "slopp.managed-for" was) (System/clearProperty "slopp.managed-for"))
+        (daemon/reset-all!)))))
+
+(deftest ^:external an-agents-exit-ends-its-sessions-and-the-last-agent-closes-the-project
+  ;; Claude Code never tells a daemon it left. Measured on 2026-09-18: a
+  ;; one-shot agent's two MCP sessions and its hooks' CLI session were still
+  ;; in the registry five seconds after it exited, and would have sat there
+  ;; until the idle reaper's two hours. So the plugin's SessionEnd hook is the
+  ;; exit signal: it names the harness session id, every MCP session the
+  ;; agent opened carries that id from the `X-Slopp-Agent` header its
+  ;; .mcp.json entry expands, and the last agent out closes the project —
+  ;; app, reader and oracles with it.
+  (let [d     (tmp-dir!)
+        ctx   (daemon/context)
+        token (daemon/token)
+        init  {:jsonrpc "2.0" :id 1 :method "initialize"
+               :params {:protocolVersion "2025-03-26" :capabilities {}
+                        :clientInfo {:name "t" :version "0"}}}
+        open! (fn [agent]
+                (slopp.http/handle! ctx {:request-method :post :uri "/api/mcp"
+                                         :headers {"x-slopp-dir" d "x-slopp-agent" agent}
+                                         :body init}))
+        hook  (fn [body]
+                (slopp.http/handle! ctx {:request-method :post :uri "/api/hook"
+                                         :headers {"x-slopp-dir" d "x-slopp-token" token}
+                                         :body {:hook body}}))
+        sessions (fn [] (:sessions (first (projects! ctx))))]
+    (try
+      (open! "agent-a") (open! "agent-a") (open! "agent-b")
+      (is (= 3 (sessions)) "two sessions per agent is what Claude Code opens, plus the other agent's")
+      (testing "an agent this daemon never saw ends nothing"
+        (is (= 200 (:status (hook {:hook_event_name "SessionEnd" :session_id "agent-x" :reason "other"}))))
+        (is (= 3 (sessions))))
+      (testing "one agent's exit ends ITS sessions and no other's"
+        (hook {:hook_event_name "SessionEnd" :session_id "agent-a" :reason "prompt_input_exit"})
+        (is (= 1 (sessions)) (pr-str (projects! ctx))))
+      (testing "the last agent's exit closes the project"
+        (hook {:hook_event_name "SessionEnd" :session_id "agent-b" :reason "prompt_input_exit"})
+        (is (empty? (projects! ctx)) (pr-str (projects! ctx))))
+      (testing "without the token an exit is refused, like the Stop hook's done"
+        (open! "agent-c")
+        (let [r (slopp.http/handle! ctx {:request-method :post :uri "/api/hook"
+                                         :headers {"x-slopp-dir" d}
+                                         :body {:hook {:hook_event_name "SessionEnd" :session_id "agent-c"}}})]
+          (is (= 403 (:status r)) (pr-str r))
+          (is (= 1 (sessions)))))
+      (finally (daemon/reset-all!)))))
+
+(deftest ^:external a-project-lives-while-an-agent-holds-it-anywhere-and-closes-with-the-last
+  ;; What holds a project is AGENTS — here, or on its own dev instance — and
+  ;; nothing else. The 2026-09-17 rule ("a serving app keeps the project")
+  ;; was a proxy: it kept a browser's project open forever after its agents
+  ;; left, and it was applied on the CLI-reap path only, so the MCP-reap path
+  ;; still closed a project with four agents attached to its dev instance —
+  ;; which the manager could not see, because a session on the child is not
+  ;; an attachment to the manager. Now the manager ASKS the child.
+  (let [d      (tmp-dir!)
+        ctx    (daemon/context)
+        token  (daemon/token)
+        agents (atom 1)
+        child  (slopp.http/serve! {:http/namespaces []
+                                   :http/routes [{:method :get :path "/api/status" :auth :public
+                                                  :handler (fn [_] {:status 200 :body {:sessions @agents}})}]
+                                   :http/port 0})
+        url    (str "http://127.0.0.1:" (:port child) "/")
+        owner  (atom nil)
+        stops  (atom 0)
+        init   {:jsonrpc "2.0" :id 1 :method "initialize"
+                :params {:protocolVersion "2025-03-26" :capabilities {}
+                         :clientInfo {:name "t" :version "0"}}}
+        open!  (fn [agent]
+                 (slopp.http/handle! ctx {:request-method :post :uri "/api/mcp"
+                                          :headers {"x-slopp-dir" d "x-slopp-agent" agent}
+                                          :body init}))
+        hook   (fn [body]
+                 (slopp.http/handle! ctx {:request-method :post :uri "/api/hook"
+                                          :headers {"x-slopp-dir" d "x-slopp-token" token}
+                                          :body {:hook body}}))]
+    (try
+      (with-redefs [mcp/app-managed? (constantly true)
+                    mcp/start-app!   (fn [o]
+                                       (reset! owner o)
+                                       (swap! o assoc :app-server {:serving? true :url url})
+                                       {:serving? true})
+                    mcp/stop-app!    (fn [o] (swap! stops inc) (swap! o dissoc :app-server) {:stopped true})]
+        (open! "agent-a")
+        (Thread/sleep 800)
+        (is (some? (:app (first (projects! ctx)))) "fixture: the app is serving")
+        (testing "the manager's last agent leaves, but one is attached to the dev instance: the project stays"
+          (hook {:hook_event_name "SessionEnd" :session_id "agent-a"})
+          (is (= [d] (mapv :dir (projects! ctx))) (pr-str (projects! ctx)))
+          (is (zero? @stops)))
+        (testing "an hour of idleness changes nothing while the child still holds an agent"
+          (daemon/reap-idle! (+ (System/currentTimeMillis) (* 60 60 1000)))
+          (is (= [d] (mapv :dir (projects! ctx)))))
+        (testing "the child's last agent leaves: the next reap closes the project and stops the instance"
+          (reset! agents 0)
+          (daemon/reap-idle! (System/currentTimeMillis))
+          (is (empty? (projects! ctx)) (pr-str (projects! ctx)))
+          (is (= 1 @stops))))
+      (finally
+        (slopp.http/stop! child)
         (daemon/reset-all!)))))
