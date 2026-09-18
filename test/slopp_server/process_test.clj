@@ -1053,42 +1053,63 @@
   ;; one-shot agent's two MCP sessions and its hooks' CLI session were still
   ;; in the registry five seconds after it exited, and would have sat there
   ;; until the idle reaper's two hours. So the plugin's SessionEnd hook is the
-  ;; exit signal: it names the harness session id, every MCP session the
-  ;; agent opened carries that id from the `X-Slopp-Agent` header its
-  ;; .mcp.json entry expands, and the last agent out closes the project —
-  ;; app, reader and oracles with it.
+  ;; exit signal, naming the harness session id — the id the prompt hook
+  ;; already hands the daemon, which a session takes as its identity when it
+  ;; absorbs the prompt's intent. (A `${CLAUDE_CODE_SESSION_ID}` header does
+  ;; NOT work: a top-level Claude leaves the placeholder unexpanded; the
+  ;; `X-Slopp-Agent` header stays honoured for a client that can send a real
+  ;; one.) A session nobody identified yet goes too — Claude opens two per
+  ;; agent and only one ever absorbs an intent — and that is safe because a
+  ;; wrongly-ended fresh session re-attaches on its next request. A session
+  ;; identified as ANOTHER agent's survives. The last agent out closes the
+  ;; project — app, reader and oracles with it.
   (let [d     (tmp-dir!)
         ctx   (daemon/context)
         token (daemon/token)
         init  {:jsonrpc "2.0" :id 1 :method "initialize"
                :params {:protocolVersion "2025-03-26" :capabilities {}
                         :clientInfo {:name "t" :version "0"}}}
-        open! (fn [agent]
-                (slopp.http/handle! ctx {:request-method :post :uri "/api/mcp"
-                                         :headers {"x-slopp-dir" d "x-slopp-agent" agent}
-                                         :body init}))
+        open! (fn [headers]
+                (let [r (slopp.http/handle! ctx {:request-method :post :uri "/api/mcp"
+                                                 :headers (merge {"x-slopp-dir" d} headers)
+                                                 :body init})]
+                  (get-in r [:headers "Mcp-Session-Id"])))
+        ;; what absorbing a prompt's intent leaves on the session
+        claim! (fn [sid agent] (swap! (daemon/lookup! sid) assoc :intent-sid agent :agent-id agent))
         hook  (fn [body]
                 (slopp.http/handle! ctx {:request-method :post :uri "/api/hook"
                                          :headers {"x-slopp-dir" d "x-slopp-token" token}
                                          :body {:hook body}}))
         sessions (fn [] (:sessions (first (projects! ctx))))]
     (try
-      (open! "agent-a") (open! "agent-a") (open! "agent-b")
-      (is (= 3 (sessions)) "two sessions per agent is what Claude Code opens, plus the other agent's")
-      (testing "an agent this daemon never saw ends nothing"
-        (is (= 200 (:status (hook {:hook_event_name "SessionEnd" :session_id "agent-x" :reason "other"}))))
-        (is (= 3 (sessions))))
-      (testing "one agent's exit ends ITS sessions and no other's"
-        (hook {:hook_event_name "SessionEnd" :session_id "agent-a" :reason "prompt_input_exit"})
-        (is (= 1 (sessions)) (pr-str (projects! ctx))))
-      (testing "the last agent's exit closes the project"
-        (hook {:hook_event_name "SessionEnd" :session_id "agent-b" :reason "prompt_input_exit"})
-        (is (empty? (projects! ctx)) (pr-str (projects! ctx))))
+      (let [a1 (open! {})
+            _  (open! {})                                  ; agent-a's second, never identified
+            b1 (open! {})
+            _  (open! {"x-slopp-agent" "${CLAUDE_CODE_SESSION_ID}"})] ; a placeholder is not an identity
+        (claim! a1 "agent-a")
+        (claim! b1 "agent-b")
+        (is (= 4 (sessions)))
+        (testing "an agent this daemon never saw ends only what nobody claims"
+          (is (= 200 (:status (hook {:hook_event_name "SessionEnd" :session_id "agent-x" :reason "other"}))))
+          (is (= 2 (sessions)) "the two identified sessions stay; the two unclaimed ones went"))
+        (testing "one agent's exit ends ITS session and not the other agent's"
+          (hook {:hook_event_name "SessionEnd" :session_id "agent-a" :reason "prompt_input_exit"})
+          (is (= 1 (sessions)) (pr-str (projects! ctx))))
+        (testing "the last agent's exit closes the project"
+          (hook {:hook_event_name "SessionEnd" :session_id "agent-b" :reason "prompt_input_exit"})
+          (is (empty? (projects! ctx)) (pr-str (projects! ctx)))))
+      (testing "a client that CAN name its agent is honoured on the header alone"
+        (open! {"x-slopp-agent" "agent-c"})
+        (open! {"x-slopp-agent" "agent-d"})
+        (hook {:hook_event_name "SessionEnd" :session_id "agent-c"})
+        (is (= 1 (sessions)))
+        (hook {:hook_event_name "SessionEnd" :session_id "agent-d"})
+        (is (empty? (projects! ctx))))
       (testing "without the token an exit is refused, like the Stop hook's done"
-        (open! "agent-c")
+        (open! {"x-slopp-agent" "agent-e"})
         (let [r (slopp.http/handle! ctx {:request-method :post :uri "/api/hook"
                                          :headers {"x-slopp-dir" d}
-                                         :body {:hook {:hook_event_name "SessionEnd" :session_id "agent-c"}}})]
+                                         :body {:hook {:hook_event_name "SessionEnd" :session_id "agent-e"}}})]
           (is (= 403 (:status r)) (pr-str r))
           (is (= 1 (sessions)))))
       (finally (daemon/reset-all!)))))

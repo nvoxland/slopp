@@ -886,7 +886,8 @@
                                                    :started now :last-seen now
                                                    ;; the harness session this MCP session belongs
                                                    ;; to, from X-Slopp-Agent — what its exit ends
-                                                   :agent (not-empty (str agent))})))
+                                                   :agent (let [a (str agent)]
+                                                            (when-not (or (str/blank? a) (str/starts-with? a "${")) a))})))
             (boot-app-on-first-open! dir session owner first?)
       {:sid sid :session session})))
 
@@ -1246,25 +1247,48 @@
                                :else (ex-message e))))
               (System/exit 1))))))))
 
+(defn- session-agent
+  "The harness session id MCP session record `rec` belongs to, or nil while
+  nobody has identified it: the `X-Slopp-Agent` header its attach carried,
+  else the id its slopp session took when it absorbed a prompt's intent
+  (`:intent-sid`, or an `:agent-id` that is no longer the attach-time
+  `mcp-` label). The plugin's prompt hook hands the daemon that id on every
+  ask, and the session that makes the ask's first tool call claims it — so
+  identity arrives without the client saying anything, which it cannot: a
+  top-level Claude leaves `${CLAUDE_CODE_SESSION_ID}` in a plugin's .mcp.json
+  header unexpanded (measured 2026-09-18)."
+  [rec]
+  (or (:agent rec)
+      (when-let [s (:session rec)]
+        (let [{:keys [intent-sid agent-id]} @s]
+          (or intent-sid
+              (when-not (str/starts-with? (str agent-id) "mcp-") agent-id))))))
+
 (defn ^:export end-agent!
   "Agent `agent` — a harness session id — has EXITED: end every MCP session
-  it held on the project at `dir`, and when no other agent's session
-  remains there, its hooks' CLI session too; the project closes with the
-  last hold ([[held?]]). `{:ended [sids] :closed dir}`, `:closed` only when
-  the project went.
+  on the project at `dir` that is its ([[session-agent]]) or that nobody has
+  identified yet, and when no other agent's session remains there, its
+  hooks' CLI session too; the project closes with the last hold ([[held?]]).
+  `{:ended [sids] :closed dir}`, `:closed` only when the project went.
 
   Claude Code does not tell a daemon it left — measured on 2026-09-18: a
   one-shot agent's two MCP sessions and its CLI session sat in the registry
   after it exited, until the idle reaper's two hours — so the plugin's
-  SessionEnd hook is the exit signal and this is its door. The sessions are
-  the agent's because [[attach!]] recorded the harness id the `X-Slopp-Agent`
-  header carried; an agent this daemon never saw ends nothing, and the
-  reaper stays the backstop for one that crashed."
+  SessionEnd hook is the exit signal and this is its door.
+
+  **The unidentified go too, deliberately.** Claude opens two MCP sessions
+  per agent and only the one that makes a tool call ever absorbs an intent;
+  the sibling would otherwise hold the project for two hours after its agent
+  left. Ending a session that turns out to be another agent's fresh one
+  costs that agent one late answer — a request naming a session this daemon
+  no longer holds is re-attached where it stands — while a leftover holds a
+  dev instance and its images up for nobody. A session identified as another
+  agent's is never touched. The reaper stays the backstop for a crash."
   [dir agent]
   (locking state
     (let [st     @state
           on-dir (filter (fn [[_ s]] (= dir (:dir s))) (:sessions st))
-          mine   (map key (filter (fn [[_ s]] (= agent (:agent s))) on-dir))
+          mine   (map key (filter (fn [[_ s]] (let [a (session-agent s)] (or (nil? a) (= agent a)))) on-dir))
           others (remove (set mine) (map key on-dir))]
       (when (and (seq mine) (empty? others))
         (when-let [s (get-in st [:projects dir :cli :session])]
