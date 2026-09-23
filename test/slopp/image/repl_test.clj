@@ -466,7 +466,7 @@
         (str "-Xshare:on makes a stale archive a dead image: " budget))))
 
 (deftest the-runtime-source-falls-back-to-the-store-when-no-classpath-carries-it
-  ;; The dev instance — slopp's own in-progress daemon, booted from the store
+  ;; The dev instance — slopp's own in-progress server, booted from the store
   ;; over nREPL into an empty temp dir — has NO slopp/kernel/rt.clj on its
   ;; classpath: its code arrived as evaluated forms, not files. Every image it
   ;; tried to boot died as `image boot failed: Cannot open <nil> as a Reader`,

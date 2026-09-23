@@ -1182,7 +1182,7 @@
   ;; `managed?` gated on http.enabled alone, so a store whose dev instance is a
   ;; declared entry (`app.main`) — a worker, a daemon, a main — was never
   ;; started by slopp at all. slopp's own store is the case: its HTTP surface
-  ;; is self-served, and its dev instance is a daemon.
+  ;; is self-served, and its dev instance is a server.
   (let [st (assoc-in (store/empty-store) [:config "capabilities" :values "app.main"]
                      "w.core/-main")]
     (is (live/managed? st []) "a declared entry, no HTTP: managed")
@@ -1224,7 +1224,7 @@
   ;; The manager decided the port and knows which store the child is the
   ;; declared entry of; the entry could learn neither. Both are told as
   ;; properties before the entry runs — and the ROLE is what stops slopp's
-  ;; in-progress daemon from managing its own project's app server.
+  ;; in-progress server from managing its own project's app server.
   (let [plan {:dir "/proj" :namespaces ['demo.app] :host "127.0.0.1" :port 7358
               :adapter :http-kit :main 'shop.core/-main :serves-http? true}
         code (live/startup-code plan)

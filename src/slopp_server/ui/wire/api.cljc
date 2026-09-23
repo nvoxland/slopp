@@ -14,113 +14,120 @@
   (:require
             slopp-server.ui.wire.contracts))
 
-(def ^{:generated "form" :http/external-path "generated from the contract published at http://127.0.0.1:7357/api/projects/slopp2/rest/paths"} ^:export form
-  "GET /api/form/:id — generated endpoint descriptor (D-web-contracts)."
+(def ^{:generated "form" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export form
+  "GET /api/projects/:slug/form/:id — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :get
-   :http/path     "/api/form/:id"
-   :http/params   #{:depth :id :view}
+   :http/path     "/api/projects/:slug/form/:id"
+   :http/params   #{:depth :id :slug :view}
    :rest/request  slopp-server.ui.wire.contracts/form-request
    :rest/response slopp-server.ui.wire.contracts/form-response})
 
-(def ^{:generated "timeline" :http/external-path "generated from the contract published at http://127.0.0.1:7357/api/projects/slopp2/rest/paths"} ^:export timeline
-  "GET /api/timeline — generated endpoint descriptor (D-web-contracts)."
+(def ^{:generated "timeline" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export timeline
+  "GET /api/projects/:slug/timeline — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :get
-   :http/path     "/api/timeline"
+   :http/path     "/api/projects/:slug/timeline"
+   :http/params   #{:slug}
    :rest/response slopp-server.ui.wire.contracts/timeline-response})
 
-(def ^{:generated "cost" :http/external-path "generated from the contract published at http://127.0.0.1:7357/api/projects/slopp2/rest/paths"} ^:export cost
-  "GET /api/cost — generated endpoint descriptor (D-web-contracts)."
+(def ^{:generated "cost" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export cost
+  "GET /api/projects/:slug/cost — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :get
-   :http/path     "/api/cost"
-   :http/params   #{:by}
+   :http/path     "/api/projects/:slug/cost"
+   :http/params   #{:by :slug}
    :rest/request  slopp-server.ui.wire.contracts/cost-request
    :rest/response slopp-server.ui.wire.contracts/cost-response})
 
-(def ^{:generated "change" :http/external-path "generated from the contract published at http://127.0.0.1:7357/api/projects/slopp2/rest/paths"} ^:export change
-  "GET /api/change/:range — generated endpoint descriptor (D-web-contracts)."
+(def ^{:generated "change" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export change
+  "GET /api/projects/:slug/change/:range — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :get
-   :http/path     "/api/change/:range"
-   :http/params   #{:range}
+   :http/path     "/api/projects/:slug/change/:range"
+   :http/params   #{:range :slug}
    :rest/request  slopp-server.ui.wire.contracts/change-request
    :rest/response slopp-server.ui.wire.contracts/change-response})
 
-(def ^{:generated "webapp-paths" :http/external-path "generated from the contract published at http://127.0.0.1:7357/api/projects/slopp2/rest/paths"} ^:export webapp-paths
-  "GET /api/webapp/paths — generated endpoint descriptor (D-web-contracts)."
+(def ^{:generated "webapp-paths" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export webapp-paths
+  "GET /api/projects/:slug/webapp/paths — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :get
-   :http/path     "/api/webapp/paths"
+   :http/path     "/api/projects/:slug/webapp/paths"
+   :http/params   #{:slug}
    :rest/response slopp-server.ui.wire.contracts/webapp-paths-response})
 
-(def ^{:generated "http-paths" :http/external-path "generated from the contract published at http://127.0.0.1:7357/api/projects/slopp2/rest/paths"} ^:export http-paths
-  "GET /api/http/paths — generated endpoint descriptor (D-web-contracts)."
+(def ^{:generated "http-paths" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export http-paths
+  "GET /api/projects/:slug/http/paths — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :get
-   :http/path     "/api/http/paths"
+   :http/path     "/api/projects/:slug/http/paths"
+   :http/params   #{:slug}
    :rest/response slopp-server.ui.wire.contracts/http-paths-response})
 
-(def ^{:generated "namespaces" :http/external-path "generated from the contract published at http://127.0.0.1:7357/api/projects/slopp2/rest/paths"} ^:export namespaces
-  "GET /api/namespaces — generated endpoint descriptor (D-web-contracts)."
+(def ^{:generated "namespaces" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export namespaces
+  "GET /api/projects/:slug/namespaces — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :get
-   :http/path     "/api/namespaces"
+   :http/path     "/api/projects/:slug/namespaces"
+   :http/params   #{:slug}
    :rest/response slopp-server.ui.wire.contracts/namespaces-response})
 
-(def ^{:generated "rest-paths" :http/external-path "generated from the contract published at http://127.0.0.1:7357/api/projects/slopp2/rest/paths"} ^:export rest-paths
-  "GET /api/rest/paths — generated endpoint descriptor (D-web-contracts)."
+(def ^{:generated "rest-paths" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export rest-paths
+  "GET /api/projects/:slug/rest/paths — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :get
-   :http/path     "/api/rest/paths"
+   :http/path     "/api/projects/:slug/rest/paths"
+   :http/params   #{:slug}
    :rest/response slopp-server.ui.wire.contracts/rest-paths-response})
 
-(def ^{:generated "config" :http/external-path "generated from the contract published at http://127.0.0.1:7357/api/projects/slopp2/rest/paths"} ^:export config
-  "GET /api/config — generated endpoint descriptor (D-web-contracts)."
+(def ^{:generated "config" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export config
+  "GET /api/projects/:slug/config — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :get
-   :http/path     "/api/config"
-   :http/params   #{:prefix}
+   :http/path     "/api/projects/:slug/config"
+   :http/params   #{:prefix :slug}
    :rest/request  slopp-server.ui.wire.contracts/config-request
    :rest/response slopp-server.ui.wire.contracts/config-response})
 
-(def ^{:generated "modules" :http/external-path "generated from the contract published at http://127.0.0.1:7357/api/projects/slopp2/rest/paths"} ^:export modules
-  "GET /api/modules — generated endpoint descriptor (D-web-contracts)."
+(def ^{:generated "modules" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export modules
+  "GET /api/projects/:slug/modules — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :get
-   :http/path     "/api/modules"
+   :http/path     "/api/projects/:slug/modules"
+   :http/params   #{:slug}
    :rest/response slopp-server.ui.wire.contracts/modules-response})
 
-(def ^{:generated "bundle" :http/external-path "generated from the contract published at http://127.0.0.1:7357/api/projects/slopp2/rest/paths"} ^:export bundle
-  "GET /api/bundle — generated endpoint descriptor (D-web-contracts)."
+(def ^{:generated "bundle" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export bundle
+  "GET /api/projects/:slug/bundle — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :get
-   :http/path     "/api/bundle"
+   :http/path     "/api/projects/:slug/bundle"
+   :http/params   #{:slug}
    :rest/response slopp-server.ui.wire.contracts/bundle-response})
 
-(def ^{:generated "source" :http/external-path "generated from the contract published at http://127.0.0.1:7357/api/projects/slopp2/rest/paths"} ^:export source
-  "GET /api/source/:ns/:name — generated endpoint descriptor (D-web-contracts)."
+(def ^{:generated "source" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export source
+  "GET /api/projects/:slug/source/:ns/:name — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :get
-   :http/path     "/api/source/:ns/:name"
-   :http/params   #{:name :ns}
+   :http/path     "/api/projects/:slug/source/:ns/:name"
+   :http/params   #{:name :ns :slug}
    :rest/request  slopp-server.ui.wire.contracts/source-request
    :rest/response slopp-server.ui.wire.contracts/source-response})
 
-(def ^{:generated "search" :http/external-path "generated from the contract published at http://127.0.0.1:7357/api/projects/slopp2/rest/paths"} ^:export search
-  "GET /api/search — generated endpoint descriptor (D-web-contracts)."
+(def ^{:generated "search" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export search
+  "GET /api/projects/:slug/search — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :get
-   :http/path     "/api/search"
-   :http/params   #{:limit :q}
+   :http/path     "/api/projects/:slug/search"
+   :http/params   #{:limit :q :slug}
    :rest/request  slopp-server.ui.wire.contracts/search-request
    :rest/response slopp-server.ui.wire.contracts/search-response})
 
-(def ^{:generated "module" :http/external-path "generated from the contract published at http://127.0.0.1:7357/api/projects/slopp2/rest/paths"} ^:export module
-  "GET /api/module/:m — generated endpoint descriptor (D-web-contracts)."
+(def ^{:generated "module" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export module
+  "GET /api/projects/:slug/module/:m — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :get
-   :http/path     "/api/module/:m"
-   :http/params   #{:m}
+   :http/path     "/api/projects/:slug/module/:m"
+   :http/params   #{:m :slug}
    :rest/request  slopp-server.ui.wire.contracts/module-request
    :rest/response slopp-server.ui.wire.contracts/module-response})
 
-(def ^{:generated "ns-outline" :http/external-path "generated from the contract published at http://127.0.0.1:7357/api/projects/slopp2/rest/paths"} ^:export ns-outline
-  "GET /api/ns/:ns — generated endpoint descriptor (D-web-contracts)."
+(def ^{:generated "ns-outline" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export ns-outline
+  "GET /api/projects/:slug/ns/:ns — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :get
-   :http/path     "/api/ns/:ns"
-   :http/params   #{:ns}
+   :http/path     "/api/projects/:slug/ns/:ns"
+   :http/params   #{:ns :slug}
    :rest/request  slopp-server.ui.wire.contracts/ns-outline-request
    :rest/response slopp-server.ui.wire.contracts/ns-outline-response})
 
-(def ^{:generated "otel-endpoint" :http/external-path "generated from the contract published at http://127.0.0.1:7357/api/projects/slopp2/rest/paths"} ^:export otel-endpoint
+(def ^{:generated "otel-endpoint" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export otel-endpoint
   "POST /api/otel/v1/logs — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :post
    :http/path     "/api/otel/v1/logs"
@@ -128,51 +135,57 @@
    :rest/request  slopp-server.ui.wire.contracts/otel-endpoint-request
    :rest/response slopp-server.ui.wire.contracts/otel-endpoint-response})
 
-(def ^{:generated "status-endpoint" :http/external-path "generated from the contract published at http://127.0.0.1:7357/api/projects/slopp2/rest/paths"} ^:export status-endpoint
+(def ^{:generated "status-endpoint" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export status-endpoint
   "GET /api/status — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :get
    :http/path     "/api/status"
    :rest/response slopp-server.ui.wire.contracts/status-endpoint-response})
 
-(def ^{:generated "mcp-delete-endpoint" :http/external-path "generated from the contract published at http://127.0.0.1:7357/api/projects/slopp2/rest/paths"} ^:export mcp-delete-endpoint
-  "DELETE /api/projects/:slug/mcp — generated endpoint descriptor (D-web-contracts)."
+(def ^{:generated "mcp-delete-endpoint" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export mcp-delete-endpoint
+  "DELETE /api/mcp — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :delete
-   :http/path     "/api/projects/:slug/mcp"
-   :http/params   #{:slug}
+   :http/path     "/api/mcp"
    :rest/response slopp-server.ui.wire.contracts/mcp-delete-endpoint-response})
 
-(def ^{:generated "projects-endpoint" :http/external-path "generated from the contract published at http://127.0.0.1:7357/api/projects/slopp2/rest/paths"} ^:export projects-endpoint
+(def ^{:generated "projects-endpoint" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export projects-endpoint
   "GET /api/projects — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :get
    :http/path     "/api/projects"
    :rest/response slopp-server.ui.wire.contracts/projects-endpoint-response})
 
-(def ^{:generated "mcp-post-endpoint" :http/external-path "generated from the contract published at http://127.0.0.1:7357/api/projects/slopp2/rest/paths"} ^:export mcp-post-endpoint
-  "POST /api/projects/:slug/mcp — generated endpoint descriptor (D-web-contracts)."
+(def ^{:generated "hook-endpoint" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export hook-endpoint
+  "POST /api/hook — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :post
-   :http/path     "/api/projects/:slug/mcp"
-   :http/params   #{:error :id :jsonrpc :method :params :result :slug}
+   :http/path     "/api/hook"
+   :http/params   #{:hook}
+   :rest/request  slopp-server.ui.wire.contracts/hook-endpoint-request
+   :rest/response slopp-server.ui.wire.contracts/hook-endpoint-response})
+
+(def ^{:generated "mcp-post-endpoint" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export mcp-post-endpoint
+  "POST /api/mcp — generated endpoint descriptor (D-web-contracts)."
+  {:http/method   :post
+   :http/path     "/api/mcp"
+   :http/params   #{:error :id :jsonrpc :method :params :result}
    :rest/request  slopp-server.ui.wire.contracts/mcp-post-endpoint-request
    :rest/response slopp-server.ui.wire.contracts/mcp-post-endpoint-response})
 
-(def ^{:generated "mcp-get-endpoint" :http/external-path "generated from the contract published at http://127.0.0.1:7357/api/projects/slopp2/rest/paths"} ^:export mcp-get-endpoint
-  "GET /api/projects/:slug/mcp — generated endpoint descriptor (D-web-contracts)."
+(def ^{:generated "cli-endpoint" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export cli-endpoint
+  "POST /api/cli — generated endpoint descriptor (D-web-contracts)."
+  {:http/method   :post
+   :http/path     "/api/cli"
+   :rest/request  slopp-server.ui.wire.contracts/cli-endpoint-request
+   :rest/response slopp-server.ui.wire.contracts/cli-endpoint-response})
+
+(def ^{:generated "mcp-get-endpoint" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export mcp-get-endpoint
+  "GET /api/mcp — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :get
-   :http/path     "/api/projects/:slug/mcp"
-   :http/params   #{:slug}
+   :http/path     "/api/mcp"
    :rest/response slopp-server.ui.wire.contracts/mcp-get-endpoint-response})
 
-(def ^{:generated "project-api-endpoint" :http/external-path "generated from the contract published at http://127.0.0.1:7357/api/projects/slopp2/rest/paths"} ^:export project-api-endpoint
-  "GET /api/projects/:slug/** — generated endpoint descriptor (D-web-contracts)."
-  {:http/method   :get
-   :http/path     "/api/projects/:slug/**"
-   :http/params   #{:* :slug}
-   :rest/response slopp-server.ui.wire.contracts/project-api-endpoint-response})
-
-(def ^{:generated "call-endpoint" :http/external-path "generated from the contract published at http://127.0.0.1:7357/api/projects/slopp2/rest/paths"} ^:export call-endpoint
-  "POST /api/projects/:slug/call — generated endpoint descriptor (D-web-contracts)."
+(def ^{:generated "call-endpoint" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export call-endpoint
+  "POST /api/call — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :post
-   :http/path     "/api/projects/:slug/call"
-   :http/params   #{:agent :arguments :slug :token :tool}
+   :http/path     "/api/call"
+   :http/params   #{:agent :arguments :token :tool}
    :rest/request  slopp-server.ui.wire.contracts/call-endpoint-request
    :rest/response slopp-server.ui.wire.contracts/call-endpoint-response})

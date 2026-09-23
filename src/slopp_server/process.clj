@@ -1,6 +1,6 @@
 (ns slopp-server.process
   "ONE slopp per machine. A project is opened on the first agent's attach (an
-  MCP session at its endpoint) and closed on the last detach; the daemon
+  MCP session at its endpoint) and closed on the last detach; the server
   itself stays up with nothing loaded. It is the registry (`/api/projects`)
   and the owner of every surface under the one root `/api/` — each route a
   DECLARED rest endpoint on this namespace's public vars, assembled and
@@ -11,7 +11,7 @@
             [slopp-server.mcp.http :as mcp.http]
             [slopp.ops :as ops]
             [slopp.ops.external :as external] [cheshire.core :as json] [slopp-server.telemetry :as telemetry] [slopp.otel :as slopp.otel] [slopp.store.db :as db] [slopp-server.mcp :as mcp] [slopp.rest :as slopp.rest] [slopp.sync :as sync] [slopp.store :as store] [slopp.store.artifacts :as artifacts] [slopp.http.static :as static] [slopp.cljnx :as cljnx]
-            ;; EVERYTHING this daemon serves, REQUIRED and not only named in
+            ;; EVERYTHING this server serves, REQUIRED and not only named in
             ;; `serving-opts`: a route builder reads loaded vars, and a process
             ;; that loads only this namespace's closure — a managed child, a
             ;; jar booted from a neutral dir — serves nothing from a namespace
@@ -45,7 +45,7 @@
 (def ^:export default-port
   "slopp's own `http.port`, BAKED — the port [[configured-port!]] falls back to
   when no store is readable, which is the released jar's neutral-dir boot. The
-  self-host daemon reads `http.port` from its store instead, so this is the one
+  self-host server reads `http.port` from its store instead, so this is the one
   place the number is spelled when there is no store to read it from. One per
   machine, so one number rather than a per-directory formula: the derived-port
   formula existed so N per-session listeners would not collide, and there is one
@@ -69,7 +69,7 @@
   "The project a request names, by `X-Slopp-Dir` — an existing absolute
   directory, canonicalized. `{:dir}` or `{:error}`.
 
-  By DIR, because `.mcp.json` is written before any daemon exists and a
+  By DIR, because `.mcp.json` is written before any server exists and a
   slug minted at attach time cannot be known then; the header is what the
   plugin writes, literally (env expansion in headers is unreliable). The
   write/MCP doors are slug-free — one door, addressed by this header — so
@@ -85,14 +85,14 @@
 
 (defn ^:export lookup!
   "The slopp session behind MCP session `sid`, touching its `:last-seen`;
-  nil when this daemon holds no such session."
+  nil when this server holds no such session."
   [sid]
   (when-let [s (get-in @state [:sessions sid])]
     (swap! state assoc-in [:sessions sid :last-seen] (System/currentTimeMillis))
     (:session s)))
 
 ^:reads (defn ^:export projects
-  "THE REGISTRY: every project open on this daemon, oldest first — its
+  "THE REGISTRY: every project open on this server, oldest first — its
   slug, dir, when it opened, how many MCP sessions are attached, whether
   the write door holds a CLI session for it, and `:app`: what its dev
   server serves (`{:url :branch}`), or nil when it serves nothing. A
@@ -111,22 +111,21 @@
                          {:url (:url app)
                           :branch (some-> reader deref :branch str)})})))))
 
-(defn ^{:export true
-        :breaking-ok "the [port machine] arity is REMOVED with the machine setting: the default port's daemon is the machine's, and any other port records under its own name"}
-  daemon-file
-  "Where a daemon records itself: `~/.slopp/daemon.json` — `{url port token
-  pid started}` — for the default port, `~/.slopp/daemon-<port>.json` for
+(defn ^:export
+  server-file
+  "Where a server records itself: `~/.slopp/server.json` — `{url port token
+  pid started}` — for the default port, `~/.slopp/server-<port>.json` for
   any other. The shell derives the same name from the same one knob
   (`SLOPP_PORT`), so the two never disagree; a dev instance on
   another port (slopp's own, run from its store by the same machinery every
   project's dev instance gets) never takes the default's file over on boot.
   One writer per file by construction."
-  ([] (daemon-file default-port))
+  ([] (server-file default-port))
   ([port]
    (java.io.File. (System/getProperty "user.home")
                   (if (= (long port) (long default-port))
-                    ".slopp/daemon.json"
-                    (str ".slopp/daemon-" port ".json")))))
+                    ".slopp/server.json"
+                    (str ".slopp/server-" port ".json")))))
 
 (defn- store-file?
   "Whether `dir` has a store yet — a project's first durable write creates
@@ -165,7 +164,7 @@
 
 (defn ^:export token
   "The per-boot secret the write door checks — minted on first ask, written
-  beside the daemon's address so a shell on this machine can read it, and
+  beside the server's address so a shell on this machine can read it, and
   never served: loopback alone must not hand every local process the
   store's editing surface."
   []
@@ -234,13 +233,13 @@
 
 (defonce ^:export image-cap
   ;; the machine-wide budget for verification images: how many child JVMs
-  ;; the daemon's sessions may hold at once, across every project.
-  ;; `SLOPP_DAEMON_MAX_IMAGES` sets it at boot; a test resets it. v1 is a
+  ;; the server's sessions may hold at once, across every project.
+  ;; `SLOPP_SERVER_MAX_IMAGES` sets it at boot; a test resets it. v1 is a
   ;; cap with a refusal that names the fix, not a scheduler.
-  (atom (or (some-> (System/getenv "SLOPP_DAEMON_MAX_IMAGES") Long/parseLong) 6)))
+  (atom (or (some-> (System/getenv "SLOPP_SERVER_MAX_IMAGES") Long/parseLong) 6)))
 
 ^:reads (defn- images-up
-  "How many verification images the daemon's sessions hold right now — MCP
+  "How many verification images the server's sessions hold right now — MCP
   sessions, CLI sessions and readers alike."
   []
   (let [st @state]
@@ -256,11 +255,11 @@
   (let [up  (images-up)
         cap @image-cap]
     (when (<= cap up)
-      (str "the daemon holds " up " verification image(s) already, which is its cap (" cap
+      (str "the server holds " up " verification image(s) already, which is its cap (" cap
            ") — no image boots for this session until one is released: a session's"
            " image goes when it detaches or after " (quot session-idle-ms 60000)
            " min idle, a CLI session's after " (quot cli-idle-ms 60000)
-           " min. SLOPP_DAEMON_MAX_IMAGES raises the cap for the next daemon."
+           " min. SLOPP_SERVER_MAX_IMAGES raises the cap for the next server."
            " Store-value reads need no image and keep working."))))
 
 (defn- announce-landing!
@@ -299,7 +298,7 @@
   "Where a record for `thread` goes: `{:session s}` — a session on the
   project whose store holds that thread open, read through an attached
   session's connection or the project's opened reader — else `{:dir d}`,
-  the dir this daemon remembers routing that thread to before its project
+  the dir this server remembers routing that thread to before its project
   closed, else nil. A hit teaches the memory."
   [thread]
   (let [st   @state
@@ -317,8 +316,8 @@
           {:dir d}))))
 
 (defn- api-url
-  "Where project `proj`'s read API answers on THIS daemon —
-  `http://127.0.0.1:<port>/api/projects/<slug>` — or nil while the daemon
+  "Where project `proj`'s read API answers on THIS server —
+  `http://127.0.0.1:<port>/api/projects/<slug>` — or nil while the server
   has bound nothing (a test attaching straight to the registry)."
   [proj]
   (when-let [p (:port (:server @state))]
@@ -331,7 +330,7 @@
    [:map
     [:slug {:doc "the display name the project answers under in every path"} :string]
     [:dir {:doc "the project's absolute directory — what it is resolved by"} :string]
-    [:opened-at {:doc "when this daemon opened it, epoch milliseconds"} :int]
+    [:opened-at {:doc "when this server opened it, epoch milliseconds"} :int]
     [:sessions {:doc "MCP sessions attached right now"} :int]
     [:cli {:doc "whether the write door holds a CLI session for it"} :boolean]
     [:app {:doc "what its dev server serves, or nil when it serves nothing"}
@@ -342,29 +341,29 @@
 (defn ^{:http/method :get :rest/path "/api/projects" :http/auth :public
         :rest/response registry-contract}
   projects-endpoint
-  "`GET /api/projects` — THE REGISTRY, as data: every project this daemon
+  "`GET /api/projects` — THE REGISTRY, as data: every project this server
   holds. What the picker page and every page's project switcher read to
   know what there is to render."
   [_req]
   {:status 200 :body (projects)})
 
 (def ^:private status-contract
-  "What `/api/status` answers: the daemon about itself."
+  "What `/api/status` answers: the server about itself."
   [:map
    [:projects {:doc "open projects"} :int]
    [:sessions {:doc "attached MCP sessions, across every project"} :int]
    [:images {:doc "verification images up, against the machine-wide cap"}
     [:map [:up {:doc "child JVMs alive right now"} :int]
-          [:cap {:doc "the most this daemon will boot (SLOPP_DAEMON_MAX_IMAGES)"} :int]]]
+          [:cap {:doc "the most this server will boot (SLOPP_SERVER_MAX_IMAGES)"} :int]]]
    [:otel {:doc "telemetry records placed into a store, and dropped for naming no thread"}
     [:maybe [:map [:routed {:doc "records placed"} :int]
                   [:dropped {:doc "records nobody could own"} :int]]]]
-   [:port {:doc "the port bound, or nil before the daemon listens"} [:maybe :int]]])
+   [:port {:doc "the port bound, or nil before the server listens"} [:maybe :int]]])
 
 (defn ^{:http/method :get :rest/path "/api/status" :http/auth :public
         :rest/response status-contract}
   status-endpoint
-  "`GET /api/status` — the daemon about itself: how many projects and
+  "`GET /api/status` — the server about itself: how many projects and
   sessions it holds, how many images are up against the cap, what the
   telemetry sink placed and dropped."
   [_req]
@@ -390,11 +389,11 @@
 
 (def ^:private call-contract
   "What `slopp <op>` posts to the write door: the op, its arguments, and
-  the daemon's token. The project is named by X-Slopp-Dir, not a path slug."
+  the slopp server's token. The project is named by X-Slopp-Dir, not a path slug."
   [:map
    [:tool {:doc "the op to run"} :string]
    [:arguments {:optional true :doc "the op's arguments"} :map]
-   [:token {:optional true :doc "the daemon's per-boot secret, from ~/.slopp/daemon.json; refused without it"} :string]
+   [:token {:optional true :doc "the slopp server's per-boot secret, from ~/.slopp/server.json; refused without it"} :string]
    [:agent {:optional true :doc "a provenance label for the call"} :string]])
 
 (def ^:private otel-contract
@@ -413,12 +412,12 @@
   spec's `/v1/logs` itself. Each `api_request` record routes by its
   `session.id` — the agent's thread id — to the project holding that
   thread: through an attached session, the project's reader, or — once the
-  project has closed — the dir this daemon remembers for the thread,
+  project has closed — the dir this server remembers for the thread,
   through a connection opened for the batch and closed after it. What
-  names no thread this daemon has ever placed is counted and dropped,
+  names no thread this server has ever placed is counted and dropped,
   never guessed at. A body that is not an OTLP export is the contract's
   400, the non-retryable answer; anything that is answers 200 — an
-  exporter retries on anything else, and a batch this daemon could not
+  exporter retries on anything else, and a batch this server could not
   place is not one it wants again."
   [req]
   (let [r (telemetry/decode (:body req))]
@@ -455,11 +454,11 @@
    :body (json/generate-string {:error "no standalone stream here — answers ride the POST responses"})})
 
 (def ^:private asset-mounts
-  "The static mounts the daemon serves slopp's own pages with — `{url-prefix
+  "The static mounts the server serves slopp's own pages with — `{url-prefix
   manifest-prefix}`, the same line slopp's store declares as
   `http.static./assets`, so the bundle `compile_client` writes at
   `public/cljs/main.js` answers at `/assets/cljs/main.js`. Spelled here as
-  data rather than read off a capability because the daemon may have no
+  data rather than read off a capability because the server may have no
   store to read one from: started from a neutral dir it serves the bundle
   the jar carries."
   {"/assets" "public"})
@@ -473,16 +472,16 @@
     (str url-prefix (subs "public/cljs/main.js" (count path-prefix)))))
 
 (defn- pages-url
-  "Where project `proj`'s PAGES answer on THIS daemon —
+  "Where project `proj`'s PAGES answer on THIS server —
   `http://127.0.0.1:<port>/p/<slug>` — the address to hand a HUMAN, beside
-  [[api-url]] for a program; nil while the daemon has bound nothing."
+  [[api-url]] for a program; nil while the server has bound nothing."
   [proj]
   (when-let [p (:port (:server @state))]
     (str "http://127.0.0.1:" p "/p/" (:slug proj))))
 
 (defn spit-private!
   "Write `content` to `f` readable and writable by its OWNER only, creating
-  the parents. The daemon file carries the write door's token, and `spit`
+  the parents. The server file carries the write door's token, and `spit`
   alone wrote it under the umask — `-rw-r--r--`, every local USER able to
   read the secret that exists so that loopback alone does not hand every
   local process the store's editing surface. Recreated from scratch, so no
@@ -505,9 +504,8 @@
       (.setWritable f true true)))
   (spit f content))
 
-(defn ^{:breaking-ok "the machine-setting source is REMOVED: ~/.slopp/config.json's daemon-port is retired for the one knob SLOPP_PORT, which the plugin's MCP url can read and a file cannot"}
-  daemon-port
-  "The port `slopp daemon [port]` listens on, as `{:port n}` or `{:error
+(defn server-port
+  "The port `slopp server [port]` listens on, as `{:port n}` or `{:error
   sentence}` for a value that is not one. Four sources, in order: the
   argument `arg`; the environment (`env`, `SLOPP_PORT` — the ONE knob,
   because the plugin's MCP entry is a URL Claude Code expands from the
@@ -516,7 +514,7 @@
   property — slopp's own dev instance is told its port rather than passed
   it); else `base` — slopp's OWN `http.port` capability, supplied by
   [[configured-port!]] (read from its store, or the baked [[default-port]]
-  when no store is readable). The daemon is a normal app, so its resting
+  when no store is readable). The server is a normal app, so its resting
   port is `http.port` like any app's; the three sources above only override
   it. A bad value used to be an uncaught NumberFormatException: a stack
   trace where the one fact that matters is which value was wrong."
@@ -530,14 +528,14 @@
       (let [n (try (Long/parseLong raw) (catch NumberFormatException _ nil))]
         (if (and n (< 0 n 65536))
           {:port n}
-          {:error (str (pr-str raw) " is not a port (1–65535) — slopp daemon [port],"
+          {:error (str (pr-str raw) " is not a port (1–65535) — slopp server [port],"
                        " SLOPP_PORT=<n>, or the http.port capability")})))))
 
 (defn- own-reader!
-  "A read-only reader on the daemon's OWN store at `dir`, for the assets the
+  "A read-only reader on the server's OWN store at `dir`, for the assets the
   static mount serves under `--live` — opened on first use, kept on the state
   map beside the projects and NOT among them. It used to be the project
-  reader `api!` opens, which registered a project record for the daemon's
+  reader `api!` opens, which registered a project record for the server's
   dir holding nothing but the reader: an attach to that dir then adopted the
   half-record, and detach, reap and reset threw on its nil session set. The
   reaper swallowed that throw, so one browser hit followed by one attach
@@ -560,22 +558,22 @@
   or nil. Three sources, decided once at assembly, first match wins:
 
   - the dir a MANAGER materialized, named in the `slopp.static-dir` system
-    property: a managed child (slopp's own dev instance runs this daemon as
+    property: a managed child (slopp's own dev instance runs this server as
     a declared entry) has no store and no boot record, and its manager
     writes the mounts' bytes to a dir and re-syncs them at every refresh —
     reading that dir per request is what keeps a recompiled bundle current
     there. Without it the child fell through to the classpath below, which
     has no `public/`, and 404'd its own bundle;
-  - the daemon's OWN store, when it booted from a dir that has one (the
+  - the server's OWN store, when it booted from a dir that has one (the
     self-host loop: slopp's checkout under `--live`): the bundle
     `compile_client` just wrote is served on the next request, an
     artifact's bytes fetched from the store dir's cache by sha, exactly as
     a managed app server's assets are;
-  - the CLASSPATH otherwise: a daemon started from a neutral dir has no
+  - the CLASSPATH otherwise: a server started from a neutral dir has no
     store, and the jar carries `public/` for exactly this.
 
-  The store is reached through a reader of the daemon's OWN ([[own-reader!]]),
-  opened on first use, not at assembly — so listing the pages costs a daemon
+  The store is reached through a reader of the server's OWN ([[own-reader!]]),
+  opened on first use, not at assembly — so listing the pages costs a server
   with no visitors nothing — and never through a PROJECT reader: an asset
   request is not an attachment, and the project record `api!` minted for it
   once was the half-record that broke the reaper."
@@ -640,7 +638,7 @@
   performs it — the prompt hook and a consumer of the API get one answer. Calls
   the performer directly rather than over HTTP: the reader is the only handle it
   needs, and there is no per-project context to route through now that the
-  daemon serves every project from one."
+  server serves every project from one."
   [dir ask sid cli?]
   (api.reads/orient-bundle! (:reader (api! dir)) ask sid cli?))
 
@@ -709,7 +707,7 @@
 ^:unsafe (defn ^:export refresh-served-apps!
   "Re-serve every managed dev instance whose MAIN line has advanced since it
   was last served — regardless of WHO landed the done: a co-tenant session, a
-  daemon in another process, or one on another machine sharing this store.
+  server in another process, or one on another machine sharing this store.
 
   Polled efficiently: SQLite has no cross-process push, so this gates on
   `PRAGMA data_version` (`db/data-version`) — a microsecond in-memory counter
@@ -735,14 +733,14 @@
       (catch Throwable _ nil))))
 
 (defn- own-store!
-  "slopp's OWN store value when this daemon booted from a slopp checkout — the
+  "slopp's OWN store value when this server booted from a slopp checkout — the
   self-host loop, where `serving-opts` DERIVES its surface from the same
   capabilities every app's dev server does — or nil, when a released jar booted
   from a neutral dir and serves its BAKED surface from the classpath and the
   loaded image instead. Guarded on the store actually being slopp's (it declares
   `slopp-server.process`) so a jar started inside some OTHER project's dir does not
-  derive this daemon's surface from that project's web namespaces. Reached
-  through the daemon's own reader ([[own-reader!]]), synced with the journal on
+  derive this server's surface from that project's web namespaces. Reached
+  through the server's own reader ([[own-reader!]]), synced with the journal on
   each read, so a page or mount a `done` added is served on the next assembly."
   []
   (let [dir (try (:dir ((store/late-ref 'slopp.kernel.boot/current-boot-info)))
@@ -753,9 +751,9 @@
           st)))))
 
 (defn- serving-opts
-  "Everything the daemon serves, as the opts `slopp.http/context` and
+  "Everything the server serves, as the opts `slopp.http/context` and
   `slopp.http/serve!` both take — ONE assembly for the whole server: the
-  daemon's management endpoints, the UI shell, AND every project's typed read
+  server's management endpoints, the UI shell, AND every project's typed read
   API, which is now first-class here rather than delegated into a per-project
   context. A db-scoped endpoint carries `:http/resolve {:session
   [:project/reader [:path-params :slug]]}`, and the `:open-reader` fn in the
@@ -769,7 +767,7 @@
   them for every managed dev instance.
 
   Reads slopp's own store when it booted from a checkout ([[own-store!]]); falls
-  back to the BAKED surface — spelled namespaces (the daemon, the UI, and the
+  back to the BAKED surface — spelled namespaces (the server, the UI, and the
   read API), the classpath mount, the image page scan — for the storeless
   neutral-dir boot a released jar makes.
 
@@ -801,9 +799,9 @@
 
 (defn- configured-port!
   "slopp's own listen port from the `http.port` capability — read from its store
-  when this daemon booted from a slopp checkout ([[own-store!]]), else the baked
+  when this server booted from a slopp checkout ([[own-store!]]), else the baked
   [[default-port]] for the storeless neutral-dir boot a released jar makes. The
-  base [[daemon-port]] rests at; the argument, `SLOPP_PORT` and the manager's
+  base [[server-port]] rests at; the argument, `SLOPP_PORT` and the manager's
   `slopp.app-port` still override it. Reading `http.port` here is what turns the
   capability from an inert hand-kept duplicate of the port into the one place a
   slopp checkout declares it."
@@ -868,7 +866,7 @@
                                    ;; the session's own label; the THREAD an
                                    ;; agent writes on is what it passes
                                    :slopp.ops/agent-id    (str "mcp-" (subs sid 0 (min 8 (count sid))))})]
-      (swap! session assoc :require-turns? true :daemon? true
+      (swap! session assoc :require-turns? true :server? true
              ;; this process may BE the store's dev instance (the manager told
              ;; it `slopp.managed-for` this dir); the brief says so rather than
              ;; reporting the app it embodies as not running
@@ -895,10 +893,10 @@
   "The CLI session the write door runs a project's calls on, opened on
   first use — opening the project under `slug` if nothing is attached —
   and touched on every call so the reaper knows it is in use. Writable,
-  turn-gated like every real session, carrying the daemon's token as its
+  turn-gated like every real session, carrying the server's token as its
   `:call-token`, the project's reader as its app owner (a delay, like every
   session's) and the project's check queue; its oracle is lazy and
-  budgeted, like every daemon session's, and what it lands is announced."
+  budgeted, like every server session's, and what it lands is announced."
   [dir slug]
   (locking state
     (let [now (System/currentTimeMillis)
@@ -910,7 +908,7 @@
               session (external/open! {:slopp.ops/dir         dir
                                        :slopp.ops/lazy-image? true
                                        :slopp.ops/agent-id    (str "cli-" (subs (str (java.util.UUID/randomUUID)) 0 8))})]
-          (swap! session assoc :require-turns? true :daemon? true
+          (swap! session assoc :require-turns? true :server? true
                  :dev-instance-of (when (live/managed-child-of? dir) dir)
                  :call-token (token)
                  :app-owner owner
@@ -943,13 +941,13 @@
         args (or (:arguments b) {})]
     (cond
       (not= (str (:token b)) (str (token)))
-      (raw 403 {:error "bad or missing token — read it from ~/.slopp/daemon.json"})
+      (raw 403 {:error "bad or missing token — read it from ~/.slopp/server.json"})
 
       (and (string? tool)
            (mcp/write-tool? tool)
            (nil? (:thread args)) (nil? (:agent args)) (nil? (:agent b)))
       (raw 200 {:isError true
-                :text (str "error: a write through the daemon names no thread — it would land"
+                :text (str "error: a write through the server names no thread — it would land"
                            " on a line nothing you know about ever lands. Pass {thread \"…\"}:"
                            " the id from your [slopp] block, or one minted by"
                            " thread_open {} and carried on every later call.")})
@@ -1014,7 +1012,7 @@
   project on the manager's own count is what stopped a dev instance with
   four agents on it. Asked over the child's own `/api/status`, one local
   request on a short timeout; anything but a JSON answer carrying
-  `:sessions` — an app that is not a slopp daemon, a child mid-boot, no app
+  `:sessions` — an app that is not a slopp server, a child mid-boot, no app
   at all — counts as none."
   [p]
   (or (when-let [url (some-> (get-in p [:api :reader]) deref :app-server :url)]
@@ -1046,7 +1044,7 @@
   released), and when no agent holds the project any more — no other MCP session,
   no CLI session, none on its dev instance ([[held?]]) — the project closes too: it leaves the registry and
   everything it held goes. `{:ended sid}`, plus `:closed dir` when the
-  project went; nil for a session this daemon does not hold.
+  project went; nil for a session this server does not hold.
 
   Nothing is landed here. Work lives on the agent's THREAD, which the
   registry keeps whether or not any process holds it; the Stop hook's done
@@ -1149,7 +1147,7 @@
   (mcp.http/endpoint (mcp-doors) req))
 
 (defn ^:export start!
-  "Bind the daemon's listener on `port` (loopback; nil = [[default-port]])
+  "Bind the server's listener on `port` (loopback; nil = [[default-port]])
   and answer immediately: `{:url :port :token}`. Nothing is loaded until
   something attaches — binding first is what fits a client's startup
   window, which a JVM that opened a store before listening would miss. Two
@@ -1160,7 +1158,7 @@
   [port]
   (locking state
     (when (:server @state)
-      (throw (ex-info "this process already runs a daemon" {:port (:port (:server @state))})))
+      (throw (ex-info "this process already runs a server" {:port (:port (:server @state))})))
     (let [srv    (slopp.http/serve! (assoc (serving-opts)
                                            :http/host "127.0.0.1"
                                            :http/port (or port default-port)))
@@ -1170,7 +1168,7 @@
                                    (Thread/sleep 60000)
                                    (try (reap-idle! (System/currentTimeMillis))
                                         (catch Throwable _ nil))))
-                               "slopp-daemon-reaper")
+                               "slopp-server-reaper")
                    (.setDaemon true))
           refresher (doto (Thread. ^Runnable
                                   (fn []
@@ -1178,7 +1176,7 @@
                                       (Thread/sleep 250)
                                       (try (refresh-served-apps!)
                                            (catch Throwable _ nil))))
-                                  "slopp-daemon-refresh")
+                                  "slopp-server-refresh")
                       (.setDaemon true))]
       (swap! state assoc :server srv :reaper reaper :refresher refresher)
       (.start reaper)
@@ -1186,17 +1184,17 @@
       {:url (str "http://127.0.0.1:" (:port srv) "/api/") :port (:port srv) :token (token)})))
 
 ^:unsafe (defn -main
-  "Run the daemon: `slopp daemon [port]`. Normally its own code ships in the
+  "Run the server: `slopp server [port]`. Normally its own code ships in the
   JAR and the directory it is launched in is a NEUTRAL working directory
   (`~/.slopp`, no project store): it serves whatever projects ATTACH, each
   with its own store, and holds no project of its own. (The self-host loop
   passes a checkout dir with `--live`, and then that store IS the code.) It
-  records its address, pid and the write door's token in [[daemon-file]] —
-  `~/.slopp/daemon.json`, or `daemon-<port>.json` for a non-default port —
+  records its address, pid and the write door's token in [[server-file]] —
+  `~/.slopp/server.json`, or `server-<port>.json` for a non-default port —
   owner-readable only, and blocks.
 
   The port rests at slopp's own `http.port` capability ([[configured-port]]);
-  a `slopp daemon [port]` argument, `SLOPP_PORT`, or the manager's
+  a `slopp server [port]` argument, `SLOPP_PORT`, or the manager's
   `slopp.app-port` (for slopp's own dev instance) override it, in that order.
 
   slopp's own DEV instance is this same fn on another port (7358), declared in
@@ -1205,25 +1203,25 @@
   refreshed at every done, replaced by `restart {app true}`. It records itself
   under its own file and leaves the machine's alone.
 
-  A second daemon on the port refuses and names the live one from that
-  file — after asking the OS whether that pid still runs, because a daemon
+  A second server on the port refuses and names the live one from that
+  file — after asking the OS whether that pid still runs, because a server
   that did not exit cleanly leaves its file behind, and naming a dead pid
   as the holder sends someone to kill the wrong thing."
   [& [port]]
-  (let [{p :port err :error} (daemon-port port (System/getenv "SLOPP_PORT")
+  (let [{p :port err :error} (server-port port (System/getenv "SLOPP_PORT")
                                        (System/getProperty "slopp.app-port")
                                        (configured-port!))]
     (if err
-      (do (.println System/err (str "slopp daemon: " err))
+      (do (.println System/err (str "slopp server: " err))
           (System/exit 2))
-      (let [f (daemon-file p)]
+      (let [f (server-file p)]
         (try
           (let [r (start! p)]
             (spit-private! f (json/generate-string
                               {:url (:url r) :port (:port r) :token (:token r)
                                :pid (.pid (java.lang.ProcessHandle/current))
                                :started (System/currentTimeMillis)}))
-            (.println System/err (str "slopp daemon: " (:url r)
+            (.println System/err (str "slopp server: " (:url r)
                                       " (pid " (.pid (java.lang.ProcessHandle/current)) ")"
                                       " — address + token in " (str f)))
             @(promise))
@@ -1233,15 +1231,15 @@
                            (let [h (java.lang.ProcessHandle/of (long pid))]
                              (and (.isPresent h) (.isAlive (.get h)))))]
               (.println System/err
-                        (str "slopp daemon: cannot bind port " p " — "
+                        (str "slopp server: cannot bind port " p " — "
                              (cond
                                alive?
-                               (str "a daemon is already live at " (:url live)
+                               (str "a server is already live at " (:url live)
                                     " (pid " (:pid live) ")")
 
                                live
                                (str (ex-message e) ". " (str f) " names pid " (:pid live)
-                                    ", which is not running — a daemon that did not exit"
+                                    ", which is not running — a server that did not exit"
                                     " cleanly — so something else holds the port")
 
                                :else (ex-message e))))
@@ -1252,7 +1250,7 @@
   nobody has identified it: the `X-Slopp-Agent` header its attach carried,
   else the id its slopp session took when it absorbed a prompt's intent
   (`:intent-sid`, or an `:agent-id` that is no longer the attach-time
-  `mcp-` label). The plugin's prompt hook hands the daemon that id on every
+  `mcp-` label). The plugin's prompt hook hands the server that id on every
   ask, and the session that makes the ask's first tool call claims it — so
   identity arrives without the client saying anything, which it cannot: a
   top-level Claude leaves `${CLAUDE_CODE_SESSION_ID}` in a plugin's .mcp.json
@@ -1271,7 +1269,7 @@
   hooks' CLI session too; the project closes with the last hold ([[held?]]).
   `{:ended [sids] :closed dir}`, `:closed` only when the project went.
 
-  Claude Code does not tell a daemon it left — measured on 2026-09-18: a
+  Claude Code does not tell a server it left — measured on 2026-09-18: a
   one-shot agent's two MCP sessions and its CLI session sat in the registry
   after it exited, until the idle reaper's two hours — so the plugin's
   SessionEnd hook is the exit signal and this is its door.
@@ -1280,7 +1278,7 @@
   per agent and only the one that makes a tool call ever absorbs an intent;
   the sibling would otherwise hold the project for two hours after its agent
   left. Ending a session that turns out to be another agent's fresh one
-  costs that agent one late answer — a request naming a session this daemon
+  costs that agent one late answer — a request naming a session this server
   no longer holds is re-attached where it stands — while a leftover holds a
   dev instance and its images up for nobody. A session identified as another
   agent's is never touched. The reaper stays the backstop for a crash."
@@ -1332,7 +1330,7 @@
       (cond
         (not (store-file? dir)) (text 200 "")
         (not= (str (get-in req [:headers "x-slopp-token"])) (str (token)))
-        (text 403 "bad or missing token — read it from ~/.slopp/daemon.json")
+        (text 403 "bad or missing token — read it from ~/.slopp/server.json")
         :else (do (door! req dir {:tool "done" :token (token)
                                   :arguments {:agent sid :thread sid :label "session pause"}})
                   (text 200 "")))
@@ -1341,7 +1339,7 @@
       ;; the token like the Stop hook's done; the hook script always sends it
       (= "SessionEnd" event)
       (if (not= (str (get-in req [:headers "x-slopp-token"])) (str (token)))
-        (text 403 "bad or missing token — read it from ~/.slopp/daemon.json")
+        (text 403 "bad or missing token — read it from ~/.slopp/server.json")
         (do (when sid (end-agent! dir sid))
             (text 200 "")))
 

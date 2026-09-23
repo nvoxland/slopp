@@ -419,7 +419,7 @@
   `:projects` is the odd one out and belongs here anyway: it is the HUB's
   answer rather than a project's, and it arrives outside the navigate loop —
   which is why nothing headless had it until [[page]] gained a `:boot`."
-  {;; the daemon's own answer, not a project's. One project is STOPPED on purpose:
+  {;; the server's own answer, not a project's. One project is STOPPED on purpose:
    ;; the switcher's claim is that a project which stops answering stays listed,
    ;; disabled and labelled — disappearing from a control mid-session is how a
    ;; reader concludes they imagined it — and a fixture of three healthy
@@ -882,14 +882,14 @@
     ;;
     ;; The path arrives ADDRESSED — `/api/projects/<slug>/modules` — because
     ;; `webapp/fetch!` applies the request's base before handing it to this
-    ;; performer. The project segment is the DAEMON's mount of a project, not
+    ;; performer. The project segment is the SERVER's mount of a project, not
     ;; the project's own endpoint, and [[answers]] is keyed by the latter.
     ;; Stripping it here rather than keying on the whole thing keeps the
     ;; fixture keyed by the endpoint's own path, which is what makes it a fact
     ;; about a URL rather than about which project a screen happened to be
     ;; looking at.
     :call   (fn [request ok _err]
-              ;; **The daemon's OWN routing, not a normalisation.** This used to
+              ;; **The server's OWN routing, not a normalisation.** This used to
               ;; be a strip-the-tenant-if-present regex — look up the rest —
               ;; which made an ADDRESSED request and an UNADDRESSED one
               ;; indistinguishable by construction. The `:modules` session load
@@ -904,7 +904,7 @@
               ;; project a screen happened to be looking at — so the fix is to
               ;; keep the key and VALIDATE the prefix rather than discard it.
               ;;
-              ;; Checked against what the DAEMON serves, deliberately not
+              ;; Checked against what the SERVER serves, deliberately not
               ;; against the request's own `:webapp/base`: a wrong base would
               ;; then validate itself, which is the same defect one level in.
               (let [p    ;; `:http/url`, and the QUERY comes off. A request used to carry
@@ -916,10 +916,10 @@
                          ;; renders as an endpoint that returned nothing.
                          (-> (str (:http/url request))
                              (str/replace #"\?.*$" ""))
-                    ;; the only endpoint this app asks the daemon for at the
+                    ;; the only endpoint this app asks the server for at the
                     ;; ORIGIN: its registry. Everything else is a project's and
                     ;; is reached through that project's mount.
-                    daemon? (= "/api/projects" p)
+                    server? (= "/api/projects" p)
                     own  (some->> (re-matches #"^/api/projects/[^/]+(/.*)$" p) second (str "/api"))]
                 ;; **Matched as PATTERNS, through the app's own router.** [[answers]] is
                 ;; keyed `/api/form/:id`, which is what a reader of the fixture needs
@@ -934,10 +934,10 @@
                 ;; fixture's keys are paths with captures, which is exactly what
                 ;; that function already reads, and a private lookalike would be
                 ;; free to disagree with the router about what `:id` matches.
-                (ok (cond daemon? (get responses (answer-for p))
+                (ok (cond server? (get responses (answer-for p))
                           own  (get responses (answer-for own))
                           ;; a project endpoint asked at the origin. The real
-                          ;; daemon 404s it; answering nil here is what lets a
+                          ;; server 404s it; answering nil here is what lets a
                           ;; screen test SEE that, which is the whole point.
                           :else nil))))
     :render (fn [_])}))

@@ -1292,7 +1292,7 @@
   ;; verifies green, and a value DERIVED from it elsewhere in the namespace
   ;; is never re-evaluated — so the store cannot cold-load while every
   ;; check says green, and the live host goes on serving old definitions.
-  ;; Under one daemon that is every project's tooling. done reloads the
+  ;; Under one server that is every project's tooling. done reloads the
   ;; touched namespaces whole, and a namespace that will not load is RED
   ;; and lands nothing.
   (let [sess (external/open!)]

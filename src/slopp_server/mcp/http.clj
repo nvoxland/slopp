@@ -1,8 +1,8 @@
 (ns slopp-server.mcp.http
-  "MCP over STREAMABLE HTTP: the envelope a daemon speaks to every agent on
+  "MCP over STREAMABLE HTTP: the envelope a server speaks to every agent on
   the machine. One endpoint per project, one JSON-RPC message (or batch) per
   POST, plain-JSON answers; a session minted on initialize (`Mcp-Session-Id`)
-  is what the daemon counts as an attachment. The dispatch is
+  is what the server counts as an attachment. The dispatch is
   `slopp.mcp/handle!`, unchanged."
   (:require [cheshire.core :as json]
             [slopp-server.mcp :as mcp] [clojure.string :as str]))
@@ -44,7 +44,7 @@
                    :map]}
   endpoint
   "Answer one HTTP request at a project's MCP endpoint. `doors` is what the
-  daemon lends this envelope: `::lookup` (session id → slopp session, or
+  server lends this envelope: `::lookup` (session id → slopp session, or
   nil), `::attach!` (request → `{:sid :session}` or `{:error}` — opens the
   project when it must) and `::detach!` (session id → ends it).
 
@@ -54,11 +54,11 @@
   that produced no response (notifications only) is `202` with no body;
   the answer is plain JSON, which a client that accepts an event stream
   accepts too. GET — a standalone stream for server-initiated messages —
-  is `405`, which the client tolerates: push arrives with the daemon's
+  is `405`, which the client tolerates: push arrives with the server's
   stream later, and nothing here pretends to it. DELETE ends the session.
 
-  A request naming a session this daemon does not hold — or naming none —
-  is ATTACHED when it names its project (`X-Slopp-Dir`): the daemon
+  A request naming a session this server does not hold — or naming none —
+  is ATTACHED when it names its project (`X-Slopp-Dir`): the server
   restarted or reaped an idle session, and the spec's answer — 404, client
   re-initializes — is one a stdio client behind the pipe can never give,
   so a 404 was a dead session until a human reconnected. The answer carries
@@ -84,7 +84,7 @@
                 named? (not (str/blank? (str (get-in req [:headers "x-slopp-dir"]))))
                 a      (cond
                          init? (attach! req)
-                         ;; a session this daemon does not hold — or none at all
+                         ;; a session this server does not hold — or none at all
                          ;; — from a client that names its dir: attach where it
                          ;; stands. A pipe that lost its session after a restart
                          ;; may send nothing, and that is the same trust as an

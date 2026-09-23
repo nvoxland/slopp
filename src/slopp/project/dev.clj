@@ -64,10 +64,10 @@
   `dev` PROJECTS: it is the setup anyone who clones the project gets, complete
   enough to serve without a step. `dev.local` stays in the db: it is what lets
   one developer move the dev instance to a port this box has free, or two
-  daemons on one store run their dev instances apart, without pushing that
+  servers on one store run their dev instances apart, without pushing that
   choice at anyone. A dev SETTING rather than overriding `http.port` directly
   because `http.port` is the PRODUCTION address — for slopp's own store the
-  machine daemon's — and the in-progress copy must not take it."
+  machine server's — and the in-progress copy must not take it."
   [store k]
   (when-let [entry (capabilities/find-entry k)]
     (some (fn [raw]

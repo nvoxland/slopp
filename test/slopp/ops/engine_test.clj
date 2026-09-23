@@ -728,7 +728,7 @@
   ;; The writer arranges definitions before callers at every write. A session
   ;; that absorbs those writes by INCREMENTAL REPLAY appends the added form
   ;; and trusts the derived order at render time — and rendered the helper
-  ;; AFTER its caller three times tonight, each found by the dev daemon's
+  ;; AFTER its caller three times tonight, each found by the dev server's
   ;; cold boot, which renders from a foreign session's value: `Unable to
   ;; resolve symbol`. Both sessions must render the same bytes; a fresh open
   ;; (from rows) is the control.
@@ -764,7 +764,7 @@
   ;; Three times in one evening a `change` group added a private helper and
   ;; replaced an earlier form to call it; the writer's own value arranged
   ;; the helper first, every warm check was green, and a fresh boot of the
-  ;; namespace from the daemon's READER — a session on the branch line, the
+  ;; namespace from the server's READER — a session on the branch line, the
   ;; one shape that absorbs a landing by incremental REPLAY rather than by
   ;; re-forking and reloading from rows — found the helper after its caller:
   ;; `Unable to resolve symbol`. The writer, the replaying reader, and a

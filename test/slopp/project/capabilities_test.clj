@@ -461,7 +461,7 @@
 (deftest the-override-env-var-name-is-uppercase-underscores
   (is (= "SLOPP_DEV_HTTP_PORT" (capabilities/env-var-name "dev" "http.port")))
   (is (= "SLOPP_CAPABILITIES_HTTP_PORT" (capabilities/env-var-name "capabilities" "http.port")))
-  (is (= "SLOPP_DEV_RUN_DAEMON_PORT" (capabilities/env-var-name "dev" "run.daemon.port")))
+  (is (= "SLOPP_DEV_RUN_SERVER_PORT" (capabilities/env-var-name "dev" "run.server.port")))
   (testing "dashes in a key become underscores too — env names take neither dot nor dash"
     (is (= "SLOPP_CAPABILITIES_HTTP_MAX_BODY_BYTES"
            (capabilities/env-var-name "capabilities" "http.max-body-bytes")))))

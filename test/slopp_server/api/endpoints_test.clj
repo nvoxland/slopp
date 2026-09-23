@@ -163,10 +163,10 @@
                                                     :uri uri})))]
       (is (= 200 (get* "/api/projects/demo/namespaces")))
       (is (= 200 (get* "/api/projects/demo/rest/paths")))
-      ;; the pages are the DAEMON's, served beside its registry. Asserting
+      ;; the pages are the SERVER's, served beside its registry. Asserting
       ;; their ABSENCE here is the half worth keeping: a page reappearing on a
       ;; project's own context would mean slopp had quietly grown a second
-      ;; renderer alongside the daemon's, which is the drift the :cljc views
+      ;; renderer alongside the server's, which is the drift the :cljc views
       ;; were split out to prevent in the first place.
       (is (= 404 (get* "/")))
       (is (= 404 (get* "/store")))
@@ -368,9 +368,9 @@
   ;; lossy and nothing downstream is worth building.
   ;;
   ;; Two processes' worth of separation in one JVM: the producer serves over a
-  ;; real socket — the daemon's ONE route table bound here on an ephemeral
+  ;; real socket — the server's ONE route table bound here on an ephemeral
   ;; port, resolving every slug to the producer session via :open-reader,
-  ;; exactly as the daemon resolves a project — and the consumer is a
+  ;; exactly as the server resolves a project — and the consumer is a
   ;; genuinely separate session and store.
   (let [;; the producer DECLARES its API, because the published document now
         ;; follows the store rather than the listener's own served list — a
@@ -383,8 +383,8 @@
                                      "(defn ^{:http/path \"/api/timeline\" :http/method :get"
                                      " :http/auth :public}\n  timeline \"T.\" [_] {:status 200})\n"))})
         consumer (external/open!)
-        ;; the daemon's one surface, single-session: every slug resolves to the
-        ;; producer, the way server/context does for a test and the daemon does
+        ;; the server's one surface, single-session: every slug resolves to the
+        ;; producer, the way server/context does for a test and the server does
         ;; from its registry
         srv      (slopp.http/serve! {:http/namespaces server/served-namespaces
                                      :http/wrap-context slopp.rest/validating

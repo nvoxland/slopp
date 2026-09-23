@@ -94,7 +94,7 @@
 
   A session opened on a dir with NO store yet has no connection, and the
   store can appear afterwards — somebody else's first durable write creates
-  it, which under the daemon is the ordinary shape: attach, then write.
+  it, which under the server is the ordinary shape: attach, then write.
   Such a session ATTACHES here once the file exists: a connection, its line
   adopted on it, its value reloaded. Without this it stayed blind to
   everything that ever landed, while reporting an empty store as current."
@@ -2349,7 +2349,7 @@
 
   A LAZY session (`:boot-image!` on the atom, no image yet) boots here, once,
   under the session lock, at the store's current head — this is the first
-  call that needed one. Before it boots, `:image-permit` — a fn the daemon
+  call that needed one. Before it boots, `:image-permit` — a fn the server
   lends, answering nil or a refusal — is asked: a machine-wide budget lives
   with the one process that sees every image, and the refusal names the
   fix. A boot failure throws to the caller as a sync open's would; the
@@ -3453,7 +3453,7 @@
         last-done (when-let [conn (:db @session)]
                     ;; guarded on the connection like the thread and host
                     ;; clauses: a session on a dir with no store yet — the
-                    ;; daemon's first on a fresh project — has nothing to ask
+                    ;; server's first on a fresh project — has nothing to ask
                     (let [d (db/last-marker conn (engine/session-line session) :done)]
                       (when (and d (or (= :red (get-in d [:findings :test-status]))
                                        (pos? (get-in d [:findings :lint-errors] 0))))
@@ -3500,7 +3500,7 @@
         ;; Every capability reads nil while the projection shows the declaration
         ;; plainly, which is why it has to be said HERE, beside the app line.
         blobbed  (not-empty (store/blobbed-config-paths st))
-        ;; under the daemon the app server is the PROJECT's, held by its owner
+        ;; under the server the app server is the PROJECT's, held by its owner
         ;; session; this session mirrors it only after a refresh it ran itself.
         ;; Read the owner's when it is already open — never force it: an
         ;; orientation must not be the thing that opens a reader.
@@ -3583,12 +3583,12 @@
       ;; drift in a since-retired check-in protocol instead, because the fact
       ;; it needed was not here to read.
       unread     (assoc :unread-declarations unread)
-      ;; this project's READ API on the daemon — `/api/projects/<slug>`, the
+      ;; this project's READ API on the server — `/api/projects/<slug>`, the
       ;; `/api/<resource>` of its contract mounted there: JSON, plus the
       ;; surface documents under it. The address to hand a PROGRAM (a client
-      ;; generator, a script). A HUMAN gets :pages — the daemon's own pages
+      ;; generator, a script). A HUMAN gets :pages — the server's own pages
       ;; for this project, `/p/<slug>`, which read that same API. Both set by
-      ;; the daemon at attach; a session attached with nothing bound (a test
+      ;; the server at attach; a session attached with nothing bound (a test
       ;; on the registry alone) has no line here to hand out.
       (:api-url @session) (merge {:api (:api-url @session)}
                                  (when-let [p (:pages-url @session)] {:pages p}))
@@ -3633,14 +3633,14 @@
       ;; of itself, so "none is running" would describe the process answering
       (and (nil? app) declared (:dev-instance-of @session))
       (assoc :app-note (str "this process IS this store's dev instance (" declared "),"
-                            " booted by the machine daemon and refreshed at each done"
+                            " booted by the machine server and refreshed at each done"
                             " there; it serves you and manages no app of its own"))
       (and (nil? app) declared (not (:dev-instance-of @session)))
       (assoc :app-note (str "this store declares an app (" declared ") but none is"
-                            " running in this session's view: the daemon"
+                            " running in this session's view: the server"
                             " starts it on the project's first attach and"
                             " re-serves it at each done. If it stays absent, the"
-                            " daemon's stderr carries the boot verdict"
+                            " server's stderr carries the boot verdict"
                             (when blobbed
                               (str " — and see :config-blobbed: " (str/join ", " blobbed)
                                    " exist only as tracked files"))))

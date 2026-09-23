@@ -63,7 +63,7 @@
   someone's browser.
 
   **None of these is `/api`.** A client path is prefixed to `/p/<slug>/…`
-  before the browser sees it, and `/p/:slug/api/**` is the hub's proxy route —
+  before the browser sees it, and `/p/:slug/api/**` is the slopp server's proxy route —
   so `/api/…` would be swallowed by the proxy and answered 200 with a project's
   JSON. A section whose failure mode is rendering someone else's response body
   is worse than one that 404s. `/rest`, `/http` and `/webapp` are outside it."
@@ -120,10 +120,10 @@
            (if (#{"ws" "text"} cls) text [:span {:class cls} text]))]])
 
 (defn project-switcher
-  "The top-nav control for moving between the projects the daemon holds, or
+  "The top-nav control for moving between the projects the server holds, or
   nil when there is nothing to move between.
 
-  Nil is the ORDINARY case, not a failure: one project alone on a daemon has
+  Nil is the ORDINARY case, not a failure: one project alone on a server has
   nothing to switch to, and an empty dropdown would take up the same space
   to say the same nothing.
 
@@ -138,7 +138,7 @@
   address, so an option carrying one too would be the same fact written twice
   and free to disagree. Every listed project is open, so nothing here is
   disabled or labelled gone — that state existed for a heartbeat registry
-  and the daemon's has no such row."
+  and the server's has no such row."
   [projects current]
   (when (seq projects)
     (into [:select {:class "project-switcher" :data-region "nav/switcher"
@@ -1672,7 +1672,7 @@
    ;; the fixture answers by path and a made-up var would drive a not-found
    ;; page while looking like a screen that rendered.
    {:screen :http-path    :path "/p/:slug/http/paths/:ns/:name"
-    :sample {:slug "demo" :ns "slopp-server.ui.hub" :name "shell"}}
+    :sample {:slug "demo" :ns "slopp-server.ui.shell" :name "shell"}}
    ;; and likewise a real PAGE of this store, for the same reason.
    {:screen :webapp-page  :path "/p/:slug/webapp/pages/:ns/:name"
     :sample {:slug "demo" :ns "slopp-server.ui.pages" :name "code-page"}}
@@ -1917,12 +1917,12 @@
                            (conj " " (tier-mark (:tier m)))))))))])))
 
 (defn project-picker
-  "The landing page: one row per project the daemon holds, each a link into
+  "The landing page: one row per project the server holds, each a link into
   it.
 
-  A listed project is OPEN — the daemon lists a project exactly while
+  A listed project is OPEN — the server lists a project exactly while
   something is attached to it — so there is no stale row to grey and no
-  last-seen to age; the row says what is attached and, when the daemon runs
+  last-seen to age; the row says what is attached and, when the server runs
   the project's app, where that answers."
   [projects]
   ;; `:data-region "main"` because this screen gets no `app-shell` — it is a
@@ -1932,7 +1932,7 @@
   [:div {:class "landing" :data-region "main"}
    [:h1 "slopp"]
    [:p {:class "landing-tagline"}
-    (if (seq projects) "Projects open on this daemon" "Nothing is open on this daemon")]
+    (if (seq projects) "Projects open on this server" "Nothing is open on this server")]
    (if (seq projects)
      (into [:ul {:class "projects"}]
            (for [{:keys [slug dir sessions app]} projects]
@@ -2283,7 +2283,7 @@
         (nil? hits)
         [:p {:class "src-gap"}
          [:small (str "this project does not answer GET /api/search, so "
-                      "nothing here could be looked up. The hub fronts "
+                      "nothing here could be looked up. The slopp server fronts "
                       "projects from different slopp releases on purpose, and "
                       "an older one will not have it")]]
 
@@ -2984,13 +2984,13 @@
       (assoc data :picture pic)
       data)))
 
-(def daemon-projects
-  "The daemon's registry, as a descriptor measured from the ORIGIN — the one
+(def server-projects
+  "The server's registry, as a descriptor measured from the ORIGIN — the one
   request this app makes that is not a project's.
 
-  It is the generated descriptor for `GET /api/projects`: the daemon's own
+  It is the generated descriptor for `GET /api/projects`: the server's own
   endpoints are declared beside every project's and published in the same
-  contract, so the registry's rows are typed by the contract the daemon
+  contract, so the registry's rows are typed by the contract the server
   publishes, not by a copy kept here. **`:webapp/base \"\"` means measured
   from the origin**, which is why this cannot go through [[at-project]]:
   every other request this app makes is mounted under a project."
@@ -3000,8 +3000,8 @@
   "The endpoint `descriptor`, measured against the project the route names.
 
   **The slug is ROUTE STATE, which is why this is per-request.** This app talks
-  to two APIs: the daemon's own, at the origin, and whichever project the
-  reader is looking at, which the daemon MOUNTS at `/api/projects/<slug>/…`.
+  to two APIs: the server's own, at the origin, and whichever project the
+  reader is looking at, which the server MOUNTS at `/api/projects/<slug>/…`.
   A single app-level `:webapp/base` cannot serve both — and under a root
   shell it cannot serve the second alone, because the slug changes when the
   project switcher is used and nothing re-stamps a page-load attribute
@@ -3014,10 +3014,10 @@
 
   **The mount REPLACES the producer's prefix; it does not nest under it.** A
   project's contract declares `/api/modules` — `/api` being that store's own
-  API partition — and the daemon serves it at `/api/projects/<slug>/modules`:
+  API partition — and the server serves it at `/api/projects/<slug>/modules`:
   one root, no second `/api` inside. So the descriptor's path loses the
   prefix the base stands in for, and the two halves join to the address the
-  daemon actually answers. The prefix is the one every published contract
+  server actually answers. The prefix is the one every published contract
   spells (`rest.prefix`, `/api` unless a store moves it), which is why it is
   a constant here rather than read off the descriptor: a descriptor carries
   the path, not the partition it sits in.
@@ -3037,7 +3037,7 @@
          :http/path   (str/replace-first (str (:http/path descriptor)) #"^/api(?=/|$)" "")))
 
 (defn page-params
-  "The ADDRESS captures for content page `page` — `{:ns \"slopp-server.ui.hub\" :name \"shell\"}`
+  "The ADDRESS captures for content page `page` — `{:ns \"slopp-server.ui.shell\" :name \"shell\"}`
   — or nil when its `:handler` is not a qualified symbol.
 
   **A content page is addressed by its VAR, where an endpoint is addressed by
@@ -3163,7 +3163,7 @@
 (defn page-main
   "ONE content page, in full — the screen [[pages-main]] links to.
 
-  `address` is `{:ns \"slopp-server.ui.hub\" :name \"shell\"}`, the var rather than the
+  `address` is `{:ns \"slopp-server.ui.shell\" :name \"shell\"}`, the var rather than the
   path, because a page served at `/` has no path to address it by. See
   [[page-params]].
 

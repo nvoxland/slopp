@@ -1701,7 +1701,7 @@
       (is (nil? @went) "an empty selection navigated somewhere"))))
 
 (deftest a-page-may-answer-a-REDIRECT-and-the-framework-follows-it-in-place
-  ;; The daemon's landing lists the open projects, and a list of ONE is not a
+  ;; The server's landing lists the open projects, and a list of ONE is not a
   ;; choice: the reader clicks the only row every time. A page can send them
   ;; on — but a page is pure and the framework owns navigation, so the page
   ;; ANSWERS the redirect as data and the framework performs it here, where a

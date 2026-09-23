@@ -1,7 +1,7 @@
 (ns slopp-server.ui.basepath
   "Taking a query string off a path. One function, [[split-query]], is what is
   left of a namespace that once added and removed the prefix a reverse proxy
-  served this app under: the daemon serves the pages itself now, and
+  served this app under: the server serves the pages itself now, and
   `slopp.webapp/strip-base` and `prefix-links` do that arithmetic, so
   `prefixed`, `strip` and `normalize` had test callers only and went.
 

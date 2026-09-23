@@ -561,7 +561,7 @@
       (let [sw (cljnx/text s "nav/switcher")]
         (is (re-find #"<option value=\"slopp2\">slopp2</option>" sw))
         (is (not (re-find #"disabled" sw))
-            "every listed project is open — the daemon lists a project exactly while
+            "every listed project is open — the server lists a project exactly while
              something is attached, so nothing is disabled or labelled gone")
         ;; **the handlers are the assertion that would have caught the bug.**
         ;; For a month this rendered the options above and carried no handler
@@ -615,9 +615,9 @@
         (is (re-find #"the answer" out))
         (is ;; MEASURED from the project: the request carries the project's
             ;; `:webapp/base`, the performer records it once ADDRESSED, and so
-            ;; the panel shows the url the daemon actually answers — the mount
+            ;; the panel shows the url the server actually answers — the mount
             ;; joined to the endpoint's path. Built from the raw row this read
-            ;; `/api/module/slopp.ops`, which the daemon does not serve. The
+            ;; `/api/module/slopp.ops`, which the server does not serve. The
             ;; map is no longer all-`:http`, so it prints plain; read by the
             ;; tail of the key.
             (re-find #"url \"/api/projects/demo/module/slopp\.ops\"" out))
@@ -1243,7 +1243,7 @@
 
     (testing "the Review screen renders at all — it is a project's root, and it
               threw for as long as this fixture was missing"
-      ;; `/p/demo/`, not `/`. The app's `/` is the daemon's LANDING — the
+      ;; `/p/demo/`, not `/`. The app's `/` is the server's LANDING — the
       ;; picker, which lists projects; the Review section is the root of one.
       (cljnx/visit! s (at "/"))
       (is (re-find #"(?m)^<h1>review</h1>$" (cljnx/text s "main"))))
@@ -1336,7 +1336,7 @@
   ;; **The test that would have caught it, written after it did not.**
   ;;
   ;; The framework builds every url, and once it did, every screen fetched
-  ;; `/api/modules` at the ORIGIN root — which the daemon answers 404 for. The
+  ;; `/api/modules` at the ORIGIN root — which the server answers 404 for. The
   ;; whole app, not one pane. **The suite was green throughout**, because
   ;; `page/responses` cans the performer BY PATH: a fixture keyed by the url it
   ;; expects agrees with whatever the code sends it.
@@ -1374,8 +1374,8 @@
             @asked)]
 
     (testing "a screen's request is measured against the project in its address
-              — and the daemon's mount for that project is what the url names"
-      ;; `/api/projects/demo` is the DAEMON's mount for the project; `/modules`
+              — and the server's mount for that project is what the url names"
+      ;; `/api/projects/demo` is the SERVER's mount for the project; `/modules`
       ;; is the PROJECT's own path with the contract's `/api` prefix replaced
       ;; by the mount — emitted by the generated descriptor with no slug in
       ;; it. Two api spaces that share a word, owned by different stores.
@@ -1414,7 +1414,7 @@
             "and the table lens asks for nothing further — same request, same
              load, which `ask!` answers from what the first one started")))
 
-    (testing "the LANDING asks the daemon's own registry at the origin, not a project's"
+    (testing "the LANDING asks the server's own registry at the origin, not a project's"
       (is (= ["/api/projects"] (go (fresh) "/"))))
 
     (testing "a page with nothing to ask for asks for NOTHING rather than for
@@ -1517,7 +1517,7 @@
                (app/try-request st ""))
             (str "measured from the PROJECT, like every other request this app"
                  " makes: built from the raw row it went to the origin's"
-                 " /api/module/…, which the daemon does not serve — "
+                 " /api/module/…, which the server does not serve — "
                  (pr-str (app/try-request st ""))))))
 
     (testing "on a screen that is not one endpoint's page there is nothing to
@@ -1804,7 +1804,7 @@
       (cljnx/fill! s "switch project" "demo")
       (is (= ["/p/slopp2" "/p/demo"] @left)))
 
-    (testing "a project the daemon does not hold cannot be chosen — the driver
+    (testing "a project the server does not hold cannot be chosen — the driver
               refuses a value a browser would not let a reader produce, which
               is also why no guard for it lives in the view"
       (is (thrown? Exception (cljnx/fill! s "switch project" "nonesuch")))

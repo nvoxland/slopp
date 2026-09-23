@@ -690,7 +690,7 @@
   then — if another client write set `:dirty?` while we compiled — clear it and
   compile AGAIN (coalescing), else set `:running?` false and stop. Each
   outcome is stored on `guard` under `:last`, surfaced on a later write; a
-  compile error is captured, never thrown into the daemon."
+  compile error is captured, never thrown into the server."
   [session guard]
   (loop []
     (let [outcome (try
@@ -712,7 +712,7 @@
   "Single-flight (D-web-cljs (c) async): start a background compile thread only
   if none is running; otherwise mark the in-flight one `:dirty?` so it compiles
   once more when it finishes. `swap-vals!` gives the pre-swap state, so exactly
-  the false→true transition starts the daemon."
+  the false→true transition starts the server."
   [session]
   (let [guard   (client-compile-guard! session)
         [old _] (swap-vals! guard

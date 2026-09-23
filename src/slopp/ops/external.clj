@@ -892,7 +892,7 @@ client-deps (merge (:client-deps st) (:client provided))
 
   `:slopp.ops/lazy-image? true` boots NO image until something needs one:
   `await-image!` boots it on the first oracle or write call, at the store's
-  head as of THEN. The daemon opens every session this way — a session that
+  head as of THEN. The server opens every session this way — a session that
   only reads never pays for a child JVM, and most sessions (subagents,
   readers, the write door between bursts) only read. The cache stays
   current without an image (`sync-with-journal!`).
@@ -1886,7 +1886,7 @@ client-deps (merge (:client-deps st) (:client provided))
   the number is four hundred times larger.
 
   **The QUEUE is the same courtesy across sessions.** A session carrying
-  `:check-queue` — an atom the daemon shares among every session on a
+  `:check-queue` — an atom the server shares among every session on a
   project — keys a run IN FLIGHT by its line's elements digest AND the
   store's content signature: two threads holding identical content share it,
   where their heads differ by markers, and two holding different edits of
@@ -1985,7 +1985,7 @@ client-deps (merge (:client-deps st) (:client provided))
 
 (defn- app-boot-failure
   "The dev instance's last boot failure this session knows of, or nil: its
-  own record, else the app OWNER's (a project's reader under the daemon)
+  own record, else the app OWNER's (a project's reader under the server)
   when that owner has been opened — never opening one to ask. The verdict
   half of what `refresh-app!` records: an instance that will not boot is
   the store's red until it does."
@@ -2418,7 +2418,7 @@ client-deps (merge (:client-deps st) (:client provided))
                ;; a stale entry can accumulate at
                (ops/refresh-index! session)
                (let [l (branch/land-thread! session)]
-                 ;; the daemon lends `:on-landed`: what this session landed
+                 ;; the server lends `:on-landed`: what this session landed
                  ;; is announced to every other session on the project
                  (when (and (:landed l) (:on-landed @session))
                    (try ((:on-landed @session) l) (catch Throwable _ nil)))

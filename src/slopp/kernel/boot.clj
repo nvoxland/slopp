@@ -142,12 +142,12 @@
   "Parse boot's CLI: <dir> [--main ns/fn arg...]. Everything after the --main
   symbol passes through to it verbatim (:args); with no explicit args the main
   receives [dir] (the app convention). With no --main at all the entry is the
-  DAEMON, `slopp-server.process/-main`, with no args: the dir is what boot loads
+  SERVER, `slopp-server.process/-main`, with no args: the dir is what boot loads
   slopp's code from and never the port, so a bare `java -jar slopp.jar <dir>`
   is one slopp for the machine on the default port.
 
   `--call` is retired — a tool call from a shell is `slopp <op> '{…}'`, routed
-  to the daemon. The kernel loads a store's program ONCE and runs it; it does
+  to the server. The kernel loads a store's program ONCE and runs it; it does
   not reload, and there is no live/snapshot switch. A process that must track
   its store as it changes is a dev instance the MANAGER re-serves, not a mode
   of boot."
@@ -158,8 +158,8 @@
         extra (vec (drop 2 post))]
     (when (= "--call" (first post))
       (throw (ex-info (str "--call is retired: a one-shot JVM opened the store with no"
-                           " daemon and stranded its writes. Run `slopp <op> '{…}'` —"
-                           " it routes to the machine's daemon, the one `slopp daemon` started.")
+                           " server and stranded its writes. Run `slopp <op> '{…}'` —"
+                           " it routes to the machine's server, the one `slopp server` started.")
                       {:args (vec args)})))
     (if (second post)
       {:dir   dir
@@ -239,7 +239,7 @@
   A measurement against the store's CURRENT sources — rather than a reload
   log — makes a deleted namespace simply absent from `now`, so it can never be
   stale. The kernel loads once and does not track, so drift here is the store
-  having moved ahead of what this process loaded (a snapshot daemon behind the
+  having moved ahead of what this process loaded (a snapshot server behind the
   store), cleared by a rebuild + restart."}
   host-loaded
   (atom {:armed? false :nses {} :stale nil}))
@@ -798,24 +798,24 @@
 (defn boot-note
   "The single line boot logs about where it loaded slopp's program from,
   decided after [[load-store!]] runs. `loaded?` is whether any namespace came
-  from the store at `dir`; `daemon?` whether the entry is the machine daemon.
+  from the store at `dir`; `server?` whether the entry is the machine server.
 
-  The daemon loads its own code from the JAR's classpath, so an empty `dir`
+  The server loads its own code from the JAR's classpath, so an empty `dir`
   is not a project it serves — it reads no store there and writes none. Saying
   otherwise (the unadopted-directory / first-write-creates-a-store line) made
-  a neutral working directory look like a project the daemon adopts and
-  manages. A NON-daemon boot that finds no store genuinely IS serving that
+  a neutral working directory look like a project the server adopts and
+  manages. A NON-server boot that finds no store genuinely IS serving that
   directory, so it keeps that message. A boot that DID load a program says so
-  — that covers both a source checkout and the daemon self-host loop, where
+  — that covers both a source checkout and the server self-host loop, where
   the code really does come from the dir's store."
-  [{:keys [daemon? loaded? store-file? dir mode]}]
+  [{:keys [server? loaded? store-file? dir mode]}]
   (cond
     loaded?
     (str "slopp.kernel.boot: loaded slopp's program from the store at " dir " (" mode ")")
 
     
 
-                daemon?
+                server?
     nil
 
     store-file?
@@ -839,21 +839,21 @@
 
   The kernel loads a store's program ONCE and runs it — it does not reload.
   A process that must track its store AS IT CHANGES is a DEV INSTANCE, and
-  keeping it current is the MANAGER's job: the daemon re-serves a managed
-  child at each done (slopp.webdev.live). The daemon itself, and any built
+  keeping it current is the MANAGER's job: the server re-serves a managed
+  child at each done (slopp.webdev.live). The server itself, and any built
   app, boot their code and serve it unchanged until restarted.
 
-  The daemon is the ordinary entry, and its code ships in the jar, so booting
+  The server is the ordinary entry, and its code ships in the jar, so booting
   it from a neutral dir loads NO store from that dir — [[boot-note]] says so
   rather than treating the working directory as a project to adopt."
   [& args]
   (let [{:keys [dir main args]} (parse-args args)
-        daemon? (= main 'slopp-server.process/-main)]
+        server? (= main 'slopp-server.process/-main)]
     (reset! boot-info {:dir dir
                        :mode :snapshot
                        :booted-at (System/currentTimeMillis)})
     (let [sources (load-store! dir)]
-      (when-let [note (boot-note {:daemon?     daemon?
+      (when-let [note (boot-note {:server?     server?
                                   :loaded?     (boolean (seq sources))
                                   :store-file? (.exists (io/file dir ".slopp" "store.db"))
                                   :dir         dir

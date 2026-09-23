@@ -1,8 +1,8 @@
 (ns slopp-server.ui.shell
-  "The application document the daemon serves at every page address: one
+  "The application document the server serves at every page address: one
   stored value, completed by the framework with the bundle script and the
   mount prefix. Lifted from the retired slopp-ui hub, where it was the only
-  page that process served; the daemon serves it beside every project's API."
+  page that process served; the server serves it beside every project's API."
   (:require [slopp-server.ui.styles]))
 
 (def ^{:http/method :get :http/path "/**" :http/auth :public

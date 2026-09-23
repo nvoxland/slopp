@@ -1,7 +1,7 @@
 (ns slopp-server.telemetry
   "Where the HARNESS's telemetry crosses the transport: [[decode]] turns
   whatever shape a server handed the export body in into a batch or a
-  refusal, and nothing else. The sink itself is the daemon's declared
+  refusal, and nothing else. The sink itself is the server's declared
   endpoint (`slopp-server.process/otel-endpoint`, one per machine), which routes
   each record to the project holding its thread; it used to be a route row
   on every project's own listener, and that listener is gone.

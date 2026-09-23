@@ -275,7 +275,7 @@
         two    (conj one {:slug "other" :dir "/w/other" :opened-at 0 :sessions 2 :cli true :app nil})
         render (fn [projects]
                  (pages/landing-page
-                  (probe! {:path "/"} {} [[views/daemon-projects {} projects]])))]
+                  (probe! {:path "/"} {} [[views/server-projects {} projects]])))]
     (is (= {:webapp/redirect "/p/only"} (render one))
         "one open project: the reader is sent into it, not shown a list of it")
     (is (vector? (render two)) "two are a choice, and the list is the page")

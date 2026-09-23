@@ -167,7 +167,7 @@
                          ;; inside the room
                          :nav/search   (views/search-box (:q params))
                          ;; the HUB's answer rather than a project's, which is
-                         ;; why [[slopp-server.ui.views/daemon-projects]] names an empty
+                         ;; why [[slopp-server.ui.views/server-projects]] names an empty
                          ;; base instead of going through `at-project`.
                          ;; **the current project comes from the ADDRESS, not from state.** It
                          ;; was `(:project state)`, written by the browser entry's
@@ -178,7 +178,7 @@
                          ;; same fact without the DOM read, and removing that read
                          ;; is what lets slopp generate this app's browser entry.
                          :nav/switcher (views/project-switcher
-                                        (:value (webapp/ask! page views/daemon-projects {}))
+                                        (:value (webapp/ask! page views/server-projects {}))
                                         slug)
                          ;; nil for a subject with no lenses, which app-shell
                          ;; leaves out entirely rather than rendering empty. The
@@ -236,13 +236,13 @@
     [:main {:class "load-pending"} [:p [:small "Loading…"]]]))
 
 (defn ^{:webapp/path "/"} landing-page
-  "The landing screen at `/` — the projects open on this daemon, or the one
+  "The landing screen at `/` — the projects open on this server, or the one
   project when there is exactly one.
 
   **`/` is a client route.** It was a server-rendered page: `hub/picker` read
   the registry and answered HTML, because the app was mounted per project and
   the landing sat outside every mount. With one shell at the root the landing
-  is an ordinary page, fed by the daemon's own `/api/projects`.
+  is an ordinary page, fed by the server's own `/api/projects`.
 
   **One open project is not a choice, so the reader is sent into it.** The
   page answers `{:webapp/redirect \"/p/<slug>\"}` and the framework performs
@@ -253,9 +253,9 @@
   nothing to decide on and shows the list's pending state.
 
   The one page that does NOT go through [[slopp-server.ui.views/at-project]]: there is
-  no project in the address to measure against, and the endpoint is the daemon's."
+  no project in the address to measure against, and the endpoint is the server's."
   [page]
-  (let [answer   (webapp/ask! page views/daemon-projects {})
+  (let [answer   (webapp/ask! page views/server-projects {})
         projects (:value answer)]
     (if (and (= :ready (:status answer)) (= 1 (count projects)))
       {:webapp/redirect (str "/p/" (:slug (first projects)))}
@@ -404,7 +404,7 @@
 (defn ^{:webapp/path "/p/:slug/http/paths/:ns/:name" :unused-ok "runtime-resolved entry — see landing-page"} content-page
   "One static page's detail — what it serves and what its value is.
 
-  **Addressed by VAR, not by path.** `hub/shell` is served at `/`, so under a
+  **Addressed by VAR, not by path.** `shell/shell` is served at `/`, so under a
   `/pages/**` address its own address would be `/pages/` with an empty
   remainder — unaddressable. A content form always has a public var, so `:ns`
   plus `:name` is total and unambiguous.

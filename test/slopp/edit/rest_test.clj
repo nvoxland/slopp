@@ -130,7 +130,7 @@
   ;; Nathan, 2026-08-23: "there should be no allowed intersection between rest
   ;; APIs and general http content." The partition is what makes `/api/*` mean
   ;; something a proxy, a CSP or a reader can rely on WITHOUT consulting
-  ;; metadata — the daemon mounts every project's API at
+  ;; metadata — the server mounts every project's API at
   ;; `/api/projects/<slug>/<resource>` on exactly that assumption, which
   ;; nothing was enforcing.
   ;;

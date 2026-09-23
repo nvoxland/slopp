@@ -3468,7 +3468,7 @@
 (deftest ^:external the-cli-door-routes-to-the-running-server
   ;; s12c: opus reached for `slopp --call` unprompted and found the cold
   ;; path — JVM boot + whole-store load + silent minutes — and spent 8
-  ;; turns babysitting it. The daemon was right there: the ui listener
+  ;; turns babysitting it. The server was right there: the ui listener
   ;; serves the LIVE session. POST /api/call is the routed door: same
   ;; call-op!, same result text (anticipation rows included), token-guarded.
   (let [sess (external/open!)]
@@ -4841,7 +4841,7 @@
       (finally (ops/close! sess)))))
 
 (deftest a-session-with-an-app-owner-refreshes-the-owners-server-not-its-own
-  ;; Under the daemon N sessions share one project, and the app server is
+  ;; Under the server N sessions share one project, and the app server is
   ;; the project's: one per project, on the first branch attached, refreshed
   ;; by whichever session lands. A session that carries `:app-owner`
   ;; delegates every refresh to it and mirrors the handle back — so a done
@@ -4909,11 +4909,11 @@
       (finally (ops/close! sess)))))
 
 (deftest a-process-running-as-a-stores-declared-entry-does-not-manage-that-stores-app-server
-  ;; slopp's in-progress daemon is its own store's declared entry, booted by
-  ;; the machine daemon. When an agent attaches slopp's store to IT, it reads
-  ;; `run.daemon` like any project's and would boot a child of itself onto
+  ;; slopp's in-progress server is its own store's declared entry, booted by
+  ;; the machine server. When an agent attaches slopp's store to IT, it reads
+  ;; `run.server` like any project's and would boot a child of itself onto
   ;; its own port — a bind failure recorded as the store's red at every done.
-  ;; The self-served rule cannot catch this: a released daemon and its
+  ;; The self-served rule cannot catch this: a released server and its
   ;; in-progress copy serve the same namespaces by name. The ROLE can, and
   ;; the manager states it before the entry runs.
   (let [d    (str (System/getProperty "java.io.tmpdir") "/slopp-role-" (System/nanoTime))

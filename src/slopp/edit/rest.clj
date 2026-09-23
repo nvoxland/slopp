@@ -109,7 +109,7 @@
 
   **There is no allowed intersection.** That is what lets `/api/*` mean
   something to a proxy, a CSP or a reader WITHOUT consulting metadata — the
-  daemon mounts each project's API at `/api/projects/<slug>/<resource>` on
+  server mounts each project's API at `/api/projects/<slug>/<resource>` on
   exactly that assumption, the mount replacing the prefix rather than reading
   any route's metadata, and nothing was enforcing it.
 

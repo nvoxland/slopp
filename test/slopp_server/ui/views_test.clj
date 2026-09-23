@@ -686,10 +686,10 @@
   [v]
   (tree-seq #(and (coll? %) (not (map? %))) seq v))
 
-(deftest the-project-switcher-lists-what-the-daemon-holds-and-marks-where-you-are
+(deftest the-project-switcher-lists-what-the-server-holds-and-marks-where-you-are
   (testing "no open project means NO switcher — the dropdown degrades to
             nothing rather than to an empty control, and one project alone on
-            a daemon is the ordinary case, not a failure"
+            a server is the ordinary case, not a failure"
     (is (nil? (views/project-switcher [] "slopp2")))
     (is (nil? (views/project-switcher nil "slopp2"))))
   (let [ps [{:slug "slopp2" :dir "/w/slopp2" :opened-at 0 :sessions 1 :cli false :app nil}
@@ -713,7 +713,7 @@
     (testing "the project you are looking at is the selected one"
       (is (str/includes? s ":selected true")))
 
-    (testing "every listed project is OPEN — the daemon lists a project exactly
+    (testing "every listed project is OPEN — the server lists a project exactly
               while something is attached — so nothing is disabled or labelled
               as gone; that state no longer exists to render"
       (is (not (str/includes? s ":disabled")))
@@ -2258,7 +2258,7 @@
   - `/api/modules` is BOTH the Code section's nav and the Code screens' own
     load, and under `ask!` those are one request and therefore one load — so a
     modules-shaped `::main` wins, and everything else gets the nav list.
-  - `/api/projects` is the hub's, for the switcher.
+  - `/api/projects` is the slopp server's, for the switcher.
   - anything else is this screen's own, answered from `::main`.
 
   Params MERGE over the routed ones so a fixture can still supply something the
@@ -4649,7 +4649,7 @@
   ;; Move A: a page ASKS with a descriptor rather than declaring a `:request`,
   ;; so measuring one against a project is one function and the whole of *which
   ;; api is this* lives in it.
-  (testing "the base lands on the descriptor — the daemon's MOUNT for the project
+  (testing "the base lands on the descriptor — the server's MOUNT for the project
             — and the descriptor's path loses the producer's /api prefix,
             because the mount replaces it rather than nesting under it"
     (is (= "/api/projects/demo" (:webapp/base (views/at-project {:slug "demo"} api/modules))))

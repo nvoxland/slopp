@@ -2,7 +2,7 @@
   "The application's appearance, as garden data.
 
   Its own namespace because it is a hundred and fifty lines of styling and
-  nothing else — `slopp-server.ui.hub` owns the registry, the routes and the wire,
+  nothing else — the retired `slopp-server.ui.hub` owned the registry, the routes and the wire,
   and a stylesheet buried in there would be the largest thing in the file
   while being the least related to any of it.
 

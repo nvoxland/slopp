@@ -377,7 +377,7 @@
   the caller's `at-project`, which stamps the project's `:webapp/base` and
   takes the API prefix off the path. Without it the descriptor was measured
   from nothing: every other request in this app went through `at-project`
-  and this one went to the origin's `/api/modules`, which the daemon does not
+  and this one went to the origin's `/api/modules`, which the server does not
   serve, so the execute button reached a 404 in a browser and a canned nil
   headless, and no test asserted the url it sent. The 2-arity measures from
   nothing, for a caller with no project.

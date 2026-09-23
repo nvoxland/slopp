@@ -1,7 +1,7 @@
 (ns slopp-server.mcp
   "The MCP surface (JSON-RPC 2.0) exposing `slopp.ops` as tools, transport
   apart. The pure `handle!` dispatch is the core (fully testable with plain
-  maps); the daemon (`slopp-server.process`, through `slopp.mcp.http`) is the one
+  maps); the server (`slopp-server.process`, through `slopp.mcp.http`) is the one
   transport, MCP over HTTP with a stdio pipe in front of it on the client's
   side. There is no stdio loop here any more: a JVM per session was what
   stdio imposed, not what was chosen, and one slopp per machine replaced it.
@@ -760,7 +760,7 @@
 
 (defn plugin-root
   "Where the plugin's files are, or nil: Claude Code sets CLAUDE_PLUGIN_ROOT for
-  every process the plugin starts, and the daemon a pipe started is one. The
+  every process the plugin starts, and the server a pipe started is one. The
   skill and its reference topics ship there — a different channel from the
   jar this code runs in — so the one thing the server can do about them is
   READ them, and this is the seam a test redirects."
@@ -777,7 +777,7 @@
   session that loaded it — 65% of all context the eval10 lifetime cells ever
   created — and an agent reads a REST or web chapter once per project, not
   once per turn. An op's card never needed the plugin's files, so it is
-  answered before the plugin root is asked for: a daemon started from a
+  answered before the plugin root is asked for: a server started from a
   shell has none, and the card is the help most calls want."
   [topic]
   (let [dir    (some-> (plugin-root) (io/file "skills" "slopp" "reference"))
@@ -1556,7 +1556,7 @@
 ^:unsafe (defn stop-app!
   "Stop this session's app server, if it holds one, and forget it. NEVER
   throws. The third verb beside [[start-app!]] and [[refresh-app!]], so a
-  caller above this layer — the daemon closing a project — never reaches
+  caller above this layer — the server closing a project — never reaches
   web tooling itself: the app image is a CHILD JVM, and stopping it before
   its owner goes is what frees the port before the next server wants it."
   [session]
@@ -1571,20 +1571,20 @@
 ^:reads (defn ^:export write-tool?
   "Whether tool `name` WRITES the store — the classification the turn gate
   and the thread rule key on, answered for a caller above the transport
-  (the daemon's write door refuses a write that names no thread)."
+  (the server's write door refuses a write that names no thread)."
   [name]
   (contains? tools/write-tools name))
 
 ^:reads (defn ^:export app-managed?
   "Whether slopp runs this store's app server at all — the gate
   [[start-app!]] and [[refresh-app!]] apply, answered for a caller above
-  the transport: the daemon starts a project's app server on first attach
+  the transport: the server starts a project's app server on first attach
   only when there is one to start, and opens the reader that would own it
   only then.
 
   Never when THIS process is the store's own declared entry
-  (`live/managed-child-of?`): slopp's in-progress daemon, booted from its
-  store by the machine daemon, would otherwise boot a child of itself onto
+  (`live/managed-child-of?`): slopp's in-progress server, booted from its
+  store by the machine server, would otherwise boot a child of itself onto
   its own port the moment its own project attached to it."
   [session]
   (boolean (and (:dir @session)
@@ -1609,7 +1609,7 @@
   the landed state to clear it.
 
   **A session with an `:app-owner` refreshes the OWNER's server.** Under the
-  daemon N sessions share one project, and the app server is the project's
+  server N sessions share one project, and the app server is the project's
   — one, on the branch, held by the project's reader. Every session names
   that reader as its owner — as a DELAY, forced here, so a project whose
   app nobody serves never opens the reader at all — the refresh runs there
@@ -1863,7 +1863,7 @@
 
 (def op-cards
   "The tools' argument-teaching cards, as SESSION data: every session the
-  daemon opens carries them under `:op-cards`, and the ask bundle's `?diet=1`
+  server opens carries them under `:op-cards`, and the ask bundle's `?diet=1`
   reads them off the session there — the read API cannot require this
   namespace (that edge runs the other way), so what it needs is handed down."
   tools/op-cards)
@@ -2139,7 +2139,7 @@
 
 ^:unsafe (defn ^:export reserve-owner!
   "Bring an app OWNER (a project's reader) current with its branch and
-  re-serve its managed app from the advanced value. The daemon calls this to
+  re-serve its managed app from the advanced value. The server calls this to
   keep a dev instance current with a landing by ANY writer on the shared
   store: `refresh-app!` alone re-serves from the owner's CURRENT store value,
   so the owner must absorb the landing FIRST. Returns `refresh-app!`'s
@@ -2313,20 +2313,19 @@
         (call-op! session (assoc req :name op :arguments (dissoc arguments :op)))))
     (call-op! session req)))
 
-^:unsafe (defn ^{:export true
-                 :breaking-ok "the [req] arity read its session from :http/deps for the retired per-session listener; the daemon, the only caller, passes the session explicitly"}
+^:unsafe (defn ^:export
   http-call!
-  "`POST /api/projects/<slug>/call` on the daemon — the CLI door onto a
+  "`POST /api/projects/<slug>/call` on the server — the CLI door onto a
   RUNNING slopp. Body: `{\"tool\" \"<op>\" \"arguments\" {…} \"token\" \"<secret>\"}`.
   Invokes [[call-op!]] on `session` — the same dispatch, turn gating,
   ledger and anticipation MCP calls get — and answers `{\"isError\" bool
   \"text\" \"…\"}` with the joined content text, the shape the CLI prints. A
   thrown refusal crosses as isError text, never a stack trace: the caller
-  is a terminal. The daemon's declared door passes the project's CLI
+  is a terminal. The server's declared door passes the project's CLI
   session explicitly.
 
-  The token is a per-boot secret — written into `~/.slopp/daemon.json`
-  beside the daemon's address — and it is the session's `:call-token`.
+  The token is a per-boot secret — written into `~/.slopp/server.json`
+  beside the server's address — and it is the session's `:call-token`.
   Loopback binding alone must not grant every local process write access
   to the store — 403 without it, and nothing runs. Why this door exists
   (s12c, measured): the one-shot JVM path that preceded it booted a JVM and
@@ -2335,7 +2334,7 @@
   the process — while a live process held the warm image the whole time.
   That path is retired; this is the only door a shell has.
 
-  FOR ANYONE PROXYING THE DAEMON: this write door shares the port with the
+  FOR ANYONE PROXYING THE SERVER: this write door shares the port with the
   read endpoints — it differs by path and method, not by port. A reverse
   proxy MUST NOT forward it unless it means to hand the store's editing
   surface to everything that can reach the proxy (slopp-ui's hub verified
@@ -2359,7 +2358,7 @@
       (raw 503 {:error "no live session behind this door"})
 
       (or (nil? want) (not= (str (:token b)) (str want)))
-      (raw 403 {:error "bad or missing token — read it from ~/.slopp/daemon.json"})
+      (raw 403 {:error "bad or missing token — read it from ~/.slopp/server.json"})
 
       (not (string? (:tool b)))
       (raw 400 {:error "call needs {tool arguments} — tool is the op name"})
@@ -2441,7 +2440,7 @@
   ;; line. The session's identity stays what the harness said; the thread is
   ;; the routing key and defaults to it. Switching re-adopts the line and
   ;; reloads the store and image when its head differs — correct, and the
-  ;; expensive way; a daemon keeps a session per thread instead.
+  ;; expensive way; a server keeps a session per thread instead.
   (when-let [t (:thread arguments)]
     (when (and (not= (str t) (engine/thread-key session))
                ;; thread_open adopts for ITSELF, under a parent when asked.

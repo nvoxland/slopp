@@ -1,5 +1,5 @@
 (ns slopp-server.process.hooks
-  "What the plugin's hooks decide, as pure functions the daemon's hook
+  "What the plugin's hooks decide, as pure functions the server's hook
   endpoint calls — so a Claude Code hook is one shell call that posts its
   payload and prints the answer, and the rules live here, tested, rather
   than in a script beside the plugin. Three hooks: the prompt hook (is
@@ -30,7 +30,7 @@
 (defn- clip [s n] (let [s (str s)] (subs s 0 (min n (count s)))))
 
 (defn tail-context
-  "The lines that ride along with every prompt, from what the daemon knows of
+  "The lines that ride along with every prompt, from what the server knows of
   the project: the store line (namespaces, last commit point), the agent's
   thread — printed EVERY ask rather than once, because a compaction keeps
   whatever it keeps and this is the one line that must survive it — the
@@ -84,7 +84,7 @@
        "query_history {contains X} / {dead_ends true} for the asks and the "
        "scrapped explorations. "
        "NO MCP TOOLS AVAILABLE (server not connected)? Those same tools run "
-       "from the shell against the daemon: slopp query_store '{\"code\":\"...\"}', "
+       "from the shell against the server: slopp query_store '{\"code\":\"...\"}', "
        "slopp report '{}'. That is the fallback — not sqlite3. "
        "If you truly need the raw file for store forensics, do it outside a "
        "slopp session."))

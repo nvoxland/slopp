@@ -109,7 +109,7 @@
   box.** Raising it to 6 on a 14-core/36GB M4 Max cut ~15% off the wall time in
   isolation — but each shard's child-image fan-out is ~2-4GB, and under normal
   load (a heavy dev app plus sessions running beside the check) the sixth shard
-  OOM-killed the DAEMON, which takes every session with it. The count must also
+  OOM-killed the SERVER, which takes every session with it. The count must also
   stay DETERMINISTIC — a shard assignment that varied between runs would make a
   flake unreproducible — so it cannot be dialed by free memory at runtime. 4 is
   the value that holds on a loaded dev machine; the lever for a faster tier is

@@ -198,17 +198,17 @@
             ;; MEASURED from the project, like the page's own load above: the
             ;; descriptor `request-for` builds from the document row has no
             ;; base of its own, and unmeasured it went to the origin's
-            ;; /api/…, which the daemon does not serve
+            ;; /api/…, which the server does not serve
             (schema/request-for ep (get-in state [:call :params] {})
                                 #(views/at-project params %))))))))
 
 (defn ^{:http/external-path
-        "the PROJECT serves `/api/modules`, not the daemon. This app is the
+        "the PROJECT serves `/api/modules`, not the server. This app is the
          reviewer UI: it talks to a project's API over HTTP and never opens a
-         store, and the daemon mounts each project's API at
+         store, and the server mounts each project's API at
          `/api/projects/<slug>/**`, which is the base every page's request
          is measured from. `/api/projects` is the exception and says so
-         itself, carrying an EMPTY `:webapp/base` — it is the DAEMON's own
+         itself, carrying an EMPTY `:webapp/base` — it is the SERVER's own
          registry, at the origin root rather than under a mount, and the
          origin is the empty base rather than a flag of its own."}
   wiring
@@ -238,7 +238,7 @@
   exactly what `driver-for` is for.
 
   `:webapp/session-loads` is deleted from the framework. The two loads that
-  belong to no screen — the module index and the daemon's project list — are asked
+  belong to no screen — the module index and the server's project list — are asked
   for by [[slopp-server.ui.pages/chrome]], which is the only thing that ever read
   them. `ask!` is start-if-absent, so the first page to render starts them and
   every later one finds them: the same single fetch, without an entry-level

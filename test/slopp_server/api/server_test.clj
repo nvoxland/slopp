@@ -1,7 +1,7 @@
 (ns slopp-server.api.server-test
   "The project API's one remaining promise: the list of namespaces it serves
   is checked against what declares endpoints, so a route cannot be served by
-  nobody. The listener that used to live here is the daemon's now."
+  nobody. The listener that used to live here is the server's now."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp-server.api.server :as server]
             [clojure.set :as set] [clojure.string :as str]))

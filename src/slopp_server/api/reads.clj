@@ -587,7 +587,7 @@
   reader without the handler doing the slug->session lookup itself.
 
   HOW a slug maps to a reader is not this layer's concern: the serving context
-  carries an `:open-reader` fn (slug->reader-or-nil) — the daemon's is backed
+  carries an `:open-reader` fn (slug->reader-or-nil) — the server's is backed
   by its project registry, a test's is `(constantly session)` — and this
   performer is the one place the api surface names the dependency. A slug no
   open project answers is a 404, mapped from the :http/status the way a read
@@ -601,7 +601,7 @@
         :malli/schema [:=> {:throws []} [:cat :any :string [:maybe :string] :boolean] [:maybe :string]]}
   orient-bundle!
   "The orientation bundle TEXT for `session` and `ask` — the in-process entry
-  the daemon's prompt hook uses, the same read `/api/projects/:slug/bundle`
+  the server's prompt hook uses, the same read `/api/projects/:slug/bundle`
   performs over the wire, so a hook and a browser get one answer. `sid` is the
   caller's session id (nil for none) and `cli?` asks for the CLI voice; both
   ride the query-params shape [[bundle-read!]] reads, which stays the one place

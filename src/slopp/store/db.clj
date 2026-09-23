@@ -2142,7 +2142,7 @@
 
   SHARED across sessions at one content. The map is immutable and it is
   most of a store value's weight — every session attached to a project
-  under the daemon loaded its own copy (~450 MB each on slopp's store) of
+  under the server loaded its own copy (~450 MB each on slopp's store) of
   the same rows. The latest materialization per (file, view line) is kept,
   keyed by that line's head and its elements digest, so two idle threads
   at one branch head hold one map and a write (a new head) or a row

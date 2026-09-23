@@ -51,10 +51,10 @@
                                         'y "(ns y (:require [x :as x]))"}))))))
 
 (deftest parse-args-trampolines-main-args
-  (let [daemon-main (symbol "slopp-server.process" "-main")
+  (let [server-main (symbol "slopp-server.process" "-main")
         sync-main   (symbol "slopp.sync" "-main")]
-    (testing "default: the DAEMON, with no args — the dir is what boot loads, not the port"
-      (is (= {:dir "." :main daemon-main :args []}
+    (testing "default: the SERVER, with no args — the dir is what boot loads, not the port"
+      (is (= {:dir "." :main server-main :args []}
              (boot/parse-args ["."]))))
     (testing "--main with NO extra args keeps the dir-arg convention"
       (is (= {:dir "/p" :main (symbol "app.core" "-main") :args ["/p"]}
@@ -64,7 +64,7 @@
               :args ["push" "." "https://x/y.git"]}
              (boot/parse-args ["." "--main" "slopp.sync/-main"
                                "push" "." "https://x/y.git"]))))
-    (testing "--call is retired: refused with the routed spelling, never a silent daemon"
+    (testing "--call is retired: refused with the routed spelling, never a silent server"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"slopp <op>"
                             (boot/parse-args ["." "--call" "query_project"]))))))
 
@@ -519,26 +519,26 @@
     (testing "nothing changed, nothing reloads"
       (is (= [] (boot/with-dependents sources #{}))))))
 
-(deftest boot-note-does-not-treat-the-daemons-cwd-as-a-project
-      (testing "daemon, no store at its dir: nothing to narrate — -main announces the daemon itself"
-    (is (nil? (boot/boot-note {:daemon? true :loaded? false :store-file? false
+(deftest boot-note-does-not-treat-the-servers-cwd-as-a-project
+      (testing "server, no store at its dir: nothing to narrate — -main announces the server itself"
+    (is (nil? (boot/boot-note {:server? true :loaded? false :store-file? false
                               :dir "/home/me/.slopp" :mode "snapshot"})))
-    (is (nil? (boot/boot-note {:daemon? true :loaded? false :store-file? true
+    (is (nil? (boot/boot-note {:server? true :loaded? false :store-file? true
                               :dir "/home/me/.slopp" :mode "snapshot"}))
-        "even an empty store file at the daemon's dir is not this line's problem"))
-  (testing "a NON-daemon boot serving an unadopted dir keeps the first-write message"
-    (let [note (boot/boot-note {:daemon? false :loaded? false :store-file? false
+        "even an empty store file at the server's dir is not this line's problem"))
+  (testing "a NON-server boot serving an unadopted dir keeps the first-write message"
+    (let [note (boot/boot-note {:server? false :loaded? false :store-file? false
                                :dir "/proj" :mode "snapshot"})]
       (is (re-find #"unadopted" note))
       (is (re-find #"first write creates /proj/\.slopp/store\.db" note))))
-  (testing "an empty store present, non-daemon: the wrong-dir warning"
-    (let [note (boot/boot-note {:daemon? false :loaded? false :store-file? true
+  (testing "an empty store present, non-server: the wrong-dir warning"
+    (let [note (boot/boot-note {:server? false :loaded? false :store-file? true
                                :dir "/proj" :mode "live"})]
       (is (re-find #"no namespaces yet" note))))
-  (testing "a program that loaded says so with dir and mode — checkout or daemon self-host"
+  (testing "a program that loaded says so with dir and mode — checkout or server self-host"
     (is (re-find #"loaded slopp's program from the store at /proj \(live\)"
-                 (boot/boot-note {:daemon? true :loaded? true :store-file? true
+                 (boot/boot-note {:server? true :loaded? true :store-file? true
                                   :dir "/proj" :mode "live"})))
     (is (re-find #"loaded slopp's program from the store at /proj"
-                 (boot/boot-note {:daemon? false :loaded? true :store-file? true
+                 (boot/boot-note {:server? false :loaded? true :store-file? true
                                   :dir "/proj" :mode "snapshot"})))))

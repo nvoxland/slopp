@@ -35,7 +35,7 @@
 
   SALTED from when three derivations of this shape shared one process and
   had to disagree; the git listener's and the per-session reviewer
-  listener's both went with their listeners (the daemon binds ONE configured
+  listener's both went with their listeners (the server binds ONE configured
   port for everything slopp itself serves), so this is the derivation that
   remains. The salt stays: changing the formula moves every project's app
   address, and a developer keeps the tab.
@@ -68,7 +68,7 @@
 
   `:main` is the app's ENTRY (`app.main`) — a qualified symbol when the store
   declares one, else nil. Set = the dev instance RUNS that fn (a custom
-  process, e.g. slopp's own daemon); nil + `http.enabled` = the derived
+  process, e.g. slopp's own server); nil + `http.enabled` = the derived
   `slopp.http/serve!` server. So a project enables its dev instance either by
   serving HTTP or by declaring an entry, and a declared entry replaces the
   derived call rather than joining it.
@@ -76,7 +76,7 @@
   Every address field is DEV-OVERLAID: `dev.http.port` overrides `http.port`
   for the dev instance and so on ([[slopp.project.dev/override]]), which is
   what keeps the in-progress copy off the PRODUCTION address — for slopp's own
-  store, the machine daemon's port. `:port` with no override prefers an
+  store, the machine server's port. `:port` with no override prefers an
   explicitly SET `http.port` and otherwise DERIVES ([[derived-port]]), so two
   projects on one machine do not both take the registry default.
 
@@ -566,11 +566,11 @@
   its namespace is loaded — the trap `serve-code` hit twice, with
   `slopp.rest/validating` and the static mount.
 
-  **The call runs on a DAEMON THREAD and this expression answers
+  **The call runs on a SERVER THREAD and this expression answers
   immediately.** A server's `-main` usually does not return; that is what
   makes it a server. Called inline it would wedge the nREPL reply that is
   slopp's only evidence the start happened, and a wedged wire is
-  indistinguishable from a slow image. Daemon, so it cannot outlive the child
+  indistinguishable from a slow image. Server, so it cannot outlive the child
   — which already dies with its parent through the watchdog.
 
   **What `:started` proves, and what it does not.** It proves the namespace
@@ -605,10 +605,10 @@
     generated call — preceded by what the MANAGER decided and the entry could
     not know, as system properties set before the entry runs: `slopp.managed-for`,
     the store dir this child is the declared entry of (the role that stops
-    slopp's own in-progress daemon from managing its own project's app server
+    slopp's own in-progress server from managing its own project's app server
     — see [[managed-child-of?]]); `slopp.static-dir`, where the mounts' bytes
     were materialized, when there is such a dir (a declared entry assembles
-    its own server and had no way to learn it, so slopp's daemon run this way
+    its own server and had no way to learn it, so slopp's server run this way
     404'd its own bundle); and `slopp.app-port`, the dev-overlaid port the
     manager decided (which the entry reads as its listen port). A property
     naming nothing is a lie the entry would act on, so each is set only when
@@ -892,7 +892,7 @@
 
   Such a process never manages that store's app server: it would be booting
   a child of ITSELF onto its own port. Decided from the role rather than
-  from the served namespaces, because a released daemon and its in-progress
+  from the served namespaces, because a released server and its in-progress
   copy serve the same namespaces by NAME, and the self-served rule cannot
   tell them apart — and once the base is a release its premise inverts: the
   child is the newer copy, not the staler one."

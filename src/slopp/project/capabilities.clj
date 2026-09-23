@@ -498,7 +498,7 @@
   followed by the path (`file.key`) UPPERCASED with every non-alphanumeric
   character mapped to `_` — so the `dev` file's `http.port` is
   `SLOPP_DEV_HTTP_PORT`. Conventional env casing (no dots or dashes) so a bare
-  shell `SLOPP_DEV_HTTP_PORT=7360 slopp daemon` sets it. Pure, so it is
+  shell `SLOPP_DEV_HTTP_PORT=7360 slopp server` sets it. Pure, so it is
   testable without touching the real environment."
   [file key]
   (str "SLOPP_" (str/upper-case (str/replace (str file "." key) #"[^A-Za-z0-9]" "_"))))
@@ -507,7 +507,7 @@
   "A per-process config override read from the environment, or nil. The
   variable is [[env-var-name]] — `SLOPP_<FILE>_<KEY>`, e.g.
   `SLOPP_DEV_HTTP_PORT` for the `dev` file's `http.port`. It overrides the
-  store value and the registry default for THIS process, so two daemons
+  store value and the registry default for THIS process, so two servers
   sharing one store can run their dev instances on different ports."
   [file key]
   (not-empty (System/getenv (env-var-name file key))))

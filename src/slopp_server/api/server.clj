@@ -1,7 +1,7 @@
 (ns slopp-server.api.server
   "The ROUTE TABLE of a project's own read API — what a session serves about
   the store it holds, assembled by [[serving-opts]] and bound by whoever
-  listens. Nothing here binds a port: the daemon (`slopp-server.process`) mounts
+  listens. Nothing here binds a port: the server (`slopp-server.process`) mounts
   each open project's table at `/api/projects/<slug>/<resource>` — the
   `/api/<resource>` declared here, with the mount replacing that prefix —
   through a declared read that delegates, so one configured port serves
@@ -13,7 +13,7 @@
   What the table answers about is the SESSION it was assembled over.
   Warranty and observed examples ARE persisted (`session/persist-trace!` at
   every verified run, reloaded by `open!`), so a session opened fresh is not
-  blank; it is BEHIND, seeing the last snapshot. The daemon answers from the
+  blank; it is BEHIND, seeing the last snapshot. The server answers from the
   project's reader — the landed branch — which is what a consumer of the
   project's API wants; an agent's un-landed work is its own to read through
   its thread."
@@ -29,7 +29,7 @@
   every page for two waves behind a 200 for the page itself, because one
   list got a new entry and the other did not.
 
-  There is one mount again — the daemon, which assembles [[serving-opts]]
+  There is one mount again — the server, which assembles [[serving-opts]]
   per project and delegates into it — and that is the POINT rather than an
   excuse to inline it: one exported list is what makes a second mount a
   visible choice rather than a copied literal.
@@ -42,14 +42,14 @@
   than 404, which is a much worse way to find out.
 
   It is a short list now and stays that way: a project serves JSON and the
-  EDN contract, nothing else. The pages a human looks at are the daemon's
-  own (`slopp-server.ui.*`), served beside its registry from the daemon's assembly
+  EDN contract, nothing else. The pages a human looks at are the server's
+  own (`slopp-server.ui.*`), served beside its registry from the server's assembly
   and reading this API through the mount — never from a project's context."
   ['slopp-server.api.reads 'slopp-server.api.endpoints])
 
 (defn ^:export context
   "The served API context over a SINGLE session, for tests and in-process
-  tools. The daemon serves this SAME surface over MANY projects — resolving
+  tools. The server serves this SAME surface over MANY projects — resolving
   each request's reader from its `:slug` — so here the `:open-reader` the
   resolve phase consults answers `session` for every slug: one project, named
   anything. Drives the endpoints at `/api/projects/<any-slug>/<resource>`, the

@@ -38,7 +38,7 @@
   one of them because a test session had become the developer's own session.
 
   So the thread an agent writes on is what the agent PASSES on every write,
-  and the daemon mints each session's own label at attach; both arrive here
+  and the server mints each session's own label at attach; both arrive here
   as an explicit `:slopp.ops/agent-id`. What is left is the honest default
   for everyone else: this session is nobody's continuation, and it says so
   instead of borrowing a name."
@@ -1441,7 +1441,7 @@
   vector, so without this a session that absorbs another's writes by
   replay rendered a helper after its caller while the writer rendered it
   before: every warm check green, and a fresh boot from that value refused
-  the namespace. The daemon's reader is such a session, and its value is
+  the namespace. The server's reader is such a session, and its value is
   what the dev instance boots from.
 
   Touched means named by a delta (`:ns`) or owning a form its rewrite
@@ -2036,7 +2036,7 @@
   that is not a hypothetical.
 
   Exposed to `slopp-server.mcp` for one caller: a project's app OWNER under the
-  daemon has to hold the branch's current value before its server is
+  server has to hold the branch's current value before its server is
   re-served from it, and `sync-with-journal!` is gated on an image the
   owner may still be booting."
   [session]
