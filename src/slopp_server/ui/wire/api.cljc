@@ -88,11 +88,10 @@
    :http/params   #{:slug}
    :rest/response slopp-server.ui.wire.contracts/modules-response})
 
-(def ^{:generated "bundle" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export bundle
-  "GET /api/projects/:slug/bundle — generated endpoint descriptor (D-web-contracts)."
+(def ^{:http/external-path "a route on the slopp server, published in its contract; hand-owned since 2026-09-23, see the ns doc" :unused-ok "a descriptor of the slopp server's surface this app does not call yet — kept so the hand-owned wire mirrors the whole published contract, as the generated one did"} ^:export bundle
+  "GET /api/bundle — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :get
-   :http/path     "/api/projects/:slug/bundle"
-   :http/params   #{:slug}
+   :http/path     "/api/bundle"
    :rest/response slopp-server.ui.wire.contracts/bundle-response})
 
 (def ^{:generated "source" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export source
@@ -127,7 +126,7 @@
    :rest/request  slopp-server.ui.wire.contracts/ns-outline-request
    :rest/response slopp-server.ui.wire.contracts/ns-outline-response})
 
-(def ^{:generated "otel-endpoint" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export otel-endpoint
+(def ^{:http/external-path "a route on the slopp server, published in its contract; hand-owned since 2026-09-23, see the ns doc" :unused-ok "a descriptor of the slopp server's surface this app does not call yet — kept so the hand-owned wire mirrors the whole published contract, as the generated one did"} ^:export otel-endpoint
   "POST /api/otel/v1/logs — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :post
    :http/path     "/api/otel/v1/logs"
@@ -135,16 +134,17 @@
    :rest/request  slopp-server.ui.wire.contracts/otel-endpoint-request
    :rest/response slopp-server.ui.wire.contracts/otel-endpoint-response})
 
-(def ^{:generated "status-endpoint" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export status-endpoint
+(def ^{:http/external-path "a route on the slopp server, published in its contract; hand-owned since 2026-09-23, see the ns doc" :unused-ok "a descriptor of the slopp server's surface this app does not call yet — kept so the hand-owned wire mirrors the whole published contract, as the generated one did"} ^:export status-endpoint
   "GET /api/status — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :get
    :http/path     "/api/status"
    :rest/response slopp-server.ui.wire.contracts/status-endpoint-response})
 
-(def ^{:generated "mcp-delete-endpoint" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export mcp-delete-endpoint
-  "DELETE /api/mcp — generated endpoint descriptor (D-web-contracts)."
+(def ^{:http/external-path "a route on the slopp server, published in its contract; hand-owned since 2026-09-23, see the ns doc" :unused-ok "a descriptor of the slopp server's surface this app does not call yet — kept so the hand-owned wire mirrors the whole published contract, as the generated one did"} ^:export mcp-delete-endpoint
+  "DELETE /api/projects/:slug/mcp — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :delete
-   :http/path     "/api/mcp"
+   :http/path     "/api/projects/:slug/mcp"
+   :http/params   #{:slug}
    :rest/response slopp-server.ui.wire.contracts/mcp-delete-endpoint-response})
 
 (def ^{:generated "projects-endpoint" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export projects-endpoint
@@ -161,11 +161,11 @@
    :rest/request  slopp-server.ui.wire.contracts/hook-endpoint-request
    :rest/response slopp-server.ui.wire.contracts/hook-endpoint-response})
 
-(def ^{:generated "mcp-post-endpoint" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export mcp-post-endpoint
-  "POST /api/mcp — generated endpoint descriptor (D-web-contracts)."
+(def ^{:http/external-path "a route on the slopp server, published in its contract; hand-owned since 2026-09-23, see the ns doc" :unused-ok "a descriptor of the slopp server's surface this app does not call yet — kept so the hand-owned wire mirrors the whole published contract, as the generated one did"} ^:export mcp-post-endpoint
+  "POST /api/projects/:slug/mcp — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :post
-   :http/path     "/api/mcp"
-   :http/params   #{:error :id :jsonrpc :method :params :result}
+   :http/path     "/api/projects/:slug/mcp"
+   :http/params   #{:error :id :jsonrpc :method :params :result :slug}
    :rest/request  slopp-server.ui.wire.contracts/mcp-post-endpoint-request
    :rest/response slopp-server.ui.wire.contracts/mcp-post-endpoint-response})
 
@@ -176,16 +176,17 @@
    :rest/request  slopp-server.ui.wire.contracts/cli-endpoint-request
    :rest/response slopp-server.ui.wire.contracts/cli-endpoint-response})
 
-(def ^{:generated "mcp-get-endpoint" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export mcp-get-endpoint
-  "GET /api/mcp — generated endpoint descriptor (D-web-contracts)."
+(def ^{:http/external-path "a route on the slopp server, published in its contract; hand-owned since 2026-09-23, see the ns doc" :unused-ok "a descriptor of the slopp server's surface this app does not call yet — kept so the hand-owned wire mirrors the whole published contract, as the generated one did"} ^:export mcp-get-endpoint
+  "GET /api/projects/:slug/mcp — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :get
-   :http/path     "/api/mcp"
+   :http/path     "/api/projects/:slug/mcp"
+   :http/params   #{:slug}
    :rest/response slopp-server.ui.wire.contracts/mcp-get-endpoint-response})
 
-(def ^{:generated "call-endpoint" :http/external-path "generated from the contract published at http://127.0.0.1:7358/api/projects/slopp/rest/paths"} ^:export call-endpoint
-  "POST /api/call — generated endpoint descriptor (D-web-contracts)."
+(def ^{:http/external-path "a route on the slopp server, published in its contract; hand-owned since 2026-09-23, see the ns doc" :unused-ok "a descriptor of the slopp server's surface this app does not call yet — kept so the hand-owned wire mirrors the whole published contract, as the generated one did"} ^:export call-endpoint
+  "POST /api/projects/:slug/call — generated endpoint descriptor (D-web-contracts)."
   {:http/method   :post
-   :http/path     "/api/call"
-   :http/params   #{:agent :arguments :token :tool}
+   :http/path     "/api/projects/:slug/call"
+   :http/params   #{:agent :arguments :slug :token :tool}
    :rest/request  slopp-server.ui.wire.contracts/call-endpoint-request
    :rest/response slopp-server.ui.wire.contracts/call-endpoint-response})
