@@ -15,6 +15,13 @@
          (build-cli/parse-args ["/w/p" "--out" "/w/o" "--main" "calc.core/run" "--name" "calc"])))
   (is (= {:out "/w/o" :dir "."} (build-cli/parse-args ["--out" "/w/o" "."]))
       "options may come before the dir")
+  (testing "the artifact modes"
+    (is (= {:dir "." :mode :native} (build-cli/parse-args ["." "--native"])))
+    (is (= {:dir "." :mode :jar} (build-cli/parse-args ["--jar" "."])))
+    (is (= {:mode :tree} (build-cli/parse-args ["--tree"])))
+    (is (nil? (:mode (build-cli/parse-args ["."]))) "no mode named: the caller applies the default")
+    (is (re-find #"one of" (:error (build-cli/parse-args ["--jar" "--native"])))
+        "two modes is a contradiction, not a preference"))
   (is (re-find #"--out" (:error (build-cli/parse-args ["/w/p" "--out"])))
       "an option with no value names itself")
   (is (re-find #"--out" (:error (build-cli/parse-args ["--out" "--main" "a/b"])))
@@ -70,21 +77,94 @@
         (is (not= :red (get-in d [:findings :episode-status])) (pr-str (:findings d)))
         (is (get-in d [:land :landed]) (pr-str (:land d))))
       (finally (ops/close! agent)))
-    (testing "the default output is target/jar-src under the project, where `clojure -T:build uber` reads"
-      (let [r (build-cli/build! dir)]
+    (testing "the default: the tree lands in target/jar-src and the native recipe runs there"
+      (let [calls (atom [])
+            r     (build-cli/build! dir :sh (fn [cmd d] (swap! calls conj [cmd d]) {:exit 0})
+                                    :which (constantly true))]
         (is (nil? (:error r)) (pr-str r))
         (is (= (.getCanonicalPath (io/file dir "target" "jar-src")) (:built r)) (pr-str r))
         (is (.exists (io/file dir "target" "jar-src" "src" "worker" "core.clj")))
         (is (.exists (io/file dir "target" "jar-src" "deps.edn")))
-        (is (= "build-native.sh" (get-in r [:native :script])) "app.main declared: the native recipe rides along")
         (is (.exists (io/file dir "target" "jar-src" "build-native.sh")))
-        (is (some #(re-find #"build-native\.sh" %) (build-cli/report-lines r)) (pr-str (build-cli/report-lines r)))))
-    (testing "--out puts the tree elsewhere, a relative path resolving against the project; un-landed work stays out"
+        (is (= [["bash" "build-native.sh"] (:built r)] (first @calls)) (pr-str @calls))
+        (is (= (str (:built r) "/worker") (:binary r)) "app.main worker.core/-main names the binary `worker`")
+        (is (some #(re-find #"/worker" %) (build-cli/report-lines r)) (pr-str (build-cli/report-lines r)))))
+    (testing "--tree with --out puts the bare tree elsewhere, a relative path resolving against the project; un-landed work stays out"
       (let [writer (external/open! {:slopp.ops/dir dir})]
         (try (ops/ingest! writer 'worker.core (entry ":v2") :agent "b")
              (finally (ops/close! writer))))
-      (let [r (build-cli/build! dir :out "elsewhere")]
+      (let [r (build-cli/build! dir :out "elsewhere" :mode :tree)]
         (is (= (.getCanonicalPath (io/file dir "elsewhere")) (:built r)) (pr-str r))
+        (is (nil? (:binary r)) "--tree runs no recipe")
         (let [src (slurp (io/file dir "elsewhere" "src" "worker" "core.clj"))]
           (is (re-find #":v1" src))
           (is (not (re-find #":v2" src)) "a thread's un-landed write is not what the branch holds"))))))
+
+(deftest the-native-artifact-runs-the-emitted-recipe-in-the-tree
+  ;; The tree carries the recipe (`build-native.sh`, from build!); the verb's
+  ;; job is to run it where it lives and say where the binary landed. The
+  ;; subprocess is injected so this proves the WIRING — which script, which
+  ;; directory, what is reported — without GraalVM, which build-native-test
+  ;; already declines to require for the same reason.
+  (let [tree  {:built "/w/out" :native {:binary "calc" :script "build-native.sh" :launcher "src/native/main.clj"}}
+        calls (atom [])
+        sh    (fn [cmd dir] (swap! calls conj [cmd dir]) {:exit 0})]
+    (testing "the happy path: the script runs in the tree and the binary is named"
+      (let [r (build-cli/artifact! tree :native :sh sh :which (constantly true))]
+        (is (nil? (:error r)) (pr-str r))
+        (is (= [["bash" "build-native.sh"] "/w/out"] (first @calls)) (pr-str @calls))
+        (is (= "/w/out/calc" (:binary r)))
+        (is (some #(re-find #"/w/out/calc" %) (build-cli/report-lines r))
+            (pr-str (build-cli/report-lines r)))))
+    (testing "a missing tool is named BEFORE anything runs"
+      (reset! calls [])
+      (let [r (build-cli/artifact! tree :native :sh sh :which #{"clojure"})]
+        (is (re-find #"native-image" (:error r)) (pr-str r))
+        (is (re-find #"GraalVM" (:error r)) "the refusal says what to install")
+        (is (empty? @calls) "nothing was run")))
+    (testing "a script that fails says so, with its exit"
+      (let [r (build-cli/artifact! tree :native :sh (fn [_ _] {:exit 3}) :which (constantly true))]
+        (is (re-find #"build-native\.sh" (:error r)) (pr-str r))
+        (is (re-find #"3" (:error r)))))
+    (testing "a store with no entry cannot go native, and is told what would"
+      (let [r (build-cli/artifact! {:built "/w/out"} :native :sh sh :which (constantly true))]
+        (is (re-find #"app\.main" (:error r)) (pr-str r))
+        (is (re-find #"--jar" (:error r)) "the way out is named")))
+    (testing "--tree is the bare materialization, untouched"
+      (is (= {:built "/w/out"} (build-cli/artifact! {:built "/w/out"} :tree :sh sh :which (constantly true)))))))
+
+(deftest the-jar-artifact-runs-a-recipe-that-exists-and-refuses-when-none-does
+  ;; A jar needs tools.build, which the slopp jar does not carry, so the verb
+  ;; runs a RECIPE: the project's own build.clj (slopp's case — it defaults
+  ;; to target/jar-src and writes target/slopp.jar, so it runs in the
+  ;; project with :src pointed at the tree), else one the tree carries, else
+  ;; a refusal that says a recipe is what is missing.
+  (let [mk!   (fn [] (str (java.nio.file.Files/createTempDirectory
+                           "slopp-build-jar" (make-array java.nio.file.attribute.FileAttribute 0))))
+        calls (atom [])
+        sh    (fn [cmd dir] (swap! calls conj [cmd dir]) {:exit 0})]
+    (testing "the project's build.clj runs in the project, over the tree's src"
+      (let [proj (mk!) tree (str proj "/target/jar-src")]
+        (spit (io/file proj "build.clj") "(ns build)")
+        (let [r (build-cli/artifact! {:built tree} :jar :proj proj :sh sh :which (constantly true))]
+          (is (nil? (:error r)) (pr-str r))
+          (is (= [["clojure" "-T:build" "uber" ":src" (str "\"" tree "/src\"")] proj] (first @calls))
+              (pr-str @calls))
+          (is (= proj (:jar-recipe r))))))
+    (testing "a tree that carries its own recipe runs it there"
+      (reset! calls [])
+      (let [proj (mk!) tree (str proj "/out")]
+        (io/make-parents (io/file tree "build.clj"))
+        (spit (io/file tree "build.clj") "(ns build)")
+        (let [r (build-cli/artifact! {:built tree} :jar :proj proj :sh sh :which (constantly true))]
+          (is (= [["clojure" "-T:build" "uber" ":src" "\"src\""] tree] (first @calls)) (pr-str @calls)))))
+    (testing "no recipe anywhere is a refusal that names the gap"
+      (reset! calls [])
+      (let [proj (mk!)
+            r    (build-cli/artifact! {:built (str proj "/out")} :jar :proj proj :sh sh :which (constantly true))]
+        (is (re-find #"build\.clj" (:error r)) (pr-str r))
+        (is (empty? @calls))))
+    (testing "the clojure CLI is checked first"
+      (let [proj (mk!)]
+        (spit (io/file proj "build.clj") "(ns build)")
+        (is (re-find #"clojure" (:error (build-cli/artifact! {:built (str proj "/t")} :jar :proj proj :sh sh :which #{}))))))))
