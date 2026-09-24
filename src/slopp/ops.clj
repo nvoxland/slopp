@@ -3399,7 +3399,9 @@
 
   This is `history/commit-point-rows` — a pure fold over the delta log — plus
   the one thing that needs the db: joining the shas the git projection
-  pinned. The split is why the reviewer UI can read commit-points at :pure."
+  pinned. The split is why the reviewer UI can read commit-points at :pure.
+  The join is by the commit point's IDENTITY: a rebase-land's carried copy
+  (`:origin-id`) shares its original's pin."
   [session & {:keys [commit]}]
   (let [{:keys [dir]} @session
         st   (:store @(with-history session :ops [:commit]))
@@ -3408,7 +3410,7 @@
                       (db/commit-shas conn))
                     (catch Exception _ nil)))
         join (fn [row]
-               (if-let [s (or (:sha row) (get shas (:commit row)))]
+               (if-let [s (or (:sha row) (get shas (or (:origin-id row) (:commit row))))]
                  (assoc row :sha s)
                  row))]
     (if commit

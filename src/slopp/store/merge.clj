@@ -55,6 +55,67 @@
       (:recent store)  (update :recent tag)
       (:deltas store)  (update :deltas tag))))
 
+(defn ^:export merge-text
+  "Three-way merge of TEXT: `{:merged s}` when it resolves, `{:conflict s}`
+  with the overlapping hunks marked when it does not. `base` may be nil (a
+  file the other side ADDED has nothing to merge against).
+
+  **Pure, and knows nothing about git.** Three strings in, one out — no
+  Repository, no working tree, no disk. That is the whole reason it lives
+  here rather than beside the projection: an import from a directory that
+  was never in a git repo has to reach the same logic, and slopp WORKS WITH
+  git rather than depending on it.
+
+  The algorithm is jgit's — the same one git itself performs, already on the
+  classpath because the projection needs jgit for objects and refs.
+  Borrowing a battle-tested merge is worth more than owning one: a merge
+  that is subtly wrong corrupts a file while reporting success, which is the
+  worst failure shape available here.
+
+  Why a whole-file 3-way at all, when a form is slopp's unit: a tracked file
+  has no forms, and `:files` is path→text with no sub-file addressing, so the
+  whole file IS the store's unit for it. Absorbing one wholesale was
+  therefore consistent — and it made two edits to different paragraphs of one
+  README a hand-merge for an agent, which is work nothing was gaining from.
+  Conflicting hunks still stop, and show the reader the overlap rather than
+  the file."
+  [base ours theirs]
+  (let [b (or base "") o (or ours "") t (or theirs "")]
+    (cond
+      ;; The trivial cases, short-circuited BEFORE the algorithm — cheaper, and
+      ;; total where the algorithm is not: an empty base against an empty side
+      ;; is a degenerate input jgit reports as a conflict, and "we changed
+      ;; nothing" is not a conflict in any reading.
+      (= o t) {:merged o}
+      (= o b) {:merged t}
+      (= t b) {:merged o}
+
+      :else
+      (let [raw (fn [s] (org.eclipse.jgit.diff.RawText. (.getBytes ^String s "UTF-8")))
+            res (.merge (org.eclipse.jgit.merge.MergeAlgorithm.)
+                        org.eclipse.jgit.diff.RawTextComparator/DEFAULT
+                        (raw b) (raw o) (raw t))
+            out (java.io.ByteArrayOutputStream.)]
+        (.formatMerge (org.eclipse.jgit.merge.MergeFormatter.) out res
+                      ["base" "ours" "theirs"]
+                      (java.nio.charset.Charset/forName "UTF-8"))
+        (let [text (.toString out "UTF-8")]
+          (if (.containsConflicts res)
+            {:conflict text}
+            {:merged text}))))))
+
+(defn- holds-verbatim?
+  "Does `st`'s log already hold THEIR delta `d` itself — same id, same
+  millisecond? A thread whose view followed the branch took the branch's
+  deltas verbatim, interleaved after its own, so they fall outside the common
+  prefix and arrive in theirs' suffix a second time. Content converges by
+  value; a commit marker was re-minted regardless, which put the same commit
+  point on main twice, one above the other (this store's own journal,
+  2026-09-23). Id AND :at: a post-fork id collision is two different deltas,
+  and they never share a millisecond."
+  [st d]
+  (boolean (some #(and (= (:id d) (:id %)) (= (:at d) (:at %))) (:deltas st))))
+
 (defn ^:export merge-logs
   "Phase 4 m2 (C4/C5 activation): merge `theirs` — a store sharing a common
   delta-log prefix with `ours` (a fork = a copied project dir) — into ours by
@@ -610,7 +671,7 @@
                     ;; line-scoped bookkeeping does not travel — commit-points
                     ;; deliberately (noted; the travel question is an open
                     ;; decision), verification/merge chatter silently
-                    (if (and carry-markers (contains? fields/travelling-markers op))
+                    (if (and carry-markers (contains? fields/travelling-markers op) (not (holds-verbatim? st d)))
                       ;; …EXCEPT when the caller says the receiving line is about
                       ;; to BECOME the source — a rebase-land, which re-points
                       ;; the branch at the thread's head afterwards. Then the
@@ -639,14 +700,15 @@
                                             target))
                             d'  (cond-> (assoc d :id nid
                                                :parent (:id (last (:deltas st1)))
-                                               :merged-from (:id d))
+                                               :merged-from (:id d)
+                                               :origin-id (or (:origin-id d) (:id d)))
                                   (:target d) (update :target retarget))
                             st2 (store/record-delta st1 d')]
                         (done st2 idmap (inc merged) conflicts notes changed
                               new-nses (conj applied (:id d))))
                       (done st idmap merged conflicts
                             (cond-> notes
-                              (not (contains? fields/silent-markers op))
+                              (not (or (contains? fields/silent-markers op) (holds-verbatim? st d)))
                               (conj {:skipped op :delta (:id d)}))
                             changed new-nses (conj applied (:id d))))
 
@@ -688,52 +750,3 @@
                :merged merged :conflicts conflicts :notes notes
                :changed-form-ids (vec (distinct changed)) :new-nses new-nses
                :applied applied :id-map idmap :fork-point fork-point})))))))
-
-(defn ^:export merge-text
-  "Three-way merge of TEXT: `{:merged s}` when it resolves, `{:conflict s}`
-  with the overlapping hunks marked when it does not. `base` may be nil (a
-  file the other side ADDED has nothing to merge against).
-
-  **Pure, and knows nothing about git.** Three strings in, one out — no
-  Repository, no working tree, no disk. That is the whole reason it lives
-  here rather than beside the projection: an import from a directory that
-  was never in a git repo has to reach the same logic, and slopp WORKS WITH
-  git rather than depending on it.
-
-  The algorithm is jgit's — the same one git itself performs, already on the
-  classpath because the projection needs jgit for objects and refs.
-  Borrowing a battle-tested merge is worth more than owning one: a merge
-  that is subtly wrong corrupts a file while reporting success, which is the
-  worst failure shape available here.
-
-  Why a whole-file 3-way at all, when a form is slopp's unit: a tracked file
-  has no forms, and `:files` is path→text with no sub-file addressing, so the
-  whole file IS the store's unit for it. Absorbing one wholesale was
-  therefore consistent — and it made two edits to different paragraphs of one
-  README a hand-merge for an agent, which is work nothing was gaining from.
-  Conflicting hunks still stop, and show the reader the overlap rather than
-  the file."
-  [base ours theirs]
-  (let [b (or base "") o (or ours "") t (or theirs "")]
-    (cond
-      ;; The trivial cases, short-circuited BEFORE the algorithm — cheaper, and
-      ;; total where the algorithm is not: an empty base against an empty side
-      ;; is a degenerate input jgit reports as a conflict, and "we changed
-      ;; nothing" is not a conflict in any reading.
-      (= o t) {:merged o}
-      (= o b) {:merged t}
-      (= t b) {:merged o}
-
-      :else
-      (let [raw (fn [s] (org.eclipse.jgit.diff.RawText. (.getBytes ^String s "UTF-8")))
-            res (.merge (org.eclipse.jgit.merge.MergeAlgorithm.)
-                        org.eclipse.jgit.diff.RawTextComparator/DEFAULT
-                        (raw b) (raw o) (raw t))
-            out (java.io.ByteArrayOutputStream.)]
-        (.formatMerge (org.eclipse.jgit.merge.MergeFormatter.) out res
-                      ["base" "ours" "theirs"]
-                      (java.nio.charset.Charset/forName "UTF-8"))
-        (let [text (.toString out "UTF-8")]
-          (if (.containsConflicts res)
-            {:conflict text}
-            {:merged text}))))))

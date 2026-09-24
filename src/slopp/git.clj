@@ -125,18 +125,6 @@
     (.close map-conn)
     nil))
 
-(defn fingerprint
-  "Line-independent identity of a :commit marker: SHA-256 of the canonical
-  tuple [id at description target] (NOT the whole map — map print order is
-  not canonical across EDN round-trips)."
-  [d]
-  (let [md (java.security.MessageDigest/getInstance "SHA-256")]
-    (->> (.digest md (.getBytes (pr-str [(:id d) (:at d) (:description d)
-                                         (:target d)])
-                                StandardCharsets/UTF_8))
-         (map #(format "%02x" %))
-         (apply str))))
-
 ^:reads (defn- lookup-sha [conn delta-id fp]
   (:git_map/sha (jdbc/execute-one!
                  conn ["SELECT sha FROM git_map
@@ -216,15 +204,6 @@
 (defn- author-email ^String [agent]
   (let [s (str/replace (str agent) #"[^A-Za-z0-9._-]" ".")]
     (str (if (str/blank? s) "slopp" s) "@slopp")))
-
-(defn- commit-message [d]
-  (str (:description d)
-       "\n\nSlopp-Commit: " (:id d) "\n"
-       (when (and (:author d) (:agent d))
-         ;; G5: the author field is the configured human; keep the agent
-         ;; visible (new-style markers only — old messages must not change)
-         (str "Slopp-Agent: " (:agent d) "\n"))
-       (when (= :red (:status d)) "Slopp-Status: red\n")))
 
 (defn- insert-tree!
   "Blobs + git tree for a {path content} map (content: string or BYTES —
@@ -338,32 +317,6 @@
   (or (:author d)
       {:name  (str (or (:agent d) "slopp"))
        :email (author-email (:agent d))}))
-
-(defn- insert-commit!
-  "Build blobs + tree + commit for marker `d` and return the sha. Pure
-  function of (parent-sha, d, tree-map) — determinism is what makes the
-  projection rebuildable (which is why the author identity, the files
-  manifest, and the structured config live ON the marker, never in ambient
-  state)."
-  [^Repository repo parent-sha d tree-map blob-of]
-  (with-open [ins (.newObjectInserter repo)]
-    (let [tree-id (insert-tree! ins (commit-paths tree-map (:deps d) (:files d) (:config d) blob-of))
-          at      (Instant/ofEpochMilli (long (:at d)))
-          who     (commit-author d)
-            ;; reflection-free ctors matter: reflective JGit calls resolve
-            ;; classes per-thread and break on server dispatch threads
-          cb      (doto (CommitBuilder.)
-                    (.setTreeId tree-id)
-                    (.setAuthor (PersonIdent. ^String (:name who) ^String (:email who)
-                                              at ^java.time.ZoneId ZoneOffset/UTC))
-                    (.setCommitter (PersonIdent. "slopp" "slopp@slopp"
-                                                 at ^java.time.ZoneId ZoneOffset/UTC))
-                    (.setMessage (commit-message d)))]
-      (when parent-sha
-        (.setParentId cb (ObjectId/fromString parent-sha)))
-      (let [cid (.insert ins cb)]
-        (.flush ins)
-        (.name cid)))))
 
 (defn stamped-commit-point
   "The commit-point id a projected commit MESSAGE stamps itself with — the
@@ -490,15 +443,6 @@
                       (store.render/render-ns store n)]))
         (keys (:namespaces store))))
 
-(defn- live-sha!
-  "The sha `git_map` pins for marker `d`, when its object is actually in the
-  repo — nil otherwise. A pin alone is a record of what was once minted; the
-  object being present is what lets a projection reuse it."
-  [^Repository repo map-conn d]
-  (let [sha (lookup-sha map-conn (:id d) (fingerprint d))]
-    (when (and sha (.has (.getObjectDatabase repo) (ObjectId/fromString sha)))
-      sha)))
-
 (defn- ops-since
   "The ops of the deltas AFTER `marker-id` on `line-id`, newest first, walked
   parent by parent from the line's head — or nil when the marker is not within
@@ -556,6 +500,117 @@
                   [(str path) bs])))
         (:artifacts store)))
 
+(defn ^:export commit-point-tree
+  "{path content} for the tree the LAST commit-point in `deltas` projects — folded
+  from the journal and rendered, **with no git repo anywhere**. nil when there
+  is no commit-point yet. `deltas` is the line's journal, oldest first
+  (`slopp.store.db/line-deltas`); the value does not carry it, and an import
+  is asked for rarely enough to read it then.
+
+  This is the merge BASE for an import that did not come through git. Export
+  is one-way; import is the narrow case where an external tool changed an
+  export and the change should come back as ordinary tracked form edits, and
+  nothing about that requires the other tool to have used git — it requires a
+  tree of files and a base to diff against. Git supplies a merge-base commit;
+  a directory supplies nothing, and this is the answer the store already had.
+
+  It shares `source-tree` and `commit-paths` with `project-journal!` rather
+  than recomputing them, and that is the whole correctness argument: a base
+  differing from the projection by so much as the generated `deps.edn` would
+  report phantom changes on paths nobody touched, on every import, forever.
+
+  A marker normally targets the delta immediately before it; a retroactive
+  `commit_point {:target …}` names an earlier one, and the fold stops there."
+  [deltas blob-of & {:keys [dir]}]
+  (let [marker (last (filter #(= :commit (:op %)) deltas))]
+    (when marker
+      (let [upto (or (:target marker) (:id marker))
+            st   (reduce (fn [st d]
+                           (let [st' (or (store/replay-delta st d) st)]
+                             (if (= (:id d) upto) (reduced st') st')))
+                         (store/empty-store) deltas)]
+        (commit-paths (cond-> (source-tree (refs/arrange-all st))
+                        ;; the artifacts too, when the caller can name the
+                        ;; store dir whose cache holds them — the projection
+                        ;; carries them, so a base without them would report
+                        ;; the bundle as a change on every import
+                        dir (merge (artifact-paths dir st)))
+                      (:deps marker) (:files marker)
+                      (:config marker) blob-of)))))
+
+(defn marker-identity
+  "The id a :commit marker was FIRST minted under — its own, or the
+  `:origin-id` a rebase-land's re-minted copy carries. The copy is the same
+  commit point on a new chain, so everything that keys on a commit point keys
+  on this: the git_map pin, the `Slopp-Commit:` stamp, the sha a query row
+  surfaces. Keyed on the copy's own id, the projection minted a second commit
+  for a state it had already published, and the mirror refused the push that
+  followed (2026-09-23)."
+  [d]
+  (or (:origin-id d) (:id d)))
+
+(defn fingerprint
+  "Line-independent identity of a :commit marker: SHA-256 of the canonical
+  tuple [identity at description] (NOT the whole map — map print order is
+  not canonical across EDN round-trips). `identity` is [[marker-identity]].
+  Neither the marker's own id nor its :target is in the tuple: a rebase-land
+  re-mints the branch's markers under fresh ids and re-points their targets
+  at its own copies, and both change with the copy while the commit point
+  does not. Two markers minted apart never share a millisecond."
+  [d]
+  (let [md (java.security.MessageDigest/getInstance "SHA-256")]
+    (->> (.digest md (.getBytes (pr-str [(marker-identity d) (:at d) (:description d)])
+                                StandardCharsets/UTF_8))
+         (map #(format "%02x" %))
+         (apply str))))
+
+(defn- commit-message [d]
+  (str (:description d)
+       ;; the IDENTITY, not the id: a rebase-land's carried copy is the same
+       ;; commit point, and the commit it names must say so
+       "\n\nSlopp-Commit: " (marker-identity d) "\n"
+       (when (and (:author d) (:agent d))
+         ;; G5: the author field is the configured human; keep the agent
+         ;; visible (new-style markers only — old messages must not change)
+         (str "Slopp-Agent: " (:agent d) "\n"))
+       (when (= :red (:status d)) "Slopp-Status: red\n")))
+
+(defn- insert-commit!
+  "Build blobs + tree + commit for marker `d` and return the sha. Pure
+  function of (parent-sha, d, tree-map) — determinism is what makes the
+  projection rebuildable (which is why the author identity, the files
+  manifest, and the structured config live ON the marker, never in ambient
+  state)."
+  [^Repository repo parent-sha d tree-map blob-of]
+  (with-open [ins (.newObjectInserter repo)]
+    (let [tree-id (insert-tree! ins (commit-paths tree-map (:deps d) (:files d) (:config d) blob-of))
+          at      (Instant/ofEpochMilli (long (:at d)))
+          who     (commit-author d)
+            ;; reflection-free ctors matter: reflective JGit calls resolve
+            ;; classes per-thread and break on server dispatch threads
+          cb      (doto (CommitBuilder.)
+                    (.setTreeId tree-id)
+                    (.setAuthor (PersonIdent. ^String (:name who) ^String (:email who)
+                                              at ^java.time.ZoneId ZoneOffset/UTC))
+                    (.setCommitter (PersonIdent. "slopp" "slopp@slopp"
+                                                 at ^java.time.ZoneId ZoneOffset/UTC))
+                    (.setMessage (commit-message d)))]
+      (when parent-sha
+        (.setParentId cb (ObjectId/fromString parent-sha)))
+      (let [cid (.insert ins cb)]
+        (.flush ins)
+        (.name cid)))))
+
+(defn- live-sha!
+  "The sha `git_map` pins for marker `d`, when its object is actually in the
+  repo — nil otherwise. A pin alone is a record of what was once minted; the
+  object being present is what lets a projection reuse it. Keyed on the
+  marker's IDENTITY: a carried copy finds the commit its original minted."
+  [^Repository repo map-conn d]
+  (let [sha (lookup-sha map-conn (marker-identity d) (fingerprint d))]
+    (when (and sha (.has (.getObjectDatabase repo) (ObjectId/fromString sha)))
+      sha)))
+
 ;; ---------------------------------------------------------------------------
 ;; projection
 (defn project-journal!
@@ -567,8 +622,11 @@
   minted: the remote commit itself becomes the chain node (its object arrives
   by fetch; the remote durably holds its own history). A pinned sha is reused
   only when its object is live in this repo; on a fresh repo the object is
-  re-inserted deterministically (same sha). Returns the tip sha (= base when
-  no markers) or nil.
+  re-inserted deterministically (same sha). Pins are keyed on the marker's
+  IDENTITY (`marker-identity`): a rebase-land's carried copy of a marker is
+  the same commit point and reuses the commit its original minted rather
+  than minting a second one. Returns the tip sha (= base when no markers)
+  or nil.
 
   **Each commit-point's tree is DERIVED, not stored.** The store is folded from
   the journal as this walk proceeds, so reaching a marker means holding the
@@ -628,11 +686,11 @@
           (if-not (= :commit (:op d))
             {:parent parent :store store' :held held'}
             (let [sha (if-let [gsha (:git-sha d)]
-                        (do (record-sha! map-conn (:id d) (fingerprint d)
+                        (do (record-sha! map-conn (marker-identity d) (fingerprint d)
                                          gsha line-label)
                             gsha)
                         (let [fp     (fingerprint d)
-                              pinned (lookup-sha map-conn (:id d) fp)]
+                              pinned (lookup-sha map-conn (marker-identity d) fp)]
                           (if (and pinned
                                    (.has (.getObjectDatabase repo)
                                          (ObjectId/fromString pinned)))
@@ -640,7 +698,7 @@
                             (let [tree (or (get held' (:target d)) (tree-of store'))
                                   s    (insert-commit! repo parent d tree
                                                        #(db/get-blob map-conn %))]
-                              (record-sha! map-conn (:id d) fp s line-label)
+                              (record-sha! map-conn (marker-identity d) fp s line-label)
                               s))))]
               ;; NOT dissoc'd: two markers can name the same target — a commit-point's
               ;; own target is the delta before it, which is exactly what an
@@ -649,44 +707,6 @@
               {:parent sha :store store' :held held'}))))
       {:parent base :store (store/empty-store) :held {}}
       dv))))
-
-(defn ^:export commit-point-tree
-  "{path content} for the tree the LAST commit-point in `deltas` projects — folded
-  from the journal and rendered, **with no git repo anywhere**. nil when there
-  is no commit-point yet. `deltas` is the line's journal, oldest first
-  (`slopp.store.db/line-deltas`); the value does not carry it, and an import
-  is asked for rarely enough to read it then.
-
-  This is the merge BASE for an import that did not come through git. Export
-  is one-way; import is the narrow case where an external tool changed an
-  export and the change should come back as ordinary tracked form edits, and
-  nothing about that requires the other tool to have used git — it requires a
-  tree of files and a base to diff against. Git supplies a merge-base commit;
-  a directory supplies nothing, and this is the answer the store already had.
-
-  It shares `source-tree` and `commit-paths` with `project-journal!` rather
-  than recomputing them, and that is the whole correctness argument: a base
-  differing from the projection by so much as the generated `deps.edn` would
-  report phantom changes on paths nobody touched, on every import, forever.
-
-  A marker normally targets the delta immediately before it; a retroactive
-  `commit_point {:target …}` names an earlier one, and the fold stops there."
-  [deltas blob-of & {:keys [dir]}]
-  (let [marker (last (filter #(= :commit (:op %)) deltas))]
-    (when marker
-      (let [upto (or (:target marker) (:id marker))
-            st   (reduce (fn [st d]
-                           (let [st' (or (store/replay-delta st d) st)]
-                             (if (= (:id d) upto) (reduced st') st')))
-                         (store/empty-store) deltas)]
-        (commit-paths (cond-> (source-tree (refs/arrange-all st))
-                        ;; the artifacts too, when the caller can name the
-                        ;; store dir whose cache holds them — the projection
-                        ;; carries them, so a base without them would report
-                        ;; the bundle as a change on every import
-                        dir (merge (artifact-paths dir st)))
-                      (:deps marker) (:files marker)
-                      (:config marker) blob-of)))))
 
 (defn- project-line!
   "Bring one line's ref up to date and say HOW: `{:sha :via}` with `:via` one of
@@ -756,7 +776,7 @@
                              ;; merges them — see [[artifact-paths]]
                              (artifact-paths (:slopp.git/dir ctx) store))
             sha       (insert-commit! repo parent m tree #(db/get-blob map-conn %))]
-        (record-sha! map-conn (:id m) (fingerprint m) sha nm)
+        (record-sha! map-conn (marker-identity m) (fingerprint m) sha nm)
         {:sha sha :via :head})
 
       :else (walk!))))

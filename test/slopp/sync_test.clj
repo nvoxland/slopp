@@ -795,9 +795,12 @@
         (testing "a recorded sha naming a commit nobody has does NOT make it misreport"
           (is (:aligned (sync/alignment dir "." "slopp/main"
                                         [(assoc latest :sha (apply str (repeat 40 "0")))]))))
+        (testing "a rebase-land's carried COPY of the stamped commit point aligns: same commit point, new id"
+          (is (:aligned (sync/alignment dir "." "slopp/main"
+                                        [(assoc latest :commit "d99999999" :origin-id (:commit latest))]))))
         (testing "and it can still say NO -- the stamp names a different commit-point"
           ;; Without this the assertions above are equally consistent with
-          ;; ":aligned true unconditionally", which is the shape of green this
+          ;; \":aligned true unconditionally\", which is the shape of green this
           ;; whole entry is about.
           (is (not (:aligned (sync/alignment dir "." "slopp/main"
                                              [(assoc latest :commit "d99999999")]))))))
@@ -1109,3 +1112,36 @@
         (rm-rf! dir-a)
         (rm-rf! (.getParentFile (io/file dir-b)))
         (rm-rf! (.getParentFile (io/file bare)))))))
+
+(deftest ^:external a-push-whose-remote-is-this-checkout-publishes-the-projection-into-it
+  ;; A store imported from its own checkout saves "." as its remote: the
+  ;; checkout IS the destination. `git_push` mirrored refs/heads/slopp/main
+  ;; from that repo to that repo and answered UP_TO_DATE — true and useless,
+  ;; since the mirror advances only when a commit point publishes it, and a
+  ;; mirror a human had reset would not move however many pushes followed
+  ;; (2026-09-23). With the checkout as the remote, a push publishes the
+  ;; projection into it.
+  (let [dir (work-repo! (temp-dir))
+        s   (external/open! {:slopp.ops/dir dir})]
+    (try
+      (with-open [conn (db/open! dir)] (db/set-meta! conn "git-remote" "."))
+      (ops/ingest! s 'gp.core "(ns gp.core)\n(defn ^:unused-ok f [x] x)\n")
+      (external/commit-point! s "first" :agent "alice")
+      (is (nil? (:error (sync/publish-local! dir "main"))) "fixture: the first commit point published")
+      (ops/edit-replace! s 'gp.core 'f "(defn ^:unused-ok f [x] (inc x))" :prompt "second" :agent "alice")
+      (external/commit-point! s "second" :agent "alice")
+      (let [ref-sha (fn [] (let [repo (-> (FileRepositoryBuilder.) (.setGitDir (io/file dir ".git")) (.build))]
+                             (try (some-> (.resolve repo "refs/heads/slopp/main") (.name))
+                                  (finally (.close repo)))))
+            stale   (ref-sha)]
+        (is (some? stale) "fixture: the mirror branch exists, one commit point behind")
+        (let [r   (sync/mirror-push! dir)
+              row (first (:mirrored r))]
+          (is (nil? (:error r)) (pr-str r))
+          (is (= "OK" (:status row)) (pr-str r))
+          (is (and (:pushed row) (not= stale (:pushed row))) "the push minted and published the second commit point")
+          (is (= (:pushed row) (ref-sha)) "the checkout's own mirror branch moved to it")
+          (is (= (:pushed row) (:sha (first (ops/query-commits s)))) "and it is the latest commit point's sha"))
+        (testing "and again is nothing to do"
+          (is (= "UP_TO_DATE" (:status (first (:mirrored (sync/mirror-push! dir))))))))
+      (finally (ops/close! s)))))

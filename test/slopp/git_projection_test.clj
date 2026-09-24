@@ -618,3 +618,58 @@
                                           :dir dir)]
           (is (= "console.log('bundle')" (String. ^bytes (get base "public/cljs/main.js") "UTF-8")))))
       (finally (ops/close! sess)))))
+
+(deftest a-commit-points-identity-survives-being-carried
+  ;; The fingerprint is the line-independent identity the pin table is keyed
+  ;; on, and the stamp is how a published commit says which commit point it
+  ;; is. A rebase-land re-mints the branch's markers under fresh ids with
+  ;; re-pointed targets; the commit point is the same, so it fingerprints and
+  ;; stamps the same — keyed on the copy's own id, the projection minted a
+  ;; second commit for a state it had already published (2026-09-23).
+  (let [orig {:id "d1" :op :commit :at 5 :description "v1" :target "d0"}
+        copy (assoc orig :id "d9" :origin-id "d1" :target "d8" :merged-from "d1")]
+    (is (= "d1" (git/marker-identity orig) (git/marker-identity copy)))
+    (is (= (git/fingerprint orig) (git/fingerprint copy)))
+    (is (not= (git/fingerprint orig) (git/fingerprint (assoc orig :at 6)))
+        "and two markers minted apart stay distinct")
+    (is (= "d1" (git/stamped-commit-point (#'git/commit-message copy))))))
+
+(deftest ^:external a-rebase-land-projects-a-carried-commit-point-as-the-commit-already-minted
+  ;; B takes a commit point and lands; the projection mints it. A, forked
+  ;; earlier, rebase-lands: B's marker crosses onto the new chain as a
+  ;; re-minted COPY. The copy is the same commit point, so the projection's
+  ;; head must be the commit it already minted for it — not a second commit,
+  ;; stamped with a second id, for a state it had already published. This
+  ;; store's own mirror refused the push that followed one (2026-09-23).
+  (let [dir   (temp-dir)
+        setup (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "setup"})]
+    (try (ops/ingest! setup 'gp.core seed :agent "setup")
+         (is (= "main" (:landed (branch/land-thread! setup))) "fixture: the seed reached main")
+         (finally (ops/close! setup)))
+    (let [a (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-a"})
+          b (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-b"})]
+      (try
+        (ops/edit-replace! a 'gp.core 'f "(defn f [x] (+ x 10))" :prompt "a works" :agent "agent-a")
+        (ops/ingest! b 'gp.other "(ns gp.other)\n\n(defn g [] :from-b)\n" :agent "agent-b")
+        (engine/commit-appended! b #(first (store/record-commit % "b's milestone" :agent "agent-b")) [])
+        (is (= "main" (:landed (branch/land-thread! b))) "fixture: B's commit point is on main")
+        (let [conn  (:db @a)
+              trunk (db/trunk-line-id! conn)
+              ctx   (git/open-ctx! dir)]
+          (try
+            (let [tip  (get-in (git/ensure-projected! ctx) [:refs "main"])
+                  orig (first (db/newest-commit-markers conn trunk 1))]
+              (is tip "fixture: the commit point projected before the rebase")
+              (let [r (branch/land-thread! a)]
+                (is (pos? (:merged (:rebased r) 0)) (str "fixture: A's land was a rebase — " (pr-str r))))
+              (let [copy (first (db/newest-commit-markers conn trunk 1))
+                    proj (git/ensure-projected! ctx)]
+                (is (= (:id orig) (:origin-id copy)) "fixture: main's newest marker is the carried copy")
+                (is (= tip (get-in proj [:refs "main"]))
+                    "the same commit point projects as the same commit")
+                (is (= :current (get-in proj [:via "main"])) "reused, not re-minted")
+                (is (= (:id orig) (git/stamped-commit-point (git/message-of (:slopp.git/repo ctx) tip))))
+                (testing "and the commit-point row joins the copy to that commit's sha"
+                  (is (= tip (:sha (first (ops/query-commits a))))))))
+            (finally (git/close-ctx! ctx))))
+        (finally (ops/close! a) (ops/close! b))))))

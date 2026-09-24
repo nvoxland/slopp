@@ -431,54 +431,6 @@
           (.setGitDir gd)
           (.build)))))
 
-(defn mirror-push!
-  "Push local MIRROR branches (refs/heads/slopp/<b>) from a git CHECKOUT to
-  a git remote. `branches` = STORE branch names (default [\"main\"]).
-  Fast-forward only. The FIRST url is saved as the default remote; one-off
-  urls never rewrite it. Fileless stores (no checkout) publish via `push!`
-  (the projection) instead."
-  [dir & {:keys [url token branches] :or {branches ["main"]}}]
-  (if-let [repo (working-repo dir)]
-    (try
-      (let [saved  (with-open [conn (db/open! dir)]
-                     (db/get-meta conn "git-remote"))
-            target (resolve-remote dir (or url saved))]
-        (if (str/blank? (str target))
-          {:error "no remote — pass :url once (it becomes the saved default)"}
-          (let [uri     (org.eclipse.jgit.transport.URIish.
-                         ^String (if (re-find #"^[a-z+]+://" (str target))
-                                   (str target)
-                                   (.getAbsolutePath (io/file (str target)))))
-                updates (vec (for [b branches
-                                   :let [r (str "refs/heads/slopp/" b)]]
-                               (org.eclipse.jgit.transport.RemoteRefUpdate. repo r r false nil nil)))
-                missing (vec (remove #(.resolve repo (str "refs/heads/slopp/" %)) branches))]
-            (if (seq missing)
-              {:error (str "no local mirror branch for "
-                           (str/join ", " (map #(str "slopp/" %) missing))
-                           " — a commit_point creates it")}
-              (let [res (with-open [tn (org.eclipse.jgit.transport.Transport/open repo uri)]
-                          (when-let [creds (git.client/remote-credentials token)]
-                            (.setCredentialsProvider tn creds))
-                          (.push tn org.eclipse.jgit.lib.NullProgressMonitor/INSTANCE updates))
-                    rows (vec (for [^org.eclipse.jgit.transport.RemoteRefUpdate u
-                                    (.getRemoteUpdates ^org.eclipse.jgit.transport.PushResult res)]
-                                {:ref (.getRemoteName u) :status (str (.getStatus u))
-                                 :message (.getMessage u)}))]
-                (if (every? #(contains? #{"OK" "UP_TO_DATE"} (:status %)) rows)
-                  (do (when (nil? saved)
-                        (with-open [conn (db/open! dir)]
-                          (db/set-meta! conn "git-remote" (str target))))
-                      {:mirrored rows :remote (str target)
-                       :default-remote (or saved (str target))})
-                  {:error (str "mirror push rejected: " (pr-str rows)
-                               " — fast-forward only; git_pull first if the remote moved")}))))))
-      (finally (.close repo)))
-    {:error (str dir " has no .git — the store IS durable without one (commit-points"
-                 " live in .slopp/store.db); to ALSO mirror history into git,"
-                 " run `git init` there and the next commit_point creates"
-                 " slopp/<branch> automatically")}))
-
 (defn mirror-pull!
   "Fetch the remote's slopp/<b> mirror branches into local
   refs/heads/slopp/<b> (fast-forward only — divergence is an honest
@@ -1005,6 +957,10 @@
   projection — while advising a `git_push` that could not fix it. A stamp
   rides the artifact and cannot disagree with the artifact.
 
+  The stamp names the commit point's IDENTITY — the id it was first minted
+  under — so a rebase-land's carried copy of it (`:origin-id` on the row) is
+  the same commit point and aligns.
+
   A head with NO stamp was not minted here: it is an ADOPTED remote commit
   from a pull, and for those the commit-point's `:sha` is the remote's own commit
   id — an observation rather than a mint record — so sha equality is the
@@ -1029,7 +985,7 @@
                   (let [head-sha (.name head)
                         stamp    (git/stamped-commit-point (git/message-of repo head-sha))
                         aligned  (if stamp
-                                   (= stamp (:commit latest))
+                                   (= stamp (or (:origin-id latest) (:commit latest)))
                                    (= head-sha (:sha latest)))
                         ;; Does the commit this is comparing against EXIST?
                         ;; `git_push` publishes a projection; it does not build
@@ -1058,7 +1014,7 @@
                      :note (alignment-note b {:stamp stamp
                                               :latest (:commit latest)
                                               :aligned aligned
-                                              :projected? projected?})}))) 
+                                              :projected? projected?})})))
               (finally (.close repo)))))))
     (catch Exception _ nil)))
 
@@ -1103,3 +1059,83 @@
     (println (pr-str r))
     (shutdown-agents)
     (when (or (:error r) (false? (:ok r)) (= :red (:status r))) (System/exit 1))))
+
+(defn- this-checkout?
+  "Is `target` (a resolved remote) the working repo at `dir` itself — the
+  \".\" an import saves? Then there is nothing to mirror TO: the checkout's own
+  `slopp/<b>` refs ARE the destination, and a push publishes the projection
+  into them."
+  [dir target]
+  (let [s (str target)]
+    (and (not (re-find #"^[a-z+]+://" s))
+         (= (.getCanonicalPath (io/file s))
+            (.getCanonicalPath (io/file (str dir)))))))
+
+(defn mirror-push!
+  "Push local MIRROR branches (refs/heads/slopp/<b>) from a git CHECKOUT to
+  a git remote. `branches` = STORE branch names (default [\"main\"]).
+  Fast-forward only. The FIRST url is saved as the default remote; one-off
+  urls never rewrite it. Fileless stores (no checkout) publish via `push!`
+  (the projection) instead.
+
+  When the remote IS this checkout (the \".\" an import saves), the mirror
+  branches are the destination: the push publishes the projection into them
+  (`publish-local!`, what a commit point does), one row per branch. Pushing a
+  repo's ref to itself answered UP_TO_DATE forever, and a mirror a human had
+  reset stayed where it was."
+  [dir & {:keys [url token branches] :or {branches ["main"]}}]
+  (if-let [repo (working-repo dir)]
+    (try
+      (let [saved  (with-open [conn (db/open! dir)]
+                     (db/get-meta conn "git-remote"))
+            target (resolve-remote dir (or url saved))]
+        (cond
+          (str/blank? (str target))
+          {:error "no remote — pass :url once (it becomes the saved default)"}
+
+          (this-checkout? dir target)
+          (let [rows (mapv (fn [b]
+                             (let [p (publish-local! dir b)]
+                               (if (:error p)
+                                 {:ref (str "refs/heads/slopp/" b) :status "REJECTED" :message (:error p)}
+                                 {:ref (str "refs/heads/" (:branch p)) :status (:status p)
+                                  :pushed (:pushed p) :via (:via p)})))
+                           branches)]
+            (if (every? #(contains? #{"OK" "UP_TO_DATE"} (:status %)) rows)
+              {:mirrored rows :remote (str target) :default-remote (or saved (str target))}
+              {:error (str "publishing into this checkout was refused: " (pr-str rows))}))
+
+          :else
+          (let [uri     (org.eclipse.jgit.transport.URIish.
+                         ^String (if (re-find #"^[a-z+]+://" (str target))
+                                   (str target)
+                                   (.getAbsolutePath (io/file (str target)))))
+                updates (vec (for [b branches
+                                   :let [r (str "refs/heads/slopp/" b)]]
+                               (org.eclipse.jgit.transport.RemoteRefUpdate. repo r r false nil nil)))
+                missing (vec (remove #(.resolve repo (str "refs/heads/slopp/" %)) branches))]
+            (if (seq missing)
+              {:error (str "no local mirror branch for "
+                           (str/join ", " (map #(str "slopp/" %) missing))
+                           " — a commit_point creates it")}
+              (let [res (with-open [tn (org.eclipse.jgit.transport.Transport/open repo uri)]
+                          (when-let [creds (git.client/remote-credentials token)]
+                            (.setCredentialsProvider tn creds))
+                          (.push tn org.eclipse.jgit.lib.NullProgressMonitor/INSTANCE updates))
+                    rows (vec (for [^org.eclipse.jgit.transport.RemoteRefUpdate u
+                                    (.getRemoteUpdates ^org.eclipse.jgit.transport.PushResult res)]
+                                {:ref (.getRemoteName u) :status (str (.getStatus u))
+                                 :message (.getMessage u)}))]
+                (if (every? #(contains? #{"OK" "UP_TO_DATE"} (:status %)) rows)
+                  (do (when (nil? saved)
+                        (with-open [conn (db/open! dir)]
+                          (db/set-meta! conn "git-remote" (str target))))
+                      {:mirrored rows :remote (str target)
+                       :default-remote (or saved (str target))})
+                  {:error (str "mirror push rejected: " (pr-str rows)
+                               " — fast-forward only; git_pull first if the remote moved")}))))))
+      (finally (.close repo)))
+    {:error (str dir " has no .git — the store IS durable without one (commit-points"
+                 " live in .slopp/store.db); to ALSO mirror history into git,"
+                 " run `git init` there and the next commit_point creates"
+                 " slopp/<branch> automatically")}))

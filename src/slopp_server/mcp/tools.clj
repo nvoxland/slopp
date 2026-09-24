@@ -1014,118 +1014,6 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
                    "")]
        (str op " {" args "} — " (subs (str sent) 0 (min 240 (count (str sent)))) shape)))))
 
-(defn remap-arguments
-  "REPAIR before REFUSE. The unambiguous argument SHAPES the s17 census
-  measured agents sending — and retrying after the refusal named the fix —
-  rewritten to the shape they meant: `change {ns name source}` with no
-  `:impl` is that one impl step; `query_slice {targets}` is a
-  `query_source`; `query_changes {ns name}` is the form's history;
-  `query_changes {since}` is `:from`; `query_commits {limit}` drops the
-  key; `ns_add_require {requires}` is `:require`; `query_slice {ns}` alone is the
-  namespace read; `query_commits {contains}` is `report` (eval22 step 2).
-  eval24 opus: `query_depends {reach}` is `query_flow`'s question, `{sym}`
-  is `:on`, a sibling op's key (`collapse`, `format`) is dropped,
-  `query_brief {ns}` alone is the namespace read, and a `*_note` key is the
-  caller's annotation to itself. eval25 opus: the two require ops take
-  either key name (`lib` / `require`) — they were one argument under two
-  spellings and cost a turn each way. Returns {:name :arguments :repaired} —
-  :repaired nil when nothing moved, else a small map the result carries so
-  the accepted shape is learned for free. A shape with TWO readings
-  (top-level ns beside an :impl) is left for the refusal, which still names
-  the accepted keys: refusals are for rules, spellings are repaired."
-  [name arguments]
-  (let [a0         (or arguments {})
-        ;; a note key first, for ANY op: `op_note`, `why-note` — the caller
-        ;; annotating its own call, never an argument
-        ;; … and a harness's own flag (`run_in_background`) is never an argument
-        notes      (vec (filter #(re-find #"[_-]note$|^run_in_background$" (clojure.core/name %)) (keys a0)))
-        a          (apply dissoc a0 notes)
-        noted      (fn [r] (cond-> r
-                             (seq notes) (update :repaired #(update (or % {}) :dropped (fnil into []) notes))))
-        write-keys [:ns :name :source :action :code :match :text :where :require]
-        top        (select-keys a write-keys)]
-    (noted
-     (cond
-       (and (#{"change" "intent"} name) (seq top) (nil? (:impl a)))
-       {:name name
-        :arguments (assoc (apply dissoc a write-keys) :impl [top])
-        :repaired {:moved-into-impl (vec (keys top))}}
-
-       (and (= "query_slice" name) (:targets a))
-       (let [keep    (select-keys a [:targets :full :resend :prompt :agent :verbose])
-             dropped (vec (remove (set (keys keep)) (keys a)))]
-         {:name "query_source" :arguments keep
-          :repaired (cond-> {:routed "query_source"}
-                      (seq dropped) (assoc :dropped dropped))})
-
-       (and (= "query_changes" name) (or (:ns a) (:name a)))
-       {:name "query_history"
-        :arguments (select-keys a [:ns :name :at :format :limit :agent :prompt :verbose])
-        :repaired {:routed "query_history"}}
-
-       (and (= "query_changes" name) (:since a))
-       {:name name :arguments (assoc (dissoc a :since) :from (:since a))
-        :repaired {:renamed {:since :from}}}
-
-       ;; a sibling op's key: `collapse` is query_history's, `format` is
-       ;; query_changes' — dropped, and the result says so
-       (and (= "query_changes" name) (contains? a :collapse))
-       {:name name :arguments (dissoc a :collapse) :repaired {:dropped [:collapse]}}
-
-       (and (= "report" name) (contains? a :format))
-       {:name name :arguments (dissoc a :format) :repaired {:dropped [:format]}}
-
-       (and (#{"query_commits" "query_git"} name) (contains? a :limit) (nil? (:contains a)))
-       {:name name :arguments (dissoc a :limit) :repaired {:dropped [:limit]}}
-
-       ;; the namespace read: `query_slice {ns}` / `query_brief {ns}` with no
-       ;; name names the whole namespace, which is query_source's answer
-       (and (#{"query_slice" "query_brief"} name) (:ns a) (nil? (:name a)) (nil? (:targets a)))
-       (let [keep    (select-keys a [:ns :full :resend :prompt :agent :verbose])
-             dropped (vec (remove (set (keys keep)) (keys a)))]
-         {:name "query_source" :arguments keep
-          :repaired (cond-> {:routed "query_source"}
-                      (seq dropped) (assoc :dropped dropped))})
-
-       ;; `reach` is query_flow's question — callers and callees around one
-       ;; form, bodies on the way — asked of query_depends
-       (and (= "query_depends" name) (contains? a :reach))
-       {:name "query_flow"
-        :arguments (-> (select-keys a [:on :reach :sym :prompt :agent :verbose])
-                       (cond-> (:sym a) (-> (assoc :on (:sym a)) (dissoc :sym))))
-        :repaired {:routed "query_flow"}}
-
-       (and (= "query_depends" name) (:sym a) (nil? (:on a)))
-       {:name name :arguments (assoc (dissoc a :sym) :on (:sym a))
-        :repaired {:renamed {:sym :on}}}
-
-       ;; `contains` is report's key: a commit list filtered by what it
-       ;; contains IS the store-wide history question report answers
-       (and (= "query_commits" name) (:contains a))
-       {:name "report"
-        :arguments (select-keys a [:contains :since :limit :agent :prompt :verbose])
-        :repaired {:routed "report"}}
-
-       (and (= "ns_add_require" name) (:requires a) (nil? (:require a)))
-       (let [r   (:requires a)
-             one (if (and (sequential? r) (= 1 (count r))) (first r) r)]
-         (if (string? one)
-           {:name name :arguments (assoc (dissoc a :requires) :require one)
-            :repaired {:renamed {:requires :require}}}
-           {:name name :arguments a}))
-
-       ;; one argument, two spellings: the add op says :require, the remove
-       ;; op says :lib, and a model that just used one sends it to the other
-       (and (= "ns_add_require" name) (:lib a) (nil? (:require a)))
-       {:name name :arguments (assoc (dissoc a :lib) :require (:lib a))
-        :repaired {:renamed {:lib :require}}}
-
-       (and (= "ns_remove_require" name) (:require a) (nil? (:lib a)))
-       {:name name :arguments (assoc (dissoc a :require) :lib (:require a))
-        :repaired {:renamed {:require :lib}}}
-
-       :else {:name name :arguments a}))))
-
 (def verb-aliases
   "The two verbs the skill teaches — `explore`, `change` — as TOOL NAMES
   beside the families. Dispatch by op name always worked (`call-tool!`
@@ -1174,3 +1062,142 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
                   t))
               tools)
         verb-aliases))
+
+(defn- flag-text
+  "`arguments` with every boolean-or-string argument that carries the TEXT
+  \"true\" or \"false\" read as the flag. A harness that sees `string` in the
+  union serializes the boolean as its text — `done {commit true}` arrived as
+  `{commit \"true\"}`, and the commit point took it as its LABEL: six commit
+  points on this store described \"true\" (2026-09-23). Only the two flag words
+  move; any other text is the string the union allows, and a boolean-only
+  argument is the schema's to refuse."
+  [name arguments]
+  (let [props (get-in (some #(when (= name (:name %)) %) registry)
+                      [:inputSchema :properties])]
+    (reduce-kv (fn [m k v]
+                 (let [t (get-in props [k :type])]
+                   (if (and (contains? #{"true" "false"} v)
+                            (sequential? t)
+                            (some #{"boolean"} t)
+                            (some #{"string"} t))
+                     (assoc m k (= "true" v))
+                     m)))
+               arguments arguments)))
+
+(defn remap-arguments
+  "REPAIR before REFUSE. The unambiguous argument SHAPES the s17 census
+  measured agents sending — and retrying after the refusal named the fix —
+  rewritten to the shape they meant: `change {ns name source}` with no
+  `:impl` is that one impl step; `query_slice {targets}` is a
+  `query_source`; `query_changes {ns name}` is the form's history;
+  `query_changes {since}` is `:from`; `query_commits {limit}` drops the
+  key; `ns_add_require {requires}` is `:require`; `query_slice {ns}` alone is the
+  namespace read; `query_commits {contains}` is `report` (eval22 step 2).
+  eval24 opus: `query_depends {reach}` is `query_flow`'s question, `{sym}`
+  is `:on`, a sibling op's key (`collapse`, `format`) is dropped,
+  `query_brief {ns}` alone is the namespace read, and a `*_note` key is the
+  caller's annotation to itself. eval25 opus: the two require ops take
+  either key name (`lib` / `require`) — they were one argument under two
+  spellings and cost a turn each way. Returns {:name :arguments :repaired} —
+  :repaired nil when nothing moved, else a small map the result carries so
+  the accepted shape is learned for free. A shape with TWO readings
+  (top-level ns beside an :impl) is left for the refusal, which still names
+  the accepted keys: refusals are for rules, spellings are repaired.
+
+  A boolean-or-string argument carrying the text \"true\"/\"false\" is the
+  flag ([[flag-text]]) — the wire's shape, not the caller's, so it is not
+  reported as a repair."
+  [name arguments]
+  (let [a0         (or arguments {})
+        ;; a note key first, for ANY op: `op_note`, `why-note` — the caller
+        ;; annotating its own call, never an argument
+        ;; … and a harness's own flag (`run_in_background`) is never an argument
+        notes      (vec (filter #(re-find #"[_-]note$|^run_in_background$" (clojure.core/name %)) (keys a0)))
+        a          (apply dissoc a0 notes)
+        noted      (fn [r] (cond-> r
+                             (seq notes) (update :repaired #(update (or % {}) :dropped (fnil into []) notes))))
+        write-keys [:ns :name :source :action :code :match :text :where :require]
+        top        (select-keys a write-keys)
+        r
+        (noted
+         (cond
+           (and (#{"change" "intent"} name) (seq top) (nil? (:impl a)))
+           {:name name
+            :arguments (assoc (apply dissoc a write-keys) :impl [top])
+            :repaired {:moved-into-impl (vec (keys top))}}
+
+           (and (= "query_slice" name) (:targets a))
+           (let [keep    (select-keys a [:targets :full :resend :prompt :agent :verbose])
+                 dropped (vec (remove (set (keys keep)) (keys a)))]
+             {:name "query_source" :arguments keep
+              :repaired (cond-> {:routed "query_source"}
+                          (seq dropped) (assoc :dropped dropped))})
+
+           (and (= "query_changes" name) (or (:ns a) (:name a)))
+           {:name "query_history"
+            :arguments (select-keys a [:ns :name :at :format :limit :agent :prompt :verbose])
+            :repaired {:routed "query_history"}}
+
+           (and (= "query_changes" name) (:since a))
+           {:name name :arguments (assoc (dissoc a :since) :from (:since a))
+            :repaired {:renamed {:since :from}}}
+
+           ;; a sibling op's key: `collapse` is query_history's, `format` is
+           ;; query_changes' — dropped, and the result says so
+           (and (= "query_changes" name) (contains? a :collapse))
+           {:name name :arguments (dissoc a :collapse) :repaired {:dropped [:collapse]}}
+
+           (and (= "report" name) (contains? a :format))
+           {:name name :arguments (dissoc a :format) :repaired {:dropped [:format]}}
+
+           (and (#{"query_commits" "query_git"} name) (contains? a :limit) (nil? (:contains a)))
+           {:name name :arguments (dissoc a :limit) :repaired {:dropped [:limit]}}
+
+           ;; the namespace read: `query_slice {ns}` / `query_brief {ns}` with no
+           ;; name names the whole namespace, which is query_source's answer
+           (and (#{"query_slice" "query_brief"} name) (:ns a) (nil? (:name a)) (nil? (:targets a)))
+           (let [keep    (select-keys a [:ns :full :resend :prompt :agent :verbose])
+                 dropped (vec (remove (set (keys keep)) (keys a)))]
+             {:name "query_source" :arguments keep
+              :repaired (cond-> {:routed "query_source"}
+                          (seq dropped) (assoc :dropped dropped))})
+
+           ;; `reach` is query_flow's question — callers and callees around one
+           ;; form, bodies on the way — asked of query_depends
+           (and (= "query_depends" name) (contains? a :reach))
+           {:name "query_flow"
+            :arguments (-> (select-keys a [:on :reach :sym :prompt :agent :verbose])
+                           (cond-> (:sym a) (-> (assoc :on (:sym a)) (dissoc :sym))))
+            :repaired {:routed "query_flow"}}
+
+           (and (= "query_depends" name) (:sym a) (nil? (:on a)))
+           {:name name :arguments (assoc (dissoc a :sym) :on (:sym a))
+            :repaired {:renamed {:sym :on}}}
+
+           ;; `contains` is report's key: a commit list filtered by what it
+           ;; contains IS the store-wide history question report answers
+           (and (= "query_commits" name) (:contains a))
+           {:name "report"
+            :arguments (select-keys a [:contains :since :limit :agent :prompt :verbose])
+            :repaired {:routed "report"}}
+
+           (and (= "ns_add_require" name) (:requires a) (nil? (:require a)))
+           (let [r   (:requires a)
+                 one (if (and (sequential? r) (= 1 (count r))) (first r) r)]
+             (if (string? one)
+               {:name name :arguments (assoc (dissoc a :requires) :require one)
+                :repaired {:renamed {:requires :require}}}
+               {:name name :arguments a}))
+
+           ;; one argument, two spellings: the add op says :require, the remove
+           ;; op says :lib, and a model that just used one sends it to the other
+           (and (= "ns_add_require" name) (:lib a) (nil? (:require a)))
+           {:name name :arguments (assoc (dissoc a :lib) :require (:lib a))
+            :repaired {:renamed {:lib :require}}}
+
+           (and (= "ns_remove_require" name) (:require a) (nil? (:lib a)))
+           {:name name :arguments (assoc (dissoc a :require) :lib (:require a))
+            :repaired {:renamed {:require :lib}}}
+
+           :else {:name name :arguments a}))]
+    (update r :arguments #(flag-text (:name r) %))))

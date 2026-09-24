@@ -437,10 +437,12 @@
 
 (defn ^:export commit-point-rows
   "Commit-points newest first, as a PURE fold over the delta log:
-  `[{:commit :description :target :status :at :agent :sha}]`. `:sha` is
+  `[{:commit :description :target :status :at :agent :sha :origin-id}]`. `:sha` is
   present only when the DELTA carries one (imported markers do from birth);
   the projection's pinning table is a db read and lives one tier up, in
-  `slopp.api/query-commits`, which is this fold plus that join.
+  `slopp.api/query-commits`, which is this fold plus that join. `:origin-id`
+  rides on a rebase-land's carried COPY of a marker: the id the commit point
+  was first minted under, which is what the projection pins and stamps by.
 
   `:titles-only true` is the LIST rung: each description trimmed to its
   first line, with the remaining non-blank lines counted into
@@ -458,8 +460,9 @@
                                    :target      (:target d)
                                    :status      (:status d)
                                    :at          (human-time (:at d))}
-                            (:agent d)   (assoc :agent (:agent d))
-                            (:git-sha d) (assoc :sha (:git-sha d))))))]
+                            (:agent d)     (assoc :agent (:agent d))
+                            (:git-sha d)   (assoc :sha (:git-sha d))
+                            (:origin-id d) (assoc :origin-id (:origin-id d))))))]
     (if-not titles-only
       rows
       (mapv (fn [row]

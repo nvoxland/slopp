@@ -1908,7 +1908,12 @@
   COMMIT POINT when `a` asks for one (`:commit` true, or a label). Neither
   runs on a red episode: nothing to project, and a whole-store answer would
   only restate the red. `r` is the done result. eval25 opus: done →
-  full_check → commit_point after every step, ten turns a lifetime."
+  full_check → commit_point after every step, ten turns a lifetime.
+
+  A commit point taken with no label of its own is described by the ASK the
+  turn recorded (`:last-intent`): that is what the work was, where \"commit
+  point\" says nothing and \"true\" — the flag, carried as text by a harness
+  and taken for a label — described six commit points here (2026-09-23)."
   [session a r]
   (let [red?   (or (= :red (:status r)) (= :red (get-in r [:findings :episode-status])))
         conn   (:db @session)
@@ -1922,7 +1927,8 @@
         cp     (when (and (:commit a) (not red?))
                  (let [lbl (if (string? (:commit a))
                              (:commit a)
-                             (or (:label a) (:done a) (:prompt a) "commit point"))]
+                             (or (:label a) (:done a) (:prompt a)
+                                 (:last-intent @session) "commit point"))]
                    (published-commit-point! session lbl :agent (:agent a))))]
     (cond-> {;; how a teammate re-runs it — the line the model went to the
              ;; README for (eval27 opus step 1)

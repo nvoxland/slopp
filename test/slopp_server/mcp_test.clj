@@ -4957,3 +4957,35 @@
           (is (re-find (re-pattern (str/trim head)) r)
               "and the answer names the sha the mirror is at")))
       (finally (ops/close! sess)))))
+
+(deftest a-flag-carried-as-text-is-the-flag
+  ;; `commit` and `dead_ends` are typed boolean-or-string, and a harness that
+  ;; sees "string" in the union sends the flag as the TEXT "true". The commit
+  ;; point then took "true" as its LABEL — six commit points on this store
+  ;; described "true" (2026-09-23). A boolean-or-string argument carrying
+  ;; "true"/"false" is the flag; any other text is the string it always was,
+  ;; and a boolean-only argument is the schema's to refuse.
+  (is (= {:name "done" :arguments {:commit true}}
+         (tools/remap-arguments "done" {:commit "true"})))
+  (is (= {:name "change" :arguments {:commit false :prompt "x"}}
+         (tools/remap-arguments "change" {:commit "false" :prompt "x"})))
+  (is (= {:name "done" :arguments {:commit "f doubles"}}
+         (tools/remap-arguments "done" {:commit "f doubles"})))
+  (is (= {:name "query_history" :arguments {:dead_ends true}}
+         (tools/remap-arguments "query_history" {:dead_ends "true"})))
+  (is (= {:name "test_run" :arguments {:all "true"}}
+         (tools/remap-arguments "test_run" {:all "true"}))))
+
+(deftest ^:external a-commit-taken-with-no-label-is-described-by-the-ask
+  ;; `done {commit true}` took "true" as its description when the harness
+  ;; carried the flag as text, and "commit point" when it did not — neither
+  ;; says what was done. With no label of its own, the commit point is
+  ;; described by the ask the turn recorded, which is what the work was.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "cl.core" :source "(ns cl.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n"})
+      (swap! sess assoc :last-intent "make f the identity")
+      (let [r (call! sess "done" {:commit "true"})]
+        (is (re-find #":commit \{:commit \"d[0-9a-f]+\"" r) r)
+        (is (= "make f the identity" (:description (first (ops/query-commits sess))))))
+      (finally (ops/close! sess)))))

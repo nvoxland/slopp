@@ -671,3 +671,50 @@
           "a target that was a verdict marker lands on this line all the same")
       (is (contains? #{(:id copy) (:id c)} (:target c2))
           "— on the nearest delta before it that crossed (their earlier commit point's copy here), which is the same state"))))
+
+(deftest a-carried-commit-point-keeps-the-identity-it-was-first-minted-under
+  ;; A re-minted copy is a NEW delta by id, and the git projection pins and
+  ;; stamps a commit by its marker's identity — so a copy that lost its
+  ;; origin's id read as a second commit point, and the projection minted a
+  ;; second commit for a state it had already published (this store's own
+  ;; journal, 2026-09-23: two markers for one commit point, and the mirror
+  ;; refusing the push that followed). The copy names the id it was FIRST
+  ;; minted under, and a copy of a copy still names that first one.
+  (let [b      (base)
+        ours   (replace! b 'a "(defn a [x] (+ x 1))")
+        theirs (replace! b 'b "(defn b [x] (+ x 2))")
+        theirs (first (store/record-commit theirs "their milestone" :agent "them"))
+        orig   (last (store/deltas theirs))
+        r1     (merge/merge-logs ours theirs :carry-markers true)
+        copy   (first (filter #(= :commit (:op %)) (store/deltas (:store r1))))
+        third  (replace! b 'c "(defn c [x] (+ x 3))")
+        r2     (merge/merge-logs third (:store r1) :carry-markers true)
+        copy2  (first (filter #(= :commit (:op %)) (store/deltas (:store r2))))]
+    (is (nil? (:origin-id orig)) "a marker minted in place needs no origin: its id is its identity")
+    (is (not= (:id orig) (:id copy)) "fixture: the copy really is a re-mint")
+    (is (= (:id orig) (:origin-id copy)))
+    (is (= (:id orig) (:origin-id copy2))
+        "a copy of a copy names the FIRST id, not the copy it was made from")
+    (is (= (:id copy) (:merged-from copy2))
+        "while :merged-from still names the delta it was replayed from")))
+
+(deftest a-commit-point-this-line-already-holds-is-not-minted-again
+  ;; A thread whose view followed main holds main's deltas VERBATIM, ids and
+  ;; all, interleaved after its own — so the common prefix ends before them
+  ;; and they arrive in theirs' suffix a second time. Content converges by
+  ;; value; a commit marker was re-minted regardless, so main's ancestry
+  ;; carried the same commit point twice, one above the other (this store's
+  ;; own journal, 2026-09-23).
+  (let [b      (base)
+        theirs (replace! b 'b "(defn b [x] (+ x 2))")
+        theirs (first (store/record-commit theirs "their milestone" :agent "them"))
+        sfx    (drop (count (store/deltas b)) (store/deltas theirs))
+        ours   (reduce #(or (store/replay-delta %1 %2) %1)
+                       (replace! b 'a "(defn a [x] (+ x 1))")
+                       sfx)
+        r      (merge/merge-logs ours theirs :carry-markers true)
+        marks  (filter #(= :commit (:op %)) (store/deltas (:store r)))]
+    (is (= 1 (count marks)) "the marker this line holds IS the marker — no copy")
+    (is (nil? (:origin-id (first marks))))
+    (is (empty? (:conflicts r)))
+    (is (contains? (set (:applied r)) (:id (last sfx))) "delivered all the same")))
