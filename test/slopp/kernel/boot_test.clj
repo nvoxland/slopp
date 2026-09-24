@@ -521,24 +521,37 @@
 
 (deftest boot-note-does-not-treat-the-servers-cwd-as-a-project
       (testing "server, no store at its dir: nothing to narrate — -main announces the server itself"
-    (is (nil? (boot/boot-note {:server? true :loaded? false :store-file? false
+    (is (nil? (boot/boot-note {:jar-entry? true :loaded? false :store-file? false
                               :dir "/home/me/.slopp" :mode "snapshot"})))
-    (is (nil? (boot/boot-note {:server? true :loaded? false :store-file? true
+    (is (nil? (boot/boot-note {:jar-entry? true :loaded? false :store-file? true
                               :dir "/home/me/.slopp" :mode "snapshot"}))
         "even an empty store file at the server's dir is not this line's problem"))
   (testing "a NON-server boot serving an unadopted dir keeps the first-write message"
-    (let [note (boot/boot-note {:server? false :loaded? false :store-file? false
+    (let [note (boot/boot-note {:jar-entry? false :loaded? false :store-file? false
                                :dir "/proj" :mode "snapshot"})]
       (is (re-find #"unadopted" note))
       (is (re-find #"first write creates /proj/\.slopp/store\.db" note))))
   (testing "an empty store present, non-server: the wrong-dir warning"
-    (let [note (boot/boot-note {:server? false :loaded? false :store-file? true
+    (let [note (boot/boot-note {:jar-entry? false :loaded? false :store-file? true
                                :dir "/proj" :mode "live"})]
       (is (re-find #"no namespaces yet" note))))
   (testing "a program that loaded says so with dir and mode — checkout or server self-host"
     (is (re-find #"loaded slopp's program from the store at /proj \(live\)"
-                 (boot/boot-note {:server? true :loaded? true :store-file? true
+                 (boot/boot-note {:jar-entry? true :loaded? true :store-file? true
                                   :dir "/proj" :mode "live"})))
     (is (re-find #"loaded slopp's program from the store at /proj"
-                 (boot/boot-note {:server? false :loaded? true :store-file? true
+                 (boot/boot-note {:jar-entry? false :loaded? true :store-file? true
                                   :dir "/proj" :mode "snapshot"})))))
+
+(deftest an-entry-the-jar-ships-is-booted-from-a-neutral-dir-and-says-so-correctly
+  ;; `slopp dev .` printed "no slopp store at ~/.slopp — serving an unadopted
+  ;; directory": the launcher boots it from the neutral dir exactly as it
+  ;; boots the server, the runner's code ships in the jar exactly as the
+  ;; server's does, and the exemption was spelled as ONE entry's name.
+  (testing "both entries the jar ships are exempt; a store CLI trampolined by --main is not"
+    (is (boot/jar-entry? (symbol "slopp-server.process" "-main")))
+    (is (boot/jar-entry? (symbol "slopp-server.dev" "-main")))
+    (is (not (boot/jar-entry? (symbol "slopp.sync" "-main")))))
+  (testing "the runner from a neutral dir: nothing to narrate, like the server"
+    (is (nil? (boot/boot-note {:jar-entry? true :loaded? false :store-file? false
+                              :dir "/home/me/.slopp" :mode "snapshot"})))))

@@ -798,24 +798,24 @@
 (defn boot-note
   "The single line boot logs about where it loaded slopp's program from,
   decided after [[load-store!]] runs. `loaded?` is whether any namespace came
-  from the store at `dir`; `server?` whether the entry is the machine server.
+  from the store at `dir`; `jar-entry?` whether the entry's code ships in the
+  jar ([[jar-entry?]] — the machine server, the dev-instance runner).
 
-  The server loads its own code from the JAR's classpath, so an empty `dir`
+  Such an entry loads its own code from the JAR's classpath, so an empty `dir`
   is not a project it serves — it reads no store there and writes none. Saying
   otherwise (the unadopted-directory / first-write-creates-a-store line) made
   a neutral working directory look like a project the server adopts and
-  manages. A NON-server boot that finds no store genuinely IS serving that
-  directory, so it keeps that message. A boot that DID load a program says so
+  manages; `slopp dev .` printed the same line the day it shipped, because
+  the exemption named one entry. A boot of a STORE's own CLI that finds no
+  store genuinely IS serving that directory, so it keeps that message. A boot that DID load a program says so
   — that covers both a source checkout and the server self-host loop, where
   the code really does come from the dir's store."
-  [{:keys [server? loaded? store-file? dir mode]}]
+  [{:keys [jar-entry? loaded? store-file? dir mode]}]
   (cond
     loaded?
     (str "slopp.kernel.boot: loaded slopp's program from the store at " dir " (" mode ")")
 
-    
-
-                server?
+    jar-entry?
     nil
 
     store-file?
@@ -827,6 +827,16 @@
     (str "slopp.kernel.boot: no slopp store at " dir " — serving an unadopted"
          " directory and leaving it untouched. The first write creates "
          dir "/.slopp/store.db")))
+
+(defn jar-entry?
+  "Whether `main` is an entry whose code SHIPS IN THE JAR — the machine
+  server and the dev-instance runner — and is therefore booted from a neutral
+  dir on purpose: it reads no store there and writes none. Every other
+  `--main` is a store's own CLI, trampolined over the program the dir holds."
+  [main]
+  (contains? #{(symbol "slopp-server.process" "-main")
+               (symbol "slopp-server.dev" "-main")}
+             main))
 
 ^:unsafe (defn -main
   "clojure -M -m slopp.kernel.boot <dir> [--main ns/fn arg...]
@@ -848,12 +858,12 @@
   rather than treating the working directory as a project to adopt."
   [& args]
   (let [{:keys [dir main args]} (parse-args args)
-        server? (= main 'slopp-server.process/-main)]
+        jar-entry? (jar-entry? main)]
     (reset! boot-info {:dir dir
                        :mode :snapshot
                        :booted-at (System/currentTimeMillis)})
     (let [sources (load-store! dir)]
-      (when-let [note (boot-note {:server?     server?
+      (when-let [note (boot-note {:jar-entry?  jar-entry?
                                   :loaded?     (boolean (seq sources))
                                   :store-file? (.exists (io/file dir ".slopp" "store.db"))
                                   :dir         dir
