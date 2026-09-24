@@ -2157,6 +2157,14 @@ loop. Decisions:
   (`session/maybe-recompile-client!`, decoupled via `store/late-ref` because
   `slopp.api.cljs → api.external → slopp.api` would cycle) so `--live` serves
   fresh JS. Default off; the common `:jvm` write is a nil no-op.
+  **Revisited 2026-09-18: on by default for a store that RUNS a dev instance**
+  (`http.enabled` or `app.main` — the same facts `live/serve-plan` serves on),
+  `client`/`auto-compile` `false` to opt out, `true` to force it for a store
+  that serves nothing (`webdev.cljs/auto-compile?`). Measured on slopp's own
+  store: the landing redirect landed green, the dev instance refreshed, and
+  the page served the previous day's bundle until `compile_client` was run by
+  hand — a served page is the request, and the setting was the friction. A
+  store with no dev instance still compiles nothing on a write.
 
 Deferred, deliberately: running compiled JS in the write-verify loop (browser/
 Cypress/Playwright — the eventual app-level layer); cherry/squint backends (the
@@ -7258,10 +7266,78 @@ So the plugin loader gives the daemon the one fact the pipe existed to carry.
 **What it costs.** curl joins the floor (it ships on macOS, Windows 10+ and
 nearly every Linux, and the launcher already fetched the jar with it). The
 DELETE-on-exit the pipe sent is now the client's; the idle reaper (two hours)
-closes what a client leaves. A native `slopp` client — instant, no curl, a
+closes what a client leaves. **Amendment (2026-09-18, user decision):** the
+client sends no DELETE at all — measured: a one-shot agent's two MCP sessions
+and its CLI session sat in the registry after exit — so the plugin's
+`SessionEnd` hook is the exit signal (`end-agent!`), correlated by the harness
+id a session takes when it absorbs a prompt's intent (`session-agent`); a
+`${CLAUDE_CODE_SESSION_ID}` header does NOT work — a top-level Claude leaves
+the placeholder unexpanded, only a nested one inherits the var (measured) — so
+`X-Slopp-Agent` is honoured when a client sends a real one and the plugin
+sends none. Sessions nobody identified are ended with the exit too: Claude
+opens two per agent and only one absorbs an intent, and a fresh session ended
+by mistake re-attaches on its next request at the cost of one late answer. What holds a project is
+AGENTS, anywhere: sessions here, the CLI session, or sessions on the project's
+own dev instance, which the daemon asks over `/api/status` (`child-agents!`).
+The 2026-09-17 rule that a SERVING app holds its project is reversed — it kept
+a browser's project open forever after its agents left, and it was applied on
+the CLI-reap path only, so an idle MCP session's detach still stopped a dev
+instance with four agents attached to it. The last agent out closes the
+project: dev instance, reader and every oracle; the reaper is the backstop. A native `slopp` client — instant, no curl, a
 Windows story without bash — is the next step if the floor should drop
 further, and with the logic in the daemon it is a transport swap; slopp's own
 `build-native.sh` is the way to build it.
+
+## D-dev-runner (2026-09-23, user decision) — `slopp dev [dir]` serves a project's dev instance without a slopp server
+
+**Decision.** A dev instance is servable on its own. `slopp-server.dev/start!`
+opens a read-only reader on the project's store, boots the instance the way
+the machine server does for a managed child (`slopp.webdev.live/refresh!`,
+one code path for the first serve and every later one), and polls the store
+with the server's own `reserve-decision` (moved to `slopp.webdev.live`, where
+the mechanism lives): main advanced → `hot-refresh!`, else `refresh!`; a
+thread write → nothing. It runs until stopped, not until an agent leaves — a
+human asked for it. The launcher's `slopp dev [dir]` boots it from the
+neutral dir so the jar's code is the runner and the project's store is what
+it serves.
+
+**Why.** Developing slopp with slopp went through the machine server: a
+registry, the MCP and hook doors, an agent attached only to trip the first
+boot, and a lifecycle tuned to agents leaving. What development needs is the
+one loop inside that, and the loop is general — any project with `app.main`
+or `http.enabled` has a dev instance, and a human who wants to look at one
+should not need a server and an agent to get it. For slopp's own checkout
+the setup collapses to `slopp dev .` plus a plain `claude`: the `dev`
+overlay that moved the instance to 7358 is gone (user decision, same day),
+so it takes the store's ordinary `http.port` and IS the machine's slopp
+server while it runs; `dev.local` is the lever for a box that runs a
+released server beside it.
+`engine/refresh-cache!` is exported to the whole `slopp-server` subtree for
+this: both entry points re-serve an owner from the branch's current value.
+
+## D-slopp-server-name (2026-09-23, user decision) — the one process per machine is the "slopp server"; "daemon" and "hub" are retired words
+
+**Decision.** The process `slopp-server.process` runs — one per machine, MCP
+over HTTP for every project, the manager of each project's dev instance — is
+called the **slopp server**. "Daemon" was the working name since D-daemon and
+"hub" the reviewer UI's name before D-ui-hub folded it into the server; both
+are retired from everything a user or agent reads. Decision ids (`D-daemon`,
+`D-daemon-is-an-app`, `D-no-daemon-live`, `D-hub`, `D-ui-hub`) keep their
+names — they are citations into this record, not vocabulary — and the JVM's
+"daemon thread" keeps its word.
+
+**What changed — with no compatibility for the old spellings, by decision.**
+The CLI verb is `slopp server [port] | stop | status`; the record is
+`~/.slopp/server.json` / `server-<port>.json`; `SLOPP_SERVER_DIR` and
+`SLOPP_SERVER_MAX_IMAGES` replace the `_DAEMON_` spellings; the stderr banner
+and the hook's "no slopp server answers" sentence say server; the threads are
+`slopp-server-reaper` / `slopp-server-refresh`; `server-file`, `server-port`,
+`views/server-projects` replace the `daemon-` names; `slopp-server.process`
+is aliased `process`, not `daemon`. Done as one `rename_sweep daemon → server`
+over the store (the generated wire contracts regenerated first, since a sweep
+refuses generated forms), then the Java-thread sense and decision ids patched
+back; the shell scripts, docs and skills by hand in the same commit.
+`.context/` keeps the old words as the record it is.
 
 ## D-no-daemon-live (2026-09-15, user decision) — the daemon has no self-reload; live is purely a dev-instance property
 

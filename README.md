@@ -22,16 +22,17 @@ commits) flow back into stores via `git_pull`'s form-granular 3-way merge.
 ```
 
 The plugin bundles the workflow skills (`slopp`, `slopp-setup`), a `slopp`
-CLI on the session PATH, and an MCP entry pointed at **one daemon for the
+CLI on the session PATH, and an MCP entry pointed at **one slopp server for the
 machine**, which you start yourself and which serves whatever project each
 session is in. Beyond Java, the plugin needs only bash and curl:
 
 ```sh
-slopp daemon        # fetches the versioned release jar (~27MB, checksum-verified) on first run, then stays up
-slopp daemon stop   # when you want it gone; `slopp daemon status` asks it
+slopp server        # fetches the versioned release jar (~27MB, checksum-verified) on first run, then stays up
+slopp server stop   # when you want it gone; `slopp server status` asks it
+slopp dev .         # a project's dev instance alone, re-served at every done — no server needed
 ```
 
-The plugin never starts a daemon behind you: with none running on the
+The plugin never starts a slopp server behind you: with none running on the
 configured port, the server entry fails and says so — start one, then
 reconnect with `/mcp`. Offline/no-marketplace install: unpack a checkout of
 `plugins/slopp/` into `~/.claude/skills/slopp/` — it loads as a plugin from
@@ -51,7 +52,7 @@ that built-in tools never pay. The `slopp-setup` skill has the details.
 # IMPORT the slopp branch into a store — the working dir stays your checkout
 git clone https://github.com/nvoxland/slopp.git proj && cd proj
 java -jar slopp.jar --main slopp.sync/-main import .
-java -jar slopp.jar ~/.slopp # the daemon: one slopp for the machine (the plugin starts it for you)
+java -jar slopp.jar ~/.slopp # the slopp server: one slopp for the machine (the plugin starts it for you)
 
 # slopp then syncs against refs/heads/slopp of THIS repo (git-remote ".");
 # you push/pull origin — both branches — with regular git
@@ -69,8 +70,8 @@ on the store's files manifest names the launcher and the fn it delegates to.
 The server loads its code once at boot and serves it until restarted — it
 does not hot-reload its own namespaces. From a checkout of this repo,
 `clojure -M -m slopp.kernel.boot .` boots the same way. (Working ON slopp,
-the in-progress version runs as a dev instance the daemon re-serves at each
-`done`; the machine daemon stays on its released jar.)
+the in-progress version runs as a dev instance the slopp server re-serves at each
+`done`; the slopp server stays on its released jar.)
 
 ## The model
 

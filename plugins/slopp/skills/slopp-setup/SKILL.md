@@ -60,14 +60,14 @@ rule names the plugin's server, so it covers every family and op. Nothing
 changes under the other modes: a prompting mode asks you per call anyway,
 and `bypassPermissions` never classifies.
 
-**One slopp for the machine.** The plugin's server entry is the daemon's
+**One slopp for the machine.** The plugin's server entry is the slopp server's
 own MCP-over-HTTP URL — one process for every project on the box, never a
 JVM or a pipe per session; the project is named by a header Claude Code
-fills from the project dir. The daemon is the user's to start (`slopp
-daemon`; `slopp daemon stop` ends it) — nothing in the plugin starts one,
+fills from the project dir. The slopp server is the user's to start (`slopp
+slopp server`; `slopp server stop` ends it) — nothing in the plugin starts one,
 and a session with none on the configured port (`SLOPP_PORT`, else
 7357) fails with a sentence saying to start it. The hooks and the CLI are
-`curl` calls onto the same daemon; the plugin needs bash, curl and java. What the daemon buys and how it is
+`curl` calls onto the same slopp server; the plugin needs bash, curl and java. What the slopp server buys and how it is
 reached: `help {topic "running"}`, under "One slopp for the machine".
 
 ## Importing a repo that's published this way
@@ -183,9 +183,9 @@ ordinary git.
 
 `slopp <op> [args]` runs ONE tool call against the store in the current
 directory and prints the result — args as JSON, EDN, or `@file`. It routes
-to the machine's daemon — one YOU started (`slopp daemon`; on a CI box,
-start it in the background and wait for `slopp daemon status`) — and fails
-with a sentence when none answers; the call runs on a session the daemon
+to the machine's slopp server — one YOU started (`slopp server`; on a CI box,
+start it in the background and wait for `slopp server status`) — and fails
+with a sentence when none answers; the call runs on a session the slopp server
 keeps for that project. A
 READ needs nothing more. A WRITE needs a `thread` — the line it goes to —
 and a write that names none is REFUSED, naming the door: `slopp
@@ -231,7 +231,7 @@ normal setup needs none of them.
 A reasonable swarm profile is `SLOPP_WARM_SPARE=0` plus a shorter lease:
 
 ```sh
-SLOPP_WARM_SPARE=0 SLOPP_BRANCH_IMAGE_TTL_MS=120000 slopp daemon
+SLOPP_WARM_SPARE=0 SLOPP_BRANCH_IMAGE_TTL_MS=120000 slopp server
 ```
 
 **What you are buying, and with what.** You buy memory with image-boot
@@ -275,7 +275,7 @@ and the symptom is slower tests rather than wrong ones — so if your suite slow
 down noticeably after an upgrade, this is the first thing to try:
 
 ```sh
-SLOPP_IMAGE_JVM_OPTS="" slopp daemon             # the previous collector
+SLOPP_IMAGE_JVM_OPTS="" slopp server             # the previous collector
 ```
 
 Nothing here reaches the external test tier, whose shard JVMs are launched

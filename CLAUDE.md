@@ -18,10 +18,9 @@ wiring belongs below.
 - **`slopp-reader` is the comprehension subagent.** Delegate broad "how does X
   work / what would Y touch" questions to it so source dumps stay out of the
   main context.
-- **The dev session runs a local jar**, not the pinned release:
-  `SLOPP_JAR=$PWD/target/slopp.jar`. There is NO live-reload
-  (`D-no-daemon-live`): the daemon runs the AOT jar as a SNAPSHOT, so ANY
-  change to slopp's own tool/serving code reaches the running daemon only
-  after a jar rebuild (`clojure -T:build uber`, over a fresh materialization)
-  and a restart. The verification image always has your un-landed thread
-  work; the running daemon serves the last-built jar until it is rebuilt.
+- **Develop against the dev instance.** `slopp dev .` boots this store's
+  dev instance on 7357 and re-serves it at every `done`; it is the machine's
+  slopp server while it runs, so a plain `claude` works on the in-progress
+  slopp. A slopp server runs a snapshot jar with no live-reload
+  (`D-no-daemon-live`) and needs a rebuild only when the base must move.
+  DEV.md has the procedure.

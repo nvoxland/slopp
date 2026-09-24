@@ -358,8 +358,8 @@
         (b/copy-dir {:src-dirs [(.getPath cljs)] :target-dir class-dir})))
     ;; `public/` too — the compiled browser bundle and the other static assets
     ;; the store's mounts cover, kept under their manifest paths so the same
-    ;; `public/cljs/main.js` resolves as a CLASSPATH RESOURCE. The daemon
-    ;; serves slopp's own pages, and a daemon started from a neutral dir has
+    ;; `public/cljs/main.js` resolves as a CLASSPATH RESOURCE. The server
+    ;; serves slopp's own pages, and a server started from a neutral dir has
     ;; no store to read the bundle from: the jar is the only place it can
     ;; come from. `slopp.http.static/file-or-resource-reader` falls back to
     ;; the classpath by design; this is what puts something there.

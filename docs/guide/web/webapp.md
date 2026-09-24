@@ -167,6 +167,32 @@ than conveniences:
     response reports a 502 from a proxy as *"response failed validation"*, so
     real contract drift and a dead server produce identical words.
 
+## A page may answer a redirect
+
+```clj
+(defn ^{:webapp/path "/"} landing
+  "The projects open here -- or the one project, entered directly."
+  [page]
+  (let [{:keys [status value]} (webapp/ask! page api/projects {})]
+    (if (and (= :ready status) (= 1 (count value)))
+      {:webapp/redirect (str "/p/" (:slug (first value)))}
+      [:ul (for [p value] [:li (:slug p)])])))
+```
+
+A page answers hiccup -- a vector -- or `{:webapp/redirect "/path"}`, and the
+two cannot be confused because top-level hiccup is never a map. The framework
+follows the redirect in the render that received it: the address bar is
+**replaced**, never pushed, so the back button skips the page that sent the
+reader on instead of bouncing them forward again; the state arrives at the
+destination exactly as a navigation would; and the destination renders in the
+same pass, so nothing paints the sender first. It is a client route only --
+leaving the app is what a `:leaves?` action is for -- and two pages sending
+the reader to each other refuse as a named loop rather than hanging.
+
+Headless, `cljnx/url` follows it: the driver carries the app's own address bar
+as `:location`, so a test that opens `/` and reads the url sees where the
+reader ended up, the same fact it reads after a server's 302.
+
 ## Loads have four states
 
 ```clj

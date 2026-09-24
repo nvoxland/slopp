@@ -1,12 +1,13 @@
 #!/bin/bash
 # slopp CLI — the same release jar the MCP server runs, for direct use:
-#   slopp <op> [json|edn|@file]                one tool call, routed to the running daemon
+#   slopp <op> [json|edn|@file]                one tool call, routed to the running slopp server
 #   slopp --call <op> [json|edn|@file]         the same call, the long-standing spelling
 #   slopp --main slopp.sync/-main import .     build the store from the repo's slopp branch
 #   slopp --main slopp.sync/-main test .       isolated suite from a store build
 #   slopp --doctor                             self-check the plugin wiring end-to-end
-#   slopp daemon [port] | stop | status        ONE slopp for the machine: MCP over HTTP for every project
-# `slopp daemon` is yours to start and stop; nothing else here starts one.
+#   slopp server [port] | stop | status        ONE slopp for the machine: MCP over HTTP for every project
+#   slopp dev [dir]                            a project's DEV INSTANCE alone, re-served at every landing
+# `slopp server` is yours to start and stop; nothing else here starts one.
 # It fetches and caches the versioned jar on first run; java 21+ required.
 set -euo pipefail
 
@@ -26,7 +27,7 @@ fi
 # to SERVE MODE, and a stray server launched that way once clobbered the
 # routed fast path's address file with its own pid (measured, s13).
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
-  sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
   echo "  slopp <op> '{...json...}'                  bare tool call (routed to the running server)"
   echo "  slopp add <ns> [--prompt P] <<'EOF'        whole-blob write; forms split, add/replace inferred"
   echo "  slopp replace <ns/name> [--prompt P] <<'EOF'"
@@ -35,7 +36,7 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   exit 0
 fi
 
-. "$(cd "$(dirname "$0")" && pwd)/slopp-daemon-file"
+. "$(cd "$(dirname "$0")" && pwd)/slopp-server-file"
 
 # ---- CLI dialect: normalize every spelling to (TOOL, args-file) ----
 #   slopp --call <op> [json|edn|@file]      the long-standing spelling
@@ -47,48 +48,61 @@ fi
 # The heredoc carries RAW source — no JSON escaping, which is the point.
 TOOL=""; ARGSFILE=""
 case "${1:-}" in
-  daemon)
-    # `slopp daemon stop` / `status`: the daemon records itself in
-    # ~/.slopp/daemon.json; stop sends SIGTERM to that pid and clears the
+  server)
+    # `slopp server stop` / `status`: the server records itself in
+    # ~/.slopp/server.json; stop sends SIGTERM to that pid and clears the
     # file, status prints /api/status. Everything else is a start.
     if [ "${2:-}" = "stop" ] || [ "${2:-}" = "status" ]; then
-      daemon_file
-      if [ ! -f "$DAEMON_FILE" ]; then echo "slopp daemon: none recorded (no $DAEMON_FILE)"; exit 1; fi
-      read_daemon_file
+      server_file
+      if [ ! -f "$SERVER_FILE" ]; then echo "slopp server: none recorded (no $SERVER_FILE)"; exit 1; fi
+      read_server_file
       if kill -0 "$DPID" 2>/dev/null; then alive=1; else alive=0; fi
       if [ "$2" = "status" ]; then
         if body="$(curl -sS -m 3 "$DURL/status" 2>&1)"; then
           echo "pid $DPID: $body"; exit 0
         fi
-        echo "slopp daemon: pid $DPID $([ "$alive" = 1 ] && echo alive || echo dead), $DURL not answering ($body)"; exit 1
+        echo "slopp server: pid $DPID $([ "$alive" = 1 ] && echo alive || echo dead), $DURL not answering ($body)"; exit 1
       fi
       if [ "$alive" = 1 ]; then
         kill "$DPID" 2>/dev/null || true
         for _ in $(seq 1 50); do kill -0 "$DPID" 2>/dev/null || break; sleep 0.2; done
-        echo "slopp daemon: stopped pid $DPID"
+        echo "slopp server: stopped pid $DPID"
       else
-        echo "slopp daemon: pid $DPID was already gone"
+        echo "slopp server: pid $DPID was already gone"
       fi
-      rm -f "$DAEMON_FILE"
+      rm -f "$SERVER_FILE"
       exit 0
     fi
-    # The daemon boots slopp's OWN code from the dir it is given — the
+    # The server boots slopp's OWN code from the dir it is given — the
     # kernel loads every namespace of that dir's store into the JVM — so it
     # is launched from a NEUTRAL dir (~/.slopp, no store), never a project:
     # the projects it serves are whatever attaches. Working ON slopp needs
-    # none of this: the machine daemon is a release and slopp's checkout is
+    # none of this: the machine's slopp server is a release and slopp's checkout is
     # a project like any other, whose dev instance (its app.main entry)
-    # is the in-progress version. SLOPP_DAEMON_DIR=$PWD boots the daemon from
+    # is the in-progress version. SLOPP_SERVER_DIR=$PWD boots the server from
     # a project's own store instead of the neutral dir (still snapshot — the
     # kernel loads once and does not hot-reload its own code).
-    DIR="${SLOPP_DAEMON_DIR:-$HOME/.slopp}"
+    DIR="${SLOPP_SERVER_DIR:-$HOME/.slopp}"
     mkdir -p "$DIR"
     shift
     # the port is passed explicitly: with no --main argument the kernel hands
     # the entry its DIR, and a dir is not a port. The kernel loads the code
     # once and serves it; there is no live mode.
-    daemon_file
+    server_file
     set -- "$DIR" --main slopp-server.process/-main "${1:-$PORT}"
+    ;;
+  dev)
+    # `slopp dev [dir]`: serve the project's dev instance from its store and
+    # keep it current with every landing — no slopp server, no registry, no
+    # agent attached to trip the first boot. Booted from the neutral dir so
+    # the jar's own code is the runner and the project's store is what it
+    # serves; the instance's own port comes from the project's dev config.
+    PROJ="$(cd "${2:-.}" && pwd)"
+    if [ ! -f "$PROJ/.slopp/store.db" ]; then
+      echo "slopp dev: no .slopp/store.db in $PROJ — a dev instance is served from a project's store" >&2; exit 2
+    fi
+    mkdir -p "$HOME/.slopp"
+    set -- "$HOME/.slopp" --main slopp-server.dev/-main "$PROJ"
     ;;
   --call)
     TOOL="${2:-}"; RAW="${3-}"; [ -z "$RAW" ] && RAW="{}"
@@ -97,7 +111,7 @@ case "${1:-}" in
     ;;
   add|replace|change)
     # The heredoc carries RAW source — no JSON escaping, which is the
-    # point. The daemon splits it into steps (`;;;tests <ns>` / `;;;impl
+    # point. The server splits it into steps (`;;;tests <ns>` / `;;;impl
     # <ns>` sections for change; one step for add/replace); this side
     # only frames it: header lines, a blank line, then the blob.
     VERB="$1"; shift
@@ -135,21 +149,21 @@ case "${1:-}" in
     ;;
 esac
 
-# ---- route the call to the running daemon ----
+# ---- route the call to the running slopp server ----
 # There is no other way to run a tool call: the one-shot JVM that used to
 # open the store here stranded its writes on a thread nothing landed, and
-# the kernel refuses --call by name now. A call with no daemon FAILS and
-# says so; the daemon is a process the user starts (`slopp daemon`) and
+# the kernel refuses --call by name now. A call with no server FAILS and
+# says so; the slopp server is a process the user starts (`slopp server`) and
 # owns, never one a tool call brings up behind them.
 #
 # The call is one POST of a TEXT frame — header lines, a blank line, the
 # payload (the op's arguments as JSON or EDN, or a verb's raw blob) — so
-# the shell never builds JSON; the daemon parses and answers text.
+# the shell never builds JSON; the server parses and answers text.
 if [ -n "$TOOL" ] && [ -s "$ARGSFILE" ]; then
-  daemon_file
-  if [ ! -f "$DAEMON_FILE" ] || { read_daemon_file; ! kill -0 "$DPID" 2>/dev/null; } \
+  server_file
+  if [ ! -f "$SERVER_FILE" ] || { read_server_file; ! kill -0 "$DPID" 2>/dev/null; } \
      || ! curl -sf -m 2 -o /dev/null "$DURL/status"; then
-    echo "slopp: $(no_daemon_sentence)" >&2
+    echo "slopp: $(no_server_sentence)" >&2
     rm -f "$ARGSFILE"; exit 2
   fi
   if [ "${FRAMED:-0}" != "1" ]; then
@@ -164,7 +178,7 @@ if [ -n "$TOOL" ] && [ -s "$ARGSFILE" ]; then
   code="$(curl -sS -m 3600 -o "$OUT" -w '%{http_code}' --data-binary @"$ARGSFILE" \
             -H "Content-Type: text/plain; charset=utf-8" \
             -H "X-Slopp-Dir: $PWD" -H "X-Slopp-Token: $DTOKEN" \
-            "$DURL/cli" 2>&1)" || { kill "$BEAT" 2>/dev/null; echo "slopp: the daemon refused or dropped the call ($code)" >&2; rm -f "$ARGSFILE" "$OUT"; exit 2; }
+            "$DURL/cli" 2>&1)" || { kill "$BEAT" 2>/dev/null; echo "slopp: the slopp server refused or dropped the call ($code)" >&2; rm -f "$ARGSFILE" "$OUT"; exit 2; }
   kill "$BEAT" 2>/dev/null; wait "$BEAT" 2>/dev/null || true
   cat "$OUT"; echo
   rm -f "$ARGSFILE" "$OUT"
@@ -173,11 +187,11 @@ if [ -n "$TOOL" ] && [ -s "$ARGSFILE" ]; then
 fi
 
 # A bare <dir> used to serve MCP over stdio on that store, one JVM per
-# session. That server is retired: the daemon is the only server, and the
+# session. That server is retired: the slopp server is the only server, and the
 # plugin's entry is a pipe onto it. Say so rather than boot the kernel with
-# a project dir as if it were the daemon's own.
+# a project dir as if it were the slopp server's own.
 if [ -d "${1:-}" ] && ! printf '%s\n' "$@" | grep -qx -- '--main'; then
-  echo "slopp: the per-session stdio server is retired — 'slopp daemon' runs the machine's one slopp, and the plugin's server entry is a pipe onto it" >&2
+  echo "slopp: the per-session stdio server is retired — 'slopp server' runs the machine's one slopp, and the plugin's server entry is a pipe onto it" >&2
   exit 2
 fi
 
@@ -200,7 +214,7 @@ if [ "${1:-}" = "--doctor" ]; then
   for f in hooks/hooks.json skills/slopp/SKILL.md skills/slopp-setup/SKILL.md .mcp.json; do
     if [ -f "$ROOT/$f" ]; then say "ok " "plugin file: $f"; else say "FAIL" "plugin file missing: $f"; rc=1; fi
   done
-  if command -v curl >/dev/null 2>&1; then say "ok " "curl (the hooks and the CLI talk to the daemon with it)"; else say "FAIL" "no curl — the hooks and 'slopp <op>' cannot reach the daemon"; rc=1; fi
+  if command -v curl >/dev/null 2>&1; then say "ok " "curl (the hooks and the CLI talk to the slopp server with it)"; else say "FAIL" "no curl — the hooks and 'slopp <op>' cannot reach the slopp server"; rc=1; fi
   if [ -n "${SLOPP_JAR:-}" ]; then
     if [ -f "$SLOPP_JAR" ]; then say "ok " "SLOPP_JAR override: $SLOPP_JAR"; else say "FAIL" "SLOPP_JAR set but missing: $SLOPP_JAR"; rc=1; fi
   elif [ -f "$JAR" ]; then
@@ -213,11 +227,11 @@ if [ "${1:-}" = "--doctor" ]; then
       # query_project, not query_namespaces — the latter has never been a
       # tool, so this probe reported FAIL on every healthy install with a
       # store. A self-check that names a tool must name a real one. Routed
-      # through the daemon like every call, so it also proves the daemon.
+      # through the slopp server like every call, so it also proves it.
       if out=$("$0" query_project '{}' 2>/dev/null | tail -1); then
-        say "ok " "store probe via the daemon: query_project -> ${out:0:60}…"
+        say "ok " "store probe via the slopp server: query_project -> ${out:0:60}…"
       else
-        say "FAIL" "store at .slopp/store.db but the routed probe call failed — is a daemon running? ('slopp daemon status'; 'slopp daemon' starts one)"; rc=1
+        say "FAIL" "store at .slopp/store.db but the routed probe call failed — is a slopp server running? ('slopp server status'; 'slopp server' starts one)"; rc=1
       fi
     fi
   else
@@ -227,7 +241,7 @@ if [ "${1:-}" = "--doctor" ]; then
 fi
 
 # --warm: ensure the jar is cached, run nothing — for an install script or
-# an image build that wants the fetch done before the first `slopp daemon`.
+# an image build that wants the fetch done before the first `slopp server`.
 WARM=0
 if [ "${1:-}" = "--warm" ]; then
   WARM=1

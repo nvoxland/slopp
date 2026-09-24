@@ -148,13 +148,13 @@ rows the gates can't see:
 - Don't re-verify by cloning/worktree/raw store.db — the store IS the source of
   truth and it's already verified; `query_commits {:alignment}` proves handoff
   state in one read.
-- **Point the human at the change screen — the daemon's pages, not an API url.**
-  `session_brief` reports `:pages`, this project's screens on the daemon;
+- **Point the human at the change screen — the slopp server's pages, not an API url.**
+  `session_brief` reports `:pages`, this project's screens on the slopp server;
   `<pages>/change/<from>..<to>` (the commit point ids from `query_commits`)
   is that commit point reviewed form by form — recorded ask, line diff, blast
   radius, each form linking its permalink with callers above and callees
   inlined. The brief's `:api` is the project's read API and serves JSON only,
   so handing that one out costs someone a 404. Give the url alongside your
   findings rather than pasting sources: your report says what you concluded,
-  the page lets them check it. The pages read the daemon's live projects, so
+  the page lets them check it. The pages read the slopp server's live projects, so
   warranty counts are the real ones.

@@ -16,19 +16,23 @@ slopp needs **Java 21+** and nothing else. Everything below runs the same jar.
 
 That gives you the workflow skills (`slopp`, `slopp-setup`, `slopp-style`,
 `slopp-review`), a `slopp-reader` subagent, a `slopp` CLI on the session PATH,
-and an MCP entry pointed at the machine's **daemon**: one slopp process
+and an MCP entry pointed at the machine's **slopp server**: one slopp process
 serving every project you open, which you start yourself:
 
 ```sh
-slopp daemon
+slopp server
 ```
 
 The first run downloads the release jar (~27MB), checksum-verifies it, and
-boots; the daemon then stays up until `slopp daemon stop`. Nothing in the
+boots; the slopp server then stays up until `slopp server stop`. Nothing in the
 plugin starts one for you -- a server nobody started is a server nobody knows
-to stop or upgrade -- so with no daemon on the configured port the MCP entry
+to stop or upgrade -- so with no slopp server on the configured port the MCP entry
 fails with a sentence saying so, and `/mcp` reconnects once you have started
-one. The daemon serves whatever project directory each session is in.
+one. The slopp server serves whatever project directory each session is in.
+
+A project that declares a dev instance (`app.main`, or `http.enabled`) can
+also be served on its own, with no slopp server: `slopp dev .` boots it from
+the store and re-serves it at every `done`, until you stop it.
 
 If you run Claude Code in `auto` permission mode, allow the server once, in
 the project's or your user `.claude/settings.json`:
@@ -49,7 +53,7 @@ slopp --doctor
 ```
 
 It reports on java, the cached jar, the hook and skill files, curl (the
-hooks and the CLI reach the daemon with it), and a live store probe. Exit 0 means a session has everything
+hooks and the CLI reach the slopp server with it), and a live store probe. Exit 0 means a session has everything
 it needs.
 
 ### Offline or no marketplace

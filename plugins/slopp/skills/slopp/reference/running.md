@@ -8,7 +8,7 @@ app", or "give me a URL", this is the answer** — and the first call is
 none `:app-note` says WHY (nothing declared, declared but not started, boot
 failed, or a declaration that exists only as a blobbed file — see
 `:config-blobbed`). Read that before touching anything; the answer is
-usually one config write or one daemon restart away.
+usually one config write or one slopp server restart away.
 
 A slopp project declares what it wants RUN while somebody is working on it,
 and slopp keeps that running and refreshes it at every `done`. The
@@ -20,7 +20,7 @@ config_file {path "capabilities" key "app.main"  value "shop.core/-main"}
 
 A project that serves HTTP (`http.enabled`) and declares no entry gets the
 server slopp derives instead. Either is reason enough for a dev instance;
-`app.main` is what a worker, a scheduler, or slopp's own daemon declares.
+`app.main` is what a worker, a scheduler, or slopp's own slopp server declares.
 
 **The `dev` config is an OVERLAY of the capability keys for the dev
 instance**, in two layers:
@@ -39,7 +39,7 @@ and the normal setup should need no local override at all.
 
 **This is why the dev port is a `dev` setting and not `http.port`:**
 `http.port` is the PRODUCTION address (for slopp's own store, the machine
-daemon's), and the in-progress copy must not take it.
+slopp server's), and the in-progress copy must not take it.
 
 ### Four things worth knowing before you set this up
 
@@ -116,78 +116,97 @@ project want a worker running*, so a declared entry is reason enough on its
 own — a CLI project with a background job needs no `http` capability to have
 that job running while somebody works on it.
 
-### One slopp for the machine: `slopp daemon`
+### One slopp for the machine: `slopp server`
 
-`slopp daemon [port]` runs ONE slopp process for every project on the box.
+`slopp server [port]` runs ONE slopp process for every project on the box.
 Its port is the argument, else `SLOPP_PORT`, else 7357 — ONE knob,
 because the plugin's MCP entry is a URL Claude Code expands from the
 environment, and a settings file would be a second source it cannot read.
 It binds first and
 loads nothing until something attaches; a project opens on its first
-attachment and closes on its last. Its typed surface is under one prefix,
+attachment and closes when the last AGENT holding it is gone — an MCP
+session here, the hooks' CLI session, or a session on the project's own
+dev instance, which the slopp server asks. Claude Code never tells a slopp server it
+exited, so the plugin's `SessionEnd` hook is the exit signal: it names the
+harness session id the prompt hook already hands the slopp server, which a session
+takes as its identity on its first tool call, and the exit ends that agent's
+sessions plus any session nobody has identified yet (Claude opens two per
+agent; a fresh one ended by mistake re-attaches on its next request). The
+last agent out closes the project, dev instance, reader and oracles with it. The idle reaper (ten minutes for a CLI session, two hours for an MCP
+session) is only the backstop for an agent that crashed. A serving app by
+itself holds nothing: a browser is not an agent. Its typed surface is under
+one prefix,
 and the pages a human opens sit beside it:
 
 | path | what |
 |---|---|
 | `GET /api/projects` | the registry: every open project — slug, dir, sessions, `:app {:url :branch}` |
-| `GET /api/status` | the daemon about itself |
+| `GET /api/status` | the slopp server about itself |
 | `POST /api/projects/<slug>/mcp` | MCP over streamable HTTP; `X-Slopp-Dir: <absolute dir>` names the project on `initialize` |
 | `POST /api/projects/<slug>/call` | the write door `slopp <op>` uses: `{tool arguments token}`; slug `_` + `X-Slopp-Dir` resolves by dir |
 | `GET /api/projects/<slug>/<resource>` | the project's typed read API, mounted: `/api/<resource>` in its own contract, with the mount replacing that prefix rather than nesting under it |
 | `POST /api/otel/v1/logs` | the one telemetry sink: `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:7357/api/otel` |
 | `GET /` | the picker: every open project, linked |
 | `GET /p/<slug>/**` | that project's pages — timeline, change review, form permalinks, the namespace index — a browser app over the mounted API; `session_brief` reports it as `:pages`; 404 off the declared page table |
-| `GET /css/style.css`, `GET /assets/**` | the stylesheet and the compiled bundle, from the daemon's own store under `--live` or from the jar |
+| `GET /css/style.css`, `GET /assets/**` | the stylesheet and the compiled bundle, from the slopp server's own store under `--live` or from the jar |
 
-It records itself in `~/.slopp/daemon.json` (`url pid token`, readable by
+It records itself in `~/.slopp/server.json` (`url pid token`, readable by
 its owner only — the token is the write door's secret); `slopp
-<op>` and the prompt hook route there. **The daemon is the user's to start
-and stop** (`slopp daemon`, `slopp daemon stop`): nothing else starts one,
+<op>` and the prompt hook route there. **The slopp server is the user's to start
+and stop** (`slopp server`, `slopp server stop`): nothing else starts one,
 and a call or a session with nothing live on the configured port fails with
 a sentence saying to start it — a server nobody started is a server nobody
-knows to stop, look at, or upgrade. A second `slopp daemon` on the same
-port refuses with the bind diagnosis. The daemon boots slopp's OWN code from the dir it
+knows to stop, look at, or upgrade. A second `slopp server` on the same
+port refuses with the bind diagnosis. The slopp server boots slopp's OWN code from the dir it
 is given, so the verb passes a neutral one (`~/.slopp`). A write through the door with
 no `thread` is refused, like a one-shot; a project's dev app server is
-started once by the daemon, on the first branch attached, and every
+started once by the slopp server, on the first branch attached, and every
 session's `done` refreshes that one server.
 
 **This is the only server, and the plugin talks to it directly.** The
-plugin's MCP entry is the daemon's URL
+plugin's MCP entry is the slopp server's URL
 (`http://127.0.0.1:${SLOPP_PORT:-7357}/api/mcp`, the
 project named by an `X-Slopp-Dir: ${CLAUDE_PROJECT_DIR}` header Claude Code
-expands — the door is slug-free) — no process per session at all. A session id the daemon no
+expands — the door is slug-free) — no process per session at all. A session id the slopp server no
 longer holds (a restart, an idle reap) is re-attached UNDER THAT ID when
-the request names its dir, so a daemon restart costs one late answer, not
+the request names its dir, so a slopp server restart costs one late answer, not
 a reconnect. The hooks and `slopp <op>` are one `curl` each onto the
-daemon's `hook` and `cli` doors; the rules they used to carry (which ask to
+slopp server's `hook` and `cli` doors; the rules they used to carry (which ask to
 record, which Bash command routes around the store, how a heredoc splits
 into steps) live in `slopp-server.process.hooks`, tested. The plugin needs bash,
 curl and java, nothing else. The per-session JVM is retired (2026-09-08):
-there is no `SLOPP_DAEMON=0`, no stdio loop in the jar, and `java -jar
-slopp.jar <dir>` IS `slopp daemon`. A shell call fails without a daemon —
+there is no `SLOPP_SERVER=0`, no stdio loop in the jar, and `java -jar
+slopp.jar <dir>` IS `slopp server`. A shell call fails without a slopp server —
 the one-shot JVM that used to open the store on its own is gone with the
 writes it stranded.
 
-**Working ON slopp is working through a released slopp.** The machine daemon
-is a release; slopp's own checkout is a project like any other, and its dev
-config declares the in-progress version as a dev instance: `app.main =
-slopp-server.process/-main`, with `http.port` overlaid to 7358 in the `dev`
-overlay. The machine daemon boots that
-child from the store, refreshes it at every `done`, and the child — told its
-role — serves whatever attaches to IT and never manages its own project's app
-server. To drive the in-progress version, give a second agent
-`SLOPP_PORT=7358`: the MCP url, the hooks and the CLI then all name
-that port (the record is `~/.slopp/daemon-7358.json`) and never START a
-daemon there — a dev instance is the machine daemon's to run. A new release replaces the base;
-until one is cut, a jar built from a commit point is the base. Two daemons of
-different versions will hold one store, so the store format must stay readable
-by the previous release, or the release ships first.
+**A dev instance can run on its own: `slopp dev [dir]`.** It boots the
+project's declared instance from its store in a child JVM, prints the
+address, and re-serves it at every landing — in place when the changed
+namespaces can be pushed, by reboot when they cannot — with no slopp server,
+no registry and nothing attached to trip the first boot. It runs until you
+stop it: a human asked for it, so it does not follow the agents' lifecycle
+the way a managed child does. A slopp server that is also up must not serve
+the same instance; it will report the taken port.
 
-Under the daemon three things are shared that used to be per session. Your
+**Working ON slopp is working through the in-progress slopp.** slopp's own
+checkout is a project like any other, and its dev config declares the
+in-progress version as a dev instance: `app.main = slopp-server.process/-main`
+on its ordinary `http.port`. `slopp dev .` runs it, and it is then the
+machine's slopp server: every agent attaches to it, and the child — told its
+role — never manages its own project's app server. To run it beside a
+released server instead, `dev.local` gives it another port for this machine
+only and agents name that port with `SLOPP_PORT`. The runner's own code is
+the released jar; a new release replaces
+that base, and until one is cut a jar built from a commit point is the base
+(`SLOPP_JAR`). Two slopp processes of different versions will hold one
+store, so the store format must stay readable by the previous release, or
+the release ships first.
+
+Under the slopp server three things are shared that used to be per session. Your
 oracle image boots on the FIRST call that needs one (an eval, a write, a
 test run), not at start — reads never boot it — and past
-`SLOPP_DAEMON_MAX_IMAGES` (default 6 across the machine) that boot is
+`SLOPP_SERVER_MAX_IMAGES` (default 6 across the machine) that boot is
 refused with the fix named while reads keep answering. A `full_check` at
 the same content as one already running on the project JOINS it
 (`:joined true`) and stands on your line afterwards. And what another

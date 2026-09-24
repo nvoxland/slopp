@@ -38,28 +38,28 @@ were deferred by the client and cost a search turn each to find.
 | `query_detail {id}` | The full version of a response that was trimmed by the size gate. |
 | `help` | The workflow cheat-sheet. |
 
-### The daemon, and where the pages are
+### The slopp server, and where the pages are
 
-One `slopp daemon` per machine (port 7357) serves every open project under
+One `slopp server` per machine (port 7357) serves every open project under
 one root, `/api/`. `/api/projects` lists the projects agents are attached to;
 each answers under `/api/projects/<slug>/…` -- its MCP endpoint, its write
 door for the CLI, and its **read API** at `/api/projects/<slug>/<resource>`:
 the `/api/<resource>` its own contract declares, with the mount replacing
 that prefix rather than nesting under it. JSON, plus the shape of that API
-as EDN at `…/rest/paths`. The daemon's own endpoints are declared the same
+as EDN at `…/rest/paths`. The slopp server's own endpoints are declared the same
 way a project's are -- typed, under the same root, through the same rest
 component. `session_brief`
 reports the read API's base as `:api`. Ask it for a page and you get JSON.
 
-The API answers about the project's landed branch, from the daemon's own
+The API answers about the project's landed branch, from the slopp server's own
 reader, so covering-test counts are the ones the branch actually measured. A
 project is served from the first attach to the last detach; nothing
-registers, nothing beats, and a project the daemon lists is one it holds.
-Ports are not per project: the daemon binds one configured port, so there is
+registers, nothing beats, and a project the slopp server lists is one it holds.
+Ports are not per project: the slopp server binds one configured port, so there is
 nothing to derive and nothing to collect.
 
 **`:api` is not the address you give a human** -- they would see JSON.
-**`:pages`** is: the daemon serves its own pages at
+**`:pages`** is: the slopp server serves its own pages at
 `http://127.0.0.1:7357/p/<slug>`, built with slopp's own components the way
 any project's app is (`slopp.webapp` pages over a client generated from the
 published contract, served through `slopp.http`), reading the registry and
@@ -84,10 +84,10 @@ the picker; the root, `http://127.0.0.1:7357/`, is the picker itself.
 !!! note "Nothing to install"
 
     The pages ship in the jar -- `public/` carries the compiled bundle -- so
-    the daemon serves them with nothing else installed.
+    the slopp server serves them with nothing else installed.
     They began life as a separate application (`slopp-ui`) that consumed a
     project's published API over HTTP without opening its store; that
-    discipline is kept by construction now that they live in the daemon.
+    discipline is kept by construction now that they live in the slopp server.
 
 ### Serving a slopp app under a path prefix
 
@@ -98,7 +98,7 @@ knows has to say.
 
 This began as a requirement of the reviewer UI's proxy, when it fronted
 projects from a store of its own, and is now purely general, which is the
-better test of it: the daemon serves its pages at the root and uses none of
+better test of it: the slopp server serves its pages at the root and uses none of
 this. What follows is for YOUR app behind YOUR proxy.
 
 - Send **`X-Slopp-Base: /your/prefix`** with the proxied request. It is read

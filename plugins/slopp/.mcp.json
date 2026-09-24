@@ -3,7 +3,9 @@
     "slopp": {
       "type": "http",
       "url": "http://127.0.0.1:${SLOPP_PORT:-7357}/api/mcp",
-      "headers": {"X-Slopp-Dir": "${CLAUDE_PROJECT_DIR}"},
+      "headers": {
+        "X-Slopp-Dir": "${CLAUDE_PROJECT_DIR}"
+      },
       "alwaysLoad": true
     }
   }

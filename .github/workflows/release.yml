@@ -32,7 +32,7 @@ jobs:
           restore-keys: |
             deps-${{ runner.os }}-
       # GATED on the in-image suite, the same 21s the test workflow runs,
-      # before anything is jarred: a release lane that only smokes the daemon
+      # before anything is jarred: a release lane that only smokes the slopp server
       # would ship a red store with a working listener. The ^:external tier
       # is full_check's, run by hand before the commit point — see test.yml.
       - name: The in-image suite is green
@@ -44,14 +44,14 @@ jobs:
         run: |
           clojure -Sdeps '{:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}} :paths ["."]}' \
             -M -e '((requiring-resolve (quote build/uber)) {:src "src"})'
-      # The jar IS the daemon now (the stdio server is retired), so the smoke
-      # is the daemon's: boot from a neutral dir, bind a port, answer
+      # The jar IS the slopp server now (the stdio server is retired), so the smoke
+      # is the slopp server's: boot from a neutral dir, bind a port, answer
       # /api/status, and stop. A hang here is a release that never ships,
       # which is the right failure for a jar that cannot come up.
-      - name: Smoke it — the daemon binds, answers /api/status, and stops
+      - name: Smoke it — the slopp server binds, answers /api/status, and stops
         run: |
           # -Duser.home, not $HOME: the JVM reads its home from the OS, so
-          # the daemon file lands where the JVM thinks home is
+          # the slopp server file lands where the JVM thinks home is
           SMOKE=/tmp/smoke-home; mkdir -p "$SMOKE/.slopp"
           java -Duser.home="$SMOKE" -jar "$GITHUB_WORKSPACE/target/slopp.jar" "$SMOKE/.slopp" --main slopp-server.process/-main 7399 > /tmp/smoke.log 2>&1 &
           pid=$!
@@ -63,15 +63,15 @@ jobs:
           if [ -z "$ok" ]; then
             kill "$pid" 2>/dev/null || true
             cat /tmp/smoke.log
-            echo "::error::the daemon did not answer /api/status within 120s"
+            echo "::error::the slopp server did not answer /api/status within 120s"
             exit 1
           fi
           cat /tmp/status.json; echo
-          test -s "$SMOKE/.slopp/daemon-7399.json" || { echo "::error::the daemon recorded no daemon file"; ls -la "$SMOKE/.slopp"; exit 1; }
+          test -s "$SMOKE/.slopp/server-7399.json" || { echo "::error::the slopp server recorded no server file"; ls -la "$SMOKE/.slopp"; exit 1; }
           # and the PAGES, not only the status endpoint: v0.3.0's first cut
           # passed this smoke and answered 404 to every page and the
-          # stylesheet, because the jar loads the daemon's require closure and
-          # two served namespaces were listed but not required. A daemon
+          # stylesheet, because the jar loads the slopp server's require closure and
+          # two served namespaces were listed but not required. A slopp server
           # nobody can open a page on is not a release.
           for p in / /p/x /css/style.css /assets/cljs/main.js; do
             code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:7399$p")

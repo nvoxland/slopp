@@ -105,13 +105,16 @@ A top-level `defonce` starts the bundle, so the page needs no inline script:
 (defonce _start (main))
 ```
 
-`compile_client` is explicit, like `build`. For a tighter loop:
+`compile_client` is explicit, like `build`, and a store that runs a dev
+instance (`http.enabled` or a declared `app.main`) does not need it: every
+write to a client namespace recompiles the bundle in the background. To opt
+out, or to force it for a store that serves nothing:
 
 ```clj
-config_file {path "client" key "auto-compile" value "true"}
+config_file {path "client" key "auto-compile" value "false"}
 ```
 
-A write to a client namespace then returns `:client-recompiling` and schedules
+A write to a client namespace returns `:client-recompiling` and schedules
 a background compile (single-flight, coalescing), and a `--live` server serves
 the fresh JS once it commits. Off by default.
 
@@ -152,8 +155,8 @@ Rules of the road:
 
 - **It is explicit.** Run `generate_client` after changing an endpoint's
   contract, like `compile_client`. A `rest-stale-client` advisory at done time
-  nudges you when a contract has drifted since the last generation. With
-  `client`/`auto-compile` on, generating also refreshes the JS bundle.
+  nudges you when a contract has drifted since the last generation. When
+  the bundle is kept fresh, generating also refreshes it.
 - **Never hand-edit it.** Every wrapper carries `^{:generated "<endpoint>"}`
   and the `http-generated-ns` gate refuses edits, because the next generate would
   overwrite them. To take manual ownership of a wrapper, strip the marker.

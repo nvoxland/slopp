@@ -10,20 +10,21 @@ on first use.
     [Command-line apps](cli-apps.md).
 
 ```sh
-slopp <op> [json|edn|@file]             # one tool call, routed to the machine's daemon
-slopp daemon [port] | stop | status     # the daemon: one slopp for the machine, yours to start
+slopp <op> [json|edn|@file]             # one tool call, routed to the machine's slopp server
+slopp server [port] | stop | status     # the slopp server: one slopp for the machine, yours to start
+slopp dev [dir]                         # a project's dev instance on its own, re-served at every done
 slopp --main slopp.sync/-main import .  # build a store from the repo's slopp branch
 slopp --main slopp.sync/-main test .    # isolated suite from a store build
 slopp --doctor                          # self-check the wiring end to end
 ```
 
 The **pages** — the one address to remember when you run more than one slopp
-project — are the daemon's: `http://127.0.0.1:7357/` lists every open
+project — are the slopp server's: `http://127.0.0.1:7357/` lists every open
 project and `/p/<slug>` is one project's screens, served beside
 `/api/projects/<slug>/` from the same process. They are built with slopp's
 own components the way any project's app is, and reach a project only
 through its published API; see
-[the daemon, and where the pages are](../reference/tools.md#the-daemon-and-where-the-pages-are).
+[the slopp server, and where the pages are](../reference/tools.md#the-slopp server-and-where-the-pages-are).
 
 Without the plugin, `java -jar slopp.jar ...` takes the same arguments.
 
@@ -39,9 +40,9 @@ slopp --call report '{"contains":"invoice"}'
 slopp --call commit_point '{"description":"release 1.2","agent":"ci"}'
 ```
 
-Every call routes to the machine's daemon -- the one you started with
-`slopp daemon`; with none answering, the call fails and says so -- and runs
-on a session the daemon keeps for the project in the current directory. A WRITE names its `thread` — the line it goes to — and a write
+Every call routes to the machine's slopp server -- the one you started with
+`slopp server`; with none answering, the call fails and says so -- and runs
+on a session the slopp server keeps for the project in the current directory. A WRITE names its `thread` — the line it goes to — and a write
 that names none is refused, naming `thread_open`; a script passes the same
 id on every call so its writes share one line and its `done` lands them.
 `agent` is an optional label and defaults to the thread. `--call <op>` is
@@ -79,15 +80,15 @@ These are about the slopp SERVER's own code, not about your app — a
 distinction worth keeping, because one word covered both for a long time and
 cost several confident wrong diagnoses.
 
-There is only one: the daemon — and any built app — loads its code once at
+There is only one: the slopp server — and any built app — loads its code once at
 boot and serves it until restarted. There is no live/snapshot switch and no
 flag; a snapshot is all a running process is.
 
 Freshness of the IN-PROGRESS code is a property of a **dev instance**, not a
-mode of the server. When a project declares a `dev` run entry, the daemon
+mode of the server. When a project declares a `dev` run entry, the slopp server
 manages that entry as the project's app and **re-serves it at each `done`**,
 booting it afresh from the store. So working on slopp itself, the machine
-daemon stays on its released jar while the in-progress version runs as the
+slopp server stays on its released jar while the in-progress version runs as the
 project's dev instance and tracks every landed change.
 
 That re-serve reloads the changed namespaces **plus everything that requires

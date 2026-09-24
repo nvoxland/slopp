@@ -16,9 +16,9 @@
 
 - **Everything goes through slopp's MCP tools** — query_* to read, edit_* to
   write. There are no files to hand-edit and no file↔store drift by
-  construction. A daemon started with `SLOPP_LIVE=1` hot-reloads committed edits into the
-  running server (the release-base default is snapshot; the dev instance is
-  re-served at each done).
+  construction. Development runs against the checkout's dev instance
+  (`slopp dev .`, on the ordinary port), re-served at each `done`; a slopp
+  server is a snapshot of its jar with no live-reload (DEV.md has the setup).
 - **Red/green TDD always**: add the failing test (edit_add_form/ns_create in
   a test ns), watch the write result report red, implement, watch the
   affected tests re-run green. The trace map picks affected tests per edit.

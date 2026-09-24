@@ -176,7 +176,7 @@ functions that throw on unsafe input have neither.
 | Key | Default | Meaning |
 |---|---|---|
 | `compiler` | `:clojurescript` | The compile backend. |
-| `auto-compile` | `false` | Recompile the bundle in the background after a client-namespace write. |
+| `auto-compile` | on when the store runs a dev instance | Recompile the bundle in the background after a client-namespace write. Unset: yes when `http.enabled` or `app.main` is set, else no. `false` opts out, `true` forces it. |
 | `generated-ns` | `app.client.api` | Where `generate_client` writes the typed client. |
 
 ## Structured config files
@@ -233,22 +233,22 @@ An environment variable overrides a config value for THAT process only, above
 the store value and the registry default:
 
 ```sh
-SLOPP_DEV_HTTP_PORT=7360 slopp daemon
+SLOPP_DEV_HTTP_PORT=7360 slopp server
 ```
 
 The name is `SLOPP_` + the config path (file, then key) UPPERCASED with every
 dot and dash as `_` — so `SLOPP_DEV_HTTP_PORT` overrides the `dev` file's
 `http.port`, and `SLOPP_CAPABILITIES_HTTP_PORT` a served port.
 Precedence is **override → store → default**; an override that fails the key's
-type check falls back like any bad value. It is per-PROCESS, so two daemons
+type check falls back like any bad value. It is per-PROCESS, so two slopp servers
 sharing one `store.db` can run their dev instances on different ports (the
-store holds one value; each daemon's environment overrides it independently).
+store holds one value; each slopp server's environment overrides it independently).
 
 Scoped to runtime/serving config: `capabilities` (`effective`) and `dev`
 (`runnables`). Rule and gate severities are deliberately NOT overridable this
 way — correctness stays in the store, not switchable by an env var. And the
-daemon's OWN listen port is the separate `SLOPP_PORT` (it is not a `:config`
-value); `SLOPP_DEV_RUN_DAEMON_PORT` is the port of the dev instances it
+slopp server's OWN listen port is the separate `SLOPP_PORT` (it is not a `:config`
+value); `SLOPP_DEV_RUN_SERVER_PORT` is the port of the dev instances it
 manages.
 
 ## The dependency manifest
@@ -289,19 +289,19 @@ about verification.
 ## Server flags
 
 ```sh
-slopp daemon [port]      # the daemon: one slopp for the machine — yours to start; nothing starts it for you
-slopp daemon stop        # stop the recorded one; `status` asks it
-slopp <op> [json]        # one tool call, routed to the daemon (fails, and says so, when none answers)
-slopp --doctor           # self-check java, jar, hooks, skills, store probe (through the daemon)
+slopp server [port]      # the slopp server: one slopp for the machine — yours to start; nothing starts it for you
+slopp server stop        # stop the recorded one; `status` asks it
+slopp <op> [json]        # one tool call, routed to the slopp server (fails, and says so, when none answers)
+slopp --doctor           # self-check java, jar, hooks, skills, store probe (through the slopp server)
 ```
 
-The daemon's port is the argument, else `SLOPP_PORT`, else 7357 —
-one knob, read by the daemon, the plugin's MCP url, the hooks and `slopp
-<op>` alike, so they cannot disagree. The daemon records itself in
-`~/.slopp/daemon.json` (the default port) or `daemon-<port>.json`; setting
+The slopp server's port is the argument, else `SLOPP_PORT`, else 7357 —
+one knob, read by the slopp server, the plugin's MCP url, the hooks and `slopp
+<op>` alike, so they cannot disagree. The slopp server records itself in
+`~/.slopp/server.json` (the default port) or `server-<port>.json`; setting
 `SLOPP_PORT` names a different one, such as a project's dev instance.
 Neither is ever started by a call or by the plugin:
-the machine daemon is yours (`slopp daemon`), and a dev instance is run by a
-project's dev config. A daemon loads its code once at boot and serves it
+the slopp server is yours (`slopp server`), and a dev instance is run by a
+project's dev config. A slopp server loads its code once at boot and serves it
 until restarted; the in-progress version of a project runs as its dev
-instance, which the daemon re-serves at each done.
+instance, which the slopp server re-serves at each done.

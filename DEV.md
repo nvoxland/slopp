@@ -25,10 +25,14 @@ and produces the exact signature of a stale jar — your fix runs nowhere and
 nothing says why. (`deps.edn` puts `src` on the classpath, so a plain REPL
 from a checkout does load the disk copy; that is the only thing it is for.)
 
-The daemon runs a snapshot with no live-reload (`D-no-daemon-live`), so ANY
-change to slopp's own code needs `build` → `clojure -T:build uber` → restart
-the MCP server. The kernel is only special in that it is the code doing the
-loading, so it must come from the rebuilt jar to exist at all.
+A slopp server runs a snapshot with no live-reload of its own code
+(`D-no-daemon-live`). That is why development does not happen against the
+server you installed: it happens against the checkout's DEV INSTANCE, a
+second slopp booted from this store and refreshed at every `done` — see the
+next section. The installed server only needs a rebuilt jar when the base
+itself must move (a kernel change, a store format the release cannot read);
+the kernel is special only in that it is the code doing the loading, so it
+must come from the jar to exist at all.
 
 **"Restart" means two different events, and the `restart` TOOL is the one that
 does NOT pick up a new jar.** Worth stating because a consumer spent ten
@@ -54,51 +58,93 @@ ignored.
 - **Java 21+** and the **Clojure CLI**. `mise.toml` pins temurin-21 and
   clojure 1.12.5 — `mise install` picks both up.
 - **Docker**, only if you want to preview the docs site.
-- **curl**, which the plugin's hooks and CLI use to reach the daemon (python3 only for the dev scripts under `bin/`).
+- **curl**, which the plugin's hooks and CLI use to reach the slopp server (python3 only for the dev scripts under `bin/`).
 
 `mise.toml` also sets `SLOPP_CLOJURE=clojure`: `slopp.image.repl` probes homebrew
 paths for the owned-image launcher before trusting PATH, and forcing the bare
 name makes child images inherit mise's pinned clojure.
 
-## Run mcp, and "the dev server"
+## Developing slopp with slopp
 
-**"Start the dev server" means this checkout's DEV INSTANCE**: the
-in-progress slopp (`app.main = slopp-server.process/-main`) booted from this
-store by the machine daemon on 7358, refreshed at every `done`. The whole
-procedure, in order — and `session_brief`'s `:app` / `:app-note` tells you
-which step you are on:
-
-1. A machine daemon must be running: `SLOPP_JAR=… slopp daemon` (see below
-   for which jar). It attaches this checkout on the first call from here.
-2. The store must DECLARE the instance: `app.main` in `capabilities` and
-   `http.port 7358` in the `dev` config — both project to git, so a clone
-   has them. If `session_brief` says `:config-blobbed`, an old import turned
-   them into files: repair as the note says.
-3. On the project's first attach the daemon boots the instance and prints
-   `slopp app: http://127.0.0.1:7358/…` (or `slopp app unavailable: …`) on
-   ITS stderr. `session_brief :app` carries the url; `/api/projects` on
-   7357 shows it under `:app`.
-4. To drive it, give a second agent `SLOPP_PORT=7358`.
-
-A port already taken on this box? `config_file {path "dev.local" key
-"http.port" value "7359"}` overrides `dev` for this machine only.
-
-The MCP server itself — what the plugin talks to — is a different thing:
-the daemon on 7357 serving YOU, not the dev instance serving the code under
-development. Two servers, one of them serving your code and the other
-serving you.
-
-From a checkout:
+slopp develops itself the way any project does — through a running slopp —
+with one twist: the code under development IS a slopp. So the slopp you work
+through is this checkout's **dev instance**: a slopp server booted from this
+store, re-served at every `done`, on the ordinary port, 7357. Two commands:
 
 ```sh
-clojure -M -m slopp.kernel.boot .
+slopp dev .     # in one terminal: boots the dev instance from the store and keeps it current
+claude          # every agent, here or in any other project: attaches to it like any slopp server
 ```
 
-This boots slopp from the store and serves it — loaded once, no hot-reload of
-its own code. To develop with the in-progress version tracking your edits,
-work through the machine daemon: the checkout runs as a project whose dev
-instance the daemon re-serves at each `done` (see
-`plugins/slopp/skills/slopp/reference/running.md`).
+`slopp dev` reads the store's own declaration of its instance (`app.main =
+slopp-server.process/-main` and `http.port 7357` in `capabilities` — both
+project to git, so a clone has them), boots it in a child JVM, prints its
+address, and then watches the store: each `done` that lands on main is
+pushed into the running child when the changed namespaces allow it, and
+reboots it when they do not. It runs until you stop it. There is no machine
+server in the loop, no registry, and nothing has to attach to make the
+instance come up.
+
+The instance IS the machine's slopp server while it runs: every agent on the
+box attaches to it and every other project's dev instance is managed by it,
+all on the in-progress code. In this checkout, an agent's reads, writes,
+oracle, `screen` and the pages at `http://127.0.0.1:7357/p/slopp` run the
+code in this store, and `session_brief`'s `:app-note` says so. A fix to a
+tool you are using is in the tool at your next `done`. A reboot of the
+instance is a few seconds in which 7357 does not answer; sessions re-attach
+on their next request.
+
+`slopp server` — a released slopp on the same port — is the alternative for
+a box that should not run in-progress code: stop the runner first, since the
+two must not both serve 7357. To keep both up, give the dev instance another
+port for this machine only: `config_file {path "dev.local" key "http.port"
+value "7358"}`, and start agents for this checkout with `SLOPP_PORT=7358`.
+
+What you see when it comes up is the instance's OWN startup banner — the
+child's output is relayed to your terminal — followed by one line from the
+runner:
+
+```
+slopp server: http://127.0.0.1:7357/api/ (pid 20317) — address + token in /Users/you/.slopp/server.json
+slopp dev: serving /Users/you/src/slopp — re-served at every landing
+```
+
+The pages are at `http://127.0.0.1:7357/p/slopp` once an agent has attached.
+Every later line the child prints — a landing re-served, a boot that failed
+and left the previous version answering — arrives the same way.
+
+### Bootstrapping from a local jar instead of the release
+
+`slopp dev` runs as ITS OWN code — the runner, the kernel that loads the
+store — from the jar the launcher fetched: the pinned release. The project
+being served is a separate thing and is always this store, current at every
+landing. So a change to slopp that lands in the store reaches the *instance*
+at once and the *runner* only at the next release. When you need the runner
+itself to carry a change — a kernel change, a change to the runner or the
+launcher, a dependency change, a store format the release cannot read — build
+a jar from a commit point and run the launcher against it:
+
+```sh
+slopp --call build '{"dir":"'$PWD'/target/jar-src"}'   # materialize the FILELESS store (or the build MCP tool)
+clojure -T:build uber                                  # -> target/slopp.jar, refusing a stale materialization
+
+SLOPP_JAR=~/src/nvoxland/slopp/target/slopp.jar ~/.claude/skills/slopp/bin/slopp dev .
+```
+
+`SLOPP_JAR` is honoured by the plugin's `bin/slopp` and skips the fetch and
+the checksum. The path to the launcher is spelled out because a plain
+terminal has no `slopp` on PATH: Claude Code puts a plugin's `bin/` on the
+PATH of the shells it runs, and `~/.claude/skills/slopp` is where this
+machine's plugin is loaded from (a symlink to a checkout's `plugins/slopp`).
+Stop the running instance first; the new runner takes the same port.
+
+Never do this as part of ordinary development, which the instance already
+tracks. `session_brief`'s `:host` section says what jar the process you are
+talking to was built from and how far behind the store it is.
+
+From a checkout with no server at all, `clojure -M -m slopp.kernel.boot .`
+boots slopp from the store and serves it once, with no refresh of its own
+code — useful for a smoke test, not for development.
 
 **Startup is async (concurrent sessions).** The MCP server completes its
 `initialize` handshake as soon as the store VALUE loads and boots the image
@@ -112,16 +158,7 @@ design, so two concurrent sessions share it and each picks up the other's
 commits (via journal sync, not a code reload — there is none). If a startup still fails under heavy load, bump `MCP_TIMEOUT` (ms)
 in `.claude/settings.json`.
 
-In this repo the server is normally the **plugin's**, running the local jar
-rather than the pinned release:
-
-```sh
-# the tree is FILELESS, so the jar is built from a MATERIALIZATION of the
-# store — both steps, in this order, every time:
-slopp --call build '{"dir":"'$PWD'/target/jar-src"}'   # or the build MCP tool
-clojure -T:build uber                                  # -> target/slopp.jar
-SLOPP_JAR=$PWD/target/slopp.jar  # what the plugin's bin/slopp honours
-```
+### Building the jar
 
 **`uber` alone REFUSES rather than shipping a stale jar**, and writes nothing
 when it does. It bundles whatever is under `target/jar-src/src`, which if you
@@ -163,22 +200,11 @@ jarred — which is exactly how `module_role :instrument` keeps `slopp.lab` out
 of the jar (`D-module-role`): the role moves the file, and this line is the
 build script that has never heard of a role.
 
-**The machine daemon is a release; this checkout is a project.** Since
-2026-09-12 (`D-release-base`) the daemon every session attaches to runs a
-released jar from a neutral dir, and slopp2 is opened on it like any other
-project. The in-progress version is slopp2's dev instance — `app.main =
-slopp-server.process/-main` in capabilities, with `http.port` overlaid to 7358
-in the `dev` config — booted from
-the store by the machine daemon and refreshed at every `done`. To exercise it,
-start a second agent with `SLOPP_PORT=7358` in its environment; the
-plugin's MCP url, hooks and CLI all name that port and never start a daemon
-there. So: a
-fix to a TOOL you are using reaches the dev instance at the next done and the
-machine daemon at the next release. Until a release is cut, `target/slopp.jar`
-built from a commit point is the base (`SLOPP_JAR=$PWD/target/slopp.jar`):
-`slopp daemon stop`, then `slopp daemon` — the daemon is yours to run
-(2026-09-13); no call or session start brings one up, and a session with none
-on the port fails until you do.
+**The slopp server is a release; this checkout is a project** (`D-release-base`,
+2026-09-12). The setup above is the whole of that decision in practice:
+the base is the jar `slopp dev` runs as its own code, and
+everything an agent develops lives in the dev instance it serves until a
+release moves the base.
 
 Rebuild the jar for kernel or dependency changes, and to cut a base: `uber`
 builds aside and atomically renames, so a live process keeps its old jar inode
@@ -195,11 +221,11 @@ the harness does around the call. Measure the server alone first:
 
 ```sh
 bin/mcp-roundtrip.py /path/to/project
-jcmd <daemon pid> JFR.start filename=out.jfr        # profile the daemon from outside, if it was the cost
+jcmd <slopp server pid> JFR.start filename=out.jfr        # profile the slopp server from outside, if it was the cost
 jfr print --events jdk.ExecutionSample out.jfr
 ```
 
-It speaks MCP over HTTP to the daemon's endpoint — exactly what Claude
+It speaks MCP over HTTP to the slopp server's endpoint — exactly what Claude
 Code's plugin entry does — and prints each call's round trip. On 2026-09-03 the transcripts showed a ~1.3 s floor under every
 slopp call while this measured 0.00–0.38 s for the same ops: the gap was
 Claude Code's auto-mode permission classifier (a model call per unallowed
@@ -265,10 +291,13 @@ at birth with `ns_create {platform}`.
   `compile-client!` both go through it), so one injection covers every tier. `compile_client` doesn't run
   automatically by default — it's a build/serve step, not part of the
   write-verify loop.
-- **Optional dev loop:** `config_file {path "client" key "auto-compile" value
-  "true"}` makes a client-ns write recompile the bundle in the background
-  (async, single-flight), so a live server serves fresh JS without a manual
-  `compile_client`. Off by default; the write returns `:client-recompiling`.
+- **The dev loop is ON for a store that runs a dev instance** (`http.enabled`
+  or a declared `app.main`): a client-ns write recompiles the bundle in the
+  background (async, single-flight), so the served page gets fresh JS without
+  a manual `compile_client`; the write returns `:client-recompiling` and the
+  bundle lands with the next `done`. A store with no dev instance compiles
+  nothing on a write. `config_file {path "client" key "auto-compile" value
+  "false"}` opts out; `"true"` forces it for a store that serves nothing.
 - Running the compiled JS against a real DOM is out of scope (browser/Cypress
   someday), not the inner loop.
 
@@ -344,7 +373,7 @@ Three workflows, all on the human-owned branch, all checking out `slopp/main`:
 - `native-proof.yml` — a sample app built through slopp, compiled to a GraalVM
   native binary, executed.
 - `release.yml` — manual dispatch with a version input: build the uberjar,
-  smoke it as the daemon it is (boot from a neutral dir, answer
+  smoke it as the slopp server it is (boot from a neutral dir, answer
   `/api/status`), tag it, attach it to a Release. It builds from `slopp/main`,
   so the projection carries the compiled bundle as bytes (artifacts project
   at their manifest paths) — a release without it serves pages whose script

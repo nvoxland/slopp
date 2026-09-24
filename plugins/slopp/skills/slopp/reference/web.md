@@ -515,6 +515,16 @@ declare the app; slopp owns the loop.
   you like, wherever you like; there is no per-screen `:request` slot to fit
   them into. `(webapp/stale! page descriptor params)` drops one so the next
   ask re-fetches, which is what you call after a write.
+- **A page may answer a REDIRECT instead of a screen**: `{:webapp/redirect
+  "/p/only"}` — a map, which top-level hiccup never is. The framework follows
+  it in the render that received it: the url is REPLACED (never pushed, so
+  the back button skips the page that sent the reader on), the state arrives
+  at the destination and the destination renders in the same pass. A client
+  route only; leaving the app is a `:leaves?` action. Two pages sending the
+  reader to each other refuse as a named loop rather than bouncing. This is
+  how a landing enters the only thing it could list — the cheapest form of
+  "a list of one is not a choice" — without a server-side 302 the content
+  model cannot express.
 - **An endpoint is ONE var — a DESCRIPTOR — and a request is built from it.**
   `generate_client` emits `(def form {:http/method :get :http/path
   "/api/form/:id" :http/params #{:id :depth} :rest/response contracts/…})`, and
@@ -670,12 +680,15 @@ declare the app; slopp owns the loop.
 - **Send data, never markup.** Syntax highlighting ships as `[class text]`
   pairs and diffs ship as lines; the client decides what an element is. That
   is what keeps one renderer instead of two.
-- **Dev loop (optional):** `config_file {path "client" key "auto-compile" value
-  "true"}` recompiles the bundle after a client-ns write — ASYNC and
-  non-blocking (single-flight + coalescing): the write returns
-  `:client-recompiling`, and a live server serves fresh JS once the
-  background compile commits. Off by default. Also fine: `:cljs` forms can be
-  renamed/moved/extracted like any code — the refactor ops handle them.
+- **Dev loop:** a store that runs a dev instance (`http.enabled` or a
+  declared `app.main`) recompiles the bundle after every client-ns write —
+  ASYNC and non-blocking (single-flight + coalescing): the write returns
+  `:client-recompiling`, the background compile commits the bundle on your
+  thread, and it lands with your next `done`, which is when the served page
+  gets it. A store with no dev instance compiles nothing on a write; `config_file
+  {path "client" key "auto-compile" value "false"}` opts out, `"true"` forces
+  it. Also fine: `:cljs` forms can be renamed/moved/extracted like any code —
+  the refactor ops handle them.
 - **One benign rough edge:** the D6 `!`-effect warning fires on idiomatic cljs
   entry points (`^:export main` touches the DOM) — advisory, not a refusal.
   (Kondo lints each form in its platform's language, so `js/*` no longer draws a
@@ -922,7 +935,8 @@ can pin without retyping it as a call chain:
 (cljnx/text s nil {:within "rate"}); ONE element, addressed like a click
 
 (cljnx/status s)                   ; 404 — a NUMBER, not a sentence
-(cljnx/url s)                      ; where you ENDED UP
+(cljnx/url s)                      ; where you ENDED UP — a page's client
+                                   ; redirect included (the driver's :location)
 (cljnx/redirects s)                ; [{:from … :status … :to …}]
 ```
 

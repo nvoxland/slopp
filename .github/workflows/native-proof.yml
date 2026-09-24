@@ -21,22 +21,22 @@ jobs:
         run: |
           python3 - /tmp/appstore <<'PY'
           import base64, json, os, subprocess, sys, time, urllib.request
-          # The daemon is the only server: start one from the checkout (src/ is
+          # The slopp server is the only server: start one from the checkout (src/ is
           # on the classpath), then drive it the way `slopp <op>` does — one
           # POST per call to the write door, the project named by X-Slopp-Dir,
-          # every write on a thread, the token from the daemon's own file.
+          # every write on a thread, the token from the slopp server's own file.
           STORE = sys.argv[1]; os.makedirs(STORE, exist_ok=True)
           home = os.path.expanduser("~"); os.makedirs(home + "/.slopp", exist_ok=True)
-          log = open("/tmp/daemon.log", "w")
-          daemon = subprocess.Popen(["clojure", "-M", "-m", "slopp-server.process", "7357"], stdout=log, stderr=subprocess.STDOUT)
+          log = open("/tmp/server.log", "w")
+          server = subprocess.Popen(["clojure", "-M", "-m", "slopp-server.process", "7357"], stdout=log, stderr=subprocess.STDOUT)
           for _ in range(180):
               try:
                   urllib.request.urlopen("http://127.0.0.1:7357/api/status", timeout=2); break
               except Exception:
                   time.sleep(1)
           else:
-              print(open("/tmp/daemon.log").read()); raise SystemExit("the daemon did not come up")
-          token = json.load(open(home + "/.slopp/daemon.json"))["token"]
+              print(open("/tmp/server.log").read()); raise SystemExit("the slopp server did not come up")
+          token = json.load(open(home + "/.slopp/server.json"))["token"]
           def call(tool, **args):
               args.setdefault("thread", "ci"); args.setdefault("agent", "ci")
               body = json.dumps({"tool": tool, "arguments": args, "token": token}).encode()
@@ -53,7 +53,7 @@ jobs:
                source="(ns app.core)\n(defn greet \"G.\" [nm] (str \"hello, \" nm \"!\"))\n(defn -main \"M.\" [& args] (println (greet (or (first args) \"native\"))))")
           call("build", dir="/tmp/app", main="app.core/-main", name="app")
           call("turn_end")
-          daemon.terminate()
+          server.terminate()
           PY
           cd /tmp/app && bash build-native.sh
       - name: Run the binary
@@ -86,22 +86,22 @@ jobs:
         run: |
           python3 - /tmp/webstore <<'PY'
           import base64, json, os, subprocess, sys, time, urllib.request
-          # The daemon is the only server: start one from the checkout (src/ is
+          # The slopp server is the only server: start one from the checkout (src/ is
           # on the classpath), then drive it the way `slopp <op>` does — one
           # POST per call to the write door, the project named by X-Slopp-Dir,
-          # every write on a thread, the token from the daemon's own file.
+          # every write on a thread, the token from the slopp server's own file.
           STORE = sys.argv[1]; os.makedirs(STORE, exist_ok=True)
           home = os.path.expanduser("~"); os.makedirs(home + "/.slopp", exist_ok=True)
-          log = open("/tmp/daemon.log", "w")
-          daemon = subprocess.Popen(["clojure", "-M", "-m", "slopp-server.process", "7357"], stdout=log, stderr=subprocess.STDOUT)
+          log = open("/tmp/server.log", "w")
+          server = subprocess.Popen(["clojure", "-M", "-m", "slopp-server.process", "7357"], stdout=log, stderr=subprocess.STDOUT)
           for _ in range(180):
               try:
                   urllib.request.urlopen("http://127.0.0.1:7357/api/status", timeout=2); break
               except Exception:
                   time.sleep(1)
           else:
-              print(open("/tmp/daemon.log").read()); raise SystemExit("the daemon did not come up")
-          token = json.load(open(home + "/.slopp/daemon.json"))["token"]
+              print(open("/tmp/server.log").read()); raise SystemExit("the slopp server did not come up")
+          token = json.load(open(home + "/.slopp/server.json"))["token"]
           def call(tool, **args):
               args.setdefault("thread", "ci"); args.setdefault("agent", "ci")
               body = json.dumps({"tool": tool, "arguments": args, "token": token}).encode()
@@ -147,7 +147,7 @@ jobs:
           call("ns_create", ns="app.web", source=src, prompt="the proof web app")
           call("build", dir="/tmp/webapp", main="app.web/-main", name="webapp")
           call("turn_end")
-          daemon.terminate()
+          server.terminate()
           PY
           cd /tmp/webapp && bash build-native.sh
       - name: Run the binary and curl the endpoint and the asset

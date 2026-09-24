@@ -161,12 +161,14 @@ plus the links, and skips cleanly when `ideas/` is absent (a fresh clone).
   session works in a private line; a branch only ever contains work that
   reached a done with nothing red attributable to it. `session_brief` says
   how much is un-landed. Two
-  consequences bite HERE specifically, because slopp hosts itself: the daemon
-  runs a SNAPSHOT of the AOT jar (`D-no-daemon-live`, no live-reload), so
-  **your edits to slopp's own tool code do not reach the running server until
-  the jar is rebuilt and the daemon restarted** — the verification image
-  always has them, which is why tests stay right about your work while the
-  server still runs the last-built jar. And if a `done` is red, nothing
+  consequences bite HERE specifically, because slopp hosts itself: a slopp
+  server runs a SNAPSHOT of its jar (`D-no-daemon-live`, no live-reload), so
+  development happens against the checkout's DEV INSTANCE (`slopp dev .`,
+  on the ordinary port), which every `done` refreshes from what landed —
+  **an agent on a RELEASED slopp server instead sees its edits to slopp's own
+  tool code only at the next release or rebuilt jar**; `session_brief`'s
+  `:app-note` says which one you are on (DEV.md has the setup). The verification image always has your un-landed
+  work either way, which is why tests stay right about it. And if a `done` is red, nothing
   lands; the thread keeps the work, so iterate and done again rather than
   reaching for the db. A red that is provably somebody ELSE's — its failing
   tests exercise nothing you touched — does not hold your thread: `done`

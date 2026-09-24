@@ -1,0 +1,27 @@
+# Sourced by bin/slopp and bin/slopp-hook: where the slopp server this shell
+# should talk to recorded itself, and how to read that record.
+#   server_file       sets PORT and SERVER_FILE — ~/.slopp/server.json for the
+#                     default port (7357), server-<port>.json for any other;
+#                     SLOPP_PORT is the one knob, the same one the
+#                     plugin's MCP url and the server itself read
+#   read_server_file  sets DURL, DPID and DTOKEN from that file
+#   no_server         one sentence on stdout saying what to start, when the
+#                     cwd is a slopp project (so the agent learns it too)
+# The file is one line of compact JSON the server wrote; sed reads its
+# fields so nothing beyond bash and curl is needed on the client.
+DEFAULT_PORT=7357
+server_file() {
+  PORT="${SLOPP_PORT:-$DEFAULT_PORT}"
+  if [ "$PORT" = "$DEFAULT_PORT" ]; then SERVER_FILE="$HOME/.slopp/server.json"; else SERVER_FILE="$HOME/.slopp/server-$PORT.json"; fi
+}
+read_server_file() {
+  DURL="$(sed -n 's/.*"url":"\([^"]*\)".*/\1/p' "$SERVER_FILE" | sed 's#/*$##')"
+  DPID="$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$SERVER_FILE")"
+  DTOKEN="$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' "$SERVER_FILE")"
+}
+no_server_sentence() {
+  echo "no slopp server answers on port $PORT — start one with \`slopp server\` (it stays up until \`slopp server stop\`; a project's dev instance on another port is started by the machine's slopp server on attach)"
+}
+no_server() {
+  [ -f .slopp/store.db ] && echo "[slopp] $(no_server_sentence)"
+}

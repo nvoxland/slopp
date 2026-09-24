@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive slopp over MCP-over-HTTP — the daemon's endpoint, which is what
+"""Drive slopp over MCP-over-HTTP — the slopp server's endpoint, which is what
 Claude Code's plugin entry talks to — and print each call's round-trip
 wall: slopp's cost with no harness around it.
 
@@ -13,8 +13,8 @@ and store — the gap was Claude Code's auto-mode permission classifier, not
 slopp. Run this first whenever "slopp is slow" is the claim; it says which
 side of the wire to look at.
 
-To profile the daemon, attach Flight Recorder to its pid from the outside
-(`jcmd $(python3 -c 'import json;print(json.load(open("$HOME/.slopp/daemon.json"))["pid"])') JFR.start …`)
+To profile the slopp server, attach Flight Recorder to its pid from the outside
+(`jcmd $(python3 -c 'import json;print(json.load(open("$HOME/.slopp/server.json"))["pid"])') JFR.start …`)
 and read the dump with `jfr print --events jdk.ExecutionSample out.jfr`.
 `--calls` is a JSON list of {"tool": ..., "args": {...}}; the default plan
 is read-only ops. A dev tool: the plugin itself needs no Python.
@@ -42,9 +42,9 @@ ap.add_argument("--calls")
 a = ap.parse_args()
 
 plan = [(c["tool"], c.get("args", {})) for c in json.load(open(a.calls))] if a.calls else DEFAULT_PLAN
-# the daemon's MCP endpoint, the project named by dir — exactly what the
-# plugin's .mcp.json entry does; the daemon is yours to have started
-port = os.environ.get("SLOPP_DAEMON_PORT") or "7357"
+# the slopp server's MCP endpoint, the project named by dir — exactly what the
+# plugin's .mcp.json entry does; the slopp server is yours to have started
+port = os.environ.get("SLOPP_PORT") or "7357"
 endpoint = f"http://127.0.0.1:{port}/api/projects/_/mcp"
 project = os.path.realpath(a.dir)
 session = None
@@ -71,7 +71,7 @@ def rpc(method, params=None, notify=False):
                 session = sid
             body = r.read().decode("utf-8")
     except urllib.error.URLError as e:
-        raise SystemExit(f"no daemon at {endpoint} ({e}) — start one with `slopp daemon`")
+        raise SystemExit(f"no slopp server at {endpoint} ({e}) — start one with `slopp server`")
     if notify or not body.strip():
         return None, time.time() - t0
     return json.loads(body), time.time() - t0
