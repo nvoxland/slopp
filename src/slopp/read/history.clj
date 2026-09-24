@@ -1036,3 +1036,56 @@
                                :namespaces  (count (into #{} (keep ns-of) live))})
                    rows)))
         (vec (reverse rows))))))
+
+(defn ^:export story-rows
+  "A subject's history BY COMMIT POINT — a pure fold over `deltas` (oldest
+  first, as `store/deltas` gives them), keeping the content deltas whose `:ns`
+  satisfies `pred`. Returns `{:rows :working}`:
+
+  - `:rows`, newest first, one per commit point that touched the subject:
+    `{:commit :description :status :at :range :asks :more-asks :forms}`.
+    `:description` is the title line; `:asks` are the distinct recorded
+    prompts in order, capped at six with `:more-asks` counting the rest;
+    `:forms` is how many forms moved. `:range` is `previous..this` — the
+    address the change screen opens — and absent on the first commit point,
+    which has nothing before it.
+  - `:working`, the same shape for what touched the subject SINCE the last
+    commit point, with `:since`; nil when nothing did.
+
+  The asks are the point. The recorded prompt is the WHY behind every write,
+  and read by commit point it is a subject's history in the words that shaped
+  it — the one account of the code no amount of reading the code recovers."
+  [deltas pred]
+  (let [cap   6
+        fresh {:asks [] :forms #{}}
+        touch (fn [acc d]
+                (let [p (some-> (:prompt d) str str/trim)]
+                  (-> acc
+                      (update :forms into (remove nil? (cons (:form-id d) (:form-ids d))))
+                      (update :asks #(if (and (seq p) (not (some #{p} %))) (conj % p) %)))))
+        told  (fn [acc]
+                {:asks      (vec (take cap (:asks acc)))
+                 :more-asks (max 0 (- (count (:asks acc)) cap))
+                 :forms     (count (:forms acc))})]
+    (loop [ds (seq deltas) prev nil acc fresh rows ()]
+      (if-let [d (first ds)]
+        (cond
+          (= :commit (:op d))
+          (recur (next ds) (:id d) fresh
+                 (if (= acc fresh)
+                   rows
+                   (conj rows (cond-> (assoc (told acc)
+                                             :commit (:id d)
+                                             :description (first (str/split-lines (str (:description d)))))
+                                (:status d) (assoc :status (name (:status d)))
+                                (:at d)     (assoc :at (human-time (:at d)))
+                                prev        (assoc :range (str prev ".." (:id d)))))))
+
+          (and (content-ops (:op d)) (pred (:ns d)))
+          (recur (next ds) prev (touch acc d) rows)
+
+          :else
+          (recur (next ds) prev acc rows))
+        {:rows    (vec rows)
+         :working (when (not= acc fresh)
+                    (cond-> (told acc) prev (assoc :since prev)))}))))

@@ -2565,7 +2565,7 @@
     (testing "a screen with no lenses renders NO switcher — an empty bar takes
               layout and says nothing, the same rule app-shell already makes
               for an omitted pane"
-      (is (nil? (bar "/store/ns/demo.core" :ns nil))))
+      (is (nil? (bar "/store/search" :search nil))))
 
     (testing "every screen in the lens table names its default view, and no
               other — the two halves are one registry and drift silently"
@@ -3450,7 +3450,12 @@
                 ;; So this row drives the degradation the page's docstring
                 ;; promises — the counts stand and the cadence panel reports
                 ;; nothing rather than the screen throwing over its lesser half.
-                :dashboard [{:ns "demo.core" :forms 3} {:ns "demo.rate" :forms 1}]}
+                :dashboard [{:ns "demo.core" :forms 3} {:ns "demo.rate" :forms 1}]
+                ;; the path picker with no ends picked — what a bare /store/flow gets
+                :flow      {:lifelines [] :steps [] :truncated {:depth false :steps false}
+                            :note "pick two forms"}
+                ;; the data dictionary with nothing in it
+                :data      {:keys [] :total 0 :shown 0}}
           ;; DERIVED from the patterns: `screens` holds `/store/ns/:ns`, which is
           ;; not a path, and `example-path` fills it from that row's own sample.
           ;; `:form` has two rows — two arities of one screen — and either proves
@@ -3471,7 +3476,7 @@
           ;; project-relative and would turn the landing's `/` into `/p/demo`,
           ;; which is the Review screen: the one address outside every project
           ;; rewritten into the one most inside one.
-          (let [m (webapp/match-route (slopp.cljnx/marked-pages) path)]
+          (let [m (webapp/match-route (cljnx/marked-pages) path)]
             (is (some? m) (str path " matches no row"))
             (is (= screen (page-subject (:screen m)))
                 (str path " does not reach " screen)))))
@@ -3520,8 +3525,10 @@
         ;; here while rendering nothing for them — a code-navigation gap. The
         ;; key-set assertion below is what caught their removal, which is the
         ;; pairing check doing its job.
-        {:code "/store"
-         :form "/store/form/f123"}]
+        {:code   "/store"
+         :module "/store/module/demo.core"
+         :ns     "/store/ns/demo.core"
+         :form   "/store/form/f123"}]
     (testing "the POPULATIONS are non-empty — every check below iterates the
               table, and over an empty one they all pass by having nothing to
               disagree with"
@@ -3825,7 +3832,7 @@
                  ;; the SECTION roots, which are not addresses: a section's
                  ;; landing is a page inside it, so `/rest` itself routes to
                  ;; nothing and must not be quietly answered by a neighbour.
-                 "/rest" "/http" "/webapp"]]
+                 "/rest" "/http" "/webapp" "/store/flow" "/store/form/f1/sequence" "/store/data"]]
         (when-let [subject (first (routed p))]
           (is (contains? declared subject)
               (str p " routed to " subject ", which views/screens does not list"))))))
@@ -3857,7 +3864,11 @@
              ;; two documents rather than unpacking one, and so the only one
              ;; whose canned answer is named for the SCREEN because no single
              ;; document is what it shows.
-             :dashboard}
+             :dashboard
+             ;; the path picker, 2026-09-24: two ends in the query string
+             :flow
+             ;; the data dictionary, 2026-09-24
+             :data}
            (set (map :screen views/screens))))))
 
 (deftest a-hits-address-is-BUILT-here-and-round-trips-through-the-router
@@ -4056,14 +4067,14 @@
   ;; also asserts that each lens page carries its own marker: an address that
   ;; exists only in `lenses` reaches nothing at all.
   (let [addrs    (lens-addresses)
-        declared (slopp.cljnx/marked-pages)]
+        declared (cljnx/marked-pages)]
 
     (testing "the population is real — deriving addresses from two tables that
               are both empty would assert nothing at all"
       (is (seq addrs))
       (is (seq declared))
-      (is (= 3 (count addrs))
-          (str "expected the three lens addresses, got " (pr-str (mapv :address addrs)))))
+      (is (= 8 (count addrs))
+          (str "expected the eight lens addresses — table, gaps, conformance, treemap, the two story lenses, source and sequence — got " (pr-str (mapv :address addrs)))))
 
     (doseq [{:keys [screen lens address]} addrs]
       (testing (str "the lens address " (pr-str address) " is a declared row")
@@ -5225,9 +5236,9 @@
   (let [hrefs (fn [v] (vec (keep #(when (and (vector? %) (= :a (first %)))
                                      (:href (second %)))
                                   (tree-seq coll? seq v))))]
-    (is (= ["/store/form/x/source"]
+    (is (= ["/store/form/x/source" "/store/form/x/sequence"]
            (hrefs (views/lens-bar "/store/form/x/through/y" :form nil))))
-    (is (= ["/store/form/x/source"]
+    (is (= ["/store/form/x/source" "/store/form/x/sequence"]
            (hrefs (views/lens-bar "/store/form/x" :form nil)))
         "the control: the plain form page links the same lens")))
 
@@ -5246,3 +5257,217 @@
     (is (not (re-find #"<op>" text)) "the CLI's placeholder is not a sentence")
     (is (= ["slopp"] code) "the command is a code element, once")
     (is (re-find #"checkout" text) "names where an agent attaches")))
+
+(deftest a-covering-test-reads-as-a-sentence-not-a-symbol
+  ;; This store names its tests as sentences, so the tests reaching a namespace
+  ;; ARE a statement of what it does — readable without opening any code once
+  ;; the hyphens are gone. That is the cheapest way this UI has to let someone
+  ;; understand a module without reading it.
+  (let [text   (fn [h] (str/join " " (filter string? (nodes h))))
+        hrefs  (fn [h] (->> (nodes h) (filter map?) (keep :href) set))
+        groups [{:ns "demo.core-test" :count 3
+                 :names ["rate-rounds-a-boundary-weight-up" "the-rate-s-zone-is-required"]
+                 :more 1}]]
+    (testing "a test name becomes the sentence it was written as"
+      (is (= "the code section can be navigated without typing a url"
+             (views/behaviour "the-code-section-can-be-navigated-without-typing-a-url")))
+      (is (= "the config screen's classes all have rules"
+             (views/behaviour "the-config-screen-s-classes-all-have-rules"))
+          "a possessive written as -s- reads back as one"))
+    (testing "the list groups by test namespace, links it, and says what it held back"
+      (let [h (views/spec-list groups)]
+        (is (re-find #"rate rounds a boundary weight up" (text h)))
+        (is (re-find #"the rate's zone is required" (text h)))
+        (is (contains? (hrefs h) "/store/ns/demo.core-test"))
+        (is (re-find #"and 1 more" (text h))
+            "a capped list that does not say so reads as the whole of it")))
+    (testing "nothing reaching it is a finding, said as one"
+      (is (re-find #"no test reaches this" (text (views/spec-list [])))))
+    (testing "a namespace's rail carries the list"
+      (let [v (views/ns-rail {:ns "demo.core" :forms [] :tested-by ["demo.core-test"]
+                              :tests groups} {})]
+        (is (re-find #"rate rounds a boundary weight up" (text v)))))
+    (testing "a module page carries it too, over every namespace in the module"
+      (let [v (views/module-main {:module "demo.core" :tier "pure" :namespaces []
+                                  :boundary {:in [] :out []} :tests groups})]
+        (is (re-find #"rate rounds a boundary weight up" (text v)))))
+    (testing "a form's rail names the tests that reach it, and HOW we know each"
+      (let [v (views/form-rail {:form-id "f1" :warranty {:covered 1}
+                                :callers [] :callees [] :note "a floor"
+                                :tests {:count 2
+                                        :shown [{:test "demo.core-test/rate-rounds-a-boundary-weight-up"
+                                                 :via ["observed" "static"] :hops 1}]}})]
+        (is (re-find #"rate rounds a boundary weight up" (text v)))
+        (is (re-find #"observed" (text v))
+            "observed and static are not the same evidence, so the row says which")
+        (is (re-find #"and 1 more" (text v)))))))
+
+(deftest the-nav-stacks-modules-by-layer-and-sinks-the-foundation
+  ;; Alphabetical order says nothing about a system. Layer order does: the top
+  ;; of the rail is what everything else is built toward, and the foundation
+  ;; everything stands on sits at the bottom — so the rail reads as the
+  ;; architecture before a single row is opened.
+  (let [mods   [{:module "demo.a"    :namespaces ["demo.a.core"] :foundation false}
+                {:module "demo.base" :namespaces ["demo.base.x"] :foundation true}
+                {:module "demo.core" :namespaces ["demo.core.q"] :foundation false}
+                {:module "demo.lab"  :namespaces ["demo.lab.y"]  :foundation false}
+                {:module "demo.web"  :namespaces ["demo.web.z"]  :foundation false}]
+        ;; deepest first, which is how /api/modules sends them
+        layers [["demo.a" "demo.core"] ["demo.web"]]
+        order  (fn [h] (->> (nodes h)
+                            (filter #(and (vector? %) (map? (second %))
+                                          (= "module-row" (get-in % [1 :class]))))
+                            (mapv #(get-in % [1 :data-module]))))
+        want   ["demo.web" "demo.a" "demo.core" "demo.lab" "demo.base"]]
+    (testing "consumers on top, a layer's members by name, the unlayered next, the foundation last"
+      (is (= want (mapv :module (views/by-layer mods layers)))))
+    (testing "the rail draws the order it is handed"
+      (is (= want (order (views/module-nav (views/by-layer mods layers) nil nil)))))
+    (testing "without layers the wire's order stands — nothing is invented"
+      (is (= (mapv :module mods) (mapv :module (views/by-layer mods nil)))))))
+
+(deftest a-story-row-links-to-the-change-it-names
+  ;; The story lens reads a subject's history as the ASKS that shaped it, by
+  ;; commit point — the recorded why, which no amount of reading the code
+  ;; recovers. Each row opens the change it names.
+  (let [text  (fn [h] (str/join " " (filter string? (nodes h))))
+        hrefs (fn [h] (->> (nodes h) (filter map?) (keep :href) set))
+        doc   {:grain "ns" :subject "demo.core" :page 0 :more 3
+               :rows [{:commit "d8" :description "rounding" :status "red" :range "d4..d8"
+                       :asks ["round up"] :more-asks 2 :forms 2}
+                      {:commit "d3" :description "zones" :status "green"
+                       :asks ["rate needs a zone"] :more-asks 0 :forms 1}]
+               :working {:asks ["sharpen"] :more-asks 0 :forms 1 :since "d8"}}
+        v     (views/story-main doc)]
+    (testing "a commit point with a range links to that change"
+      (is (contains? (hrefs v) "/change/d4..d8")))
+    (testing "the asks ARE the story — each one, and the count the cap held back"
+      (is (re-find #"round up" (text v)))
+      (is (re-find #"and 2 more asks" (text v))))
+    (testing "a red commit point says so"
+      (is (re-find #"recorded red" (text v))))
+    (testing "work in flight is shown, not dropped"
+      (is (re-find #"in flight" (text v)))
+      (is (re-find #"sharpen" (text v))))
+    (testing "older pages are one link away"
+      (is (contains? (hrefs v) "/store/ns/demo.core/story?page=1")))
+    (testing "a subject nothing has touched says so"
+      (is (re-find #"no commit point has touched this yet"
+                   (text (views/story-main {:grain "module" :subject "demo.x" :rows []})))))))
+
+(deftest a-sequence-reads-as-lanes-and-as-steps
+  ;; What happens when a form runs, twice over: a diagram of lanes for the
+  ;; shape, and an indented list of steps for the words — the table twin every
+  ;; picture here carries. Every callee links to ITS sequence, so reading on
+  ;; is one click, and the static caveat is on the page.
+  (let [text  (fn [h] (str/join " " (filter string? (nodes h))))
+        hrefs (fn [h] (->> (nodes h) (filter map?) (keep :href) set))
+        doc   {:root {:form "demo.core/rate" :form-id "f1" :module "demo.core"}
+               :lifelines ["demo.core" "demo.util"]
+               :steps [{:i 0 :depth 1 :from "demo.core/rate" :from-module "demo.core"
+                        :to "demo.core/band-for" :to-module "demo.core" :to-form-id "f2" :via "static"}
+                       {:i 1 :depth 2 :from "demo.core/band-for" :from-module "demo.core"
+                        :to "demo.util/round-up" :to-module "demo.util" :to-form-id "f3" :via "static"}
+                       {:i 2 :depth 1 :from "demo.core/rate" :from-module "demo.core"
+                        :to "demo.util/round-up" :to-module "demo.util" :to-form-id "f3" :via "static"
+                        :seen-at 1}
+                       {:i 3 :depth 1 :from "demo.core/rate" :from-module "demo.core" :more 2}]
+               :truncated {:depth true :steps false}
+               :note "a static reading of the code"}
+        v     (views/sequence-main doc)]
+    (testing "the diagram draws a lane per module"
+      (is (= 2 (count (filter #(and (vector? %) (= :g (first %))
+                                    (= "seq-lane" (get-in % [1 :class])))
+                              (nodes v))))))
+    (testing "the steps name every call, and each callee opens its own sequence"
+      (is (contains? (hrefs v) "/store/form/f2/sequence"))
+      (is (re-find #"round-up" (text v)))
+      (is (re-find #"expanded at step 2" (text v)) "a callee already drawn points back")
+      (is (re-find #"and 2 more calls" (text v))))
+    (testing "what the trace is and where it was cut are SAID"
+      (is (re-find #"a static reading of the code" (text v)))
+      (is (re-find #"depth bound" (text v))))
+    (testing "the path picker is there, starting from this form"
+      (is (some #(and (map? %) (= "from" (:name %)) (= "demo.core/rate" (:value %))) (nodes v))))
+    (testing "the doors panel lists every way in, linking each to what happens next"
+      (let [d (views/doors-panel {:kinds [{:kind "http" :note "routes"
+                                           :entries [{:kind "http" :label "GET /quote" :handler "demo.web/q"
+                                                      :module "demo.web" :form-id "f21"}
+                                                     {:kind "http" :label "POST /orders" :handler "demo.web/o"
+                                                      :module "demo.web"}]}]})]
+        (is (contains? (hrefs d) "/store/form/f21/sequence"))
+        (is (re-find #"POST /orders" (text d)) "a door with no form is still listed, just not linked")
+        (is (nil? (views/doors-panel {:kinds []})) "no doors, no panel")))))
+
+(deftest the-conformance-lens-classes-every-edge-and-moves-no-box
+  ;; The conformance lens is an OVERLAY: the same boxes in the same places,
+  ;; every drawn edge classed by what the declaration says about it, and a
+  ;; declaration nothing uses drawn dashed between boxes that do not move.
+  (let [modules [{:module "a.x" :namespaces ["a.x"] :deps ["b.y"] :declared ["b.y" "c.z"]
+                  :tier "pure" :foundation false}
+                 {:module "b.y" :namespaces ["b.y"] :deps [] :declared [] :tier "external" :foundation false}
+                 {:module "c.z" :namespaces ["c.z"] :deps [] :declared [] :tier "internal" :foundation false}]
+        conf    {:edges [{:from "a.x" :to "b.y" :class "convergent"}
+                         {:from "a.x" :to "c.z" :class "absent"}]}
+        data    {:modules modules :layers [["b.y" "c.z"] ["a.x"]] :cycles [] :conformance conf}
+        pic     (:picture (views/with-store-picture data))
+        plain   (views/module-graph pic)
+        overlaid (views/module-graph (assoc pic :overlay (views/conformance-overlay modules conf pic)))
+        rects   (fn [v] (->> (nodes v) (filter #(and (vector? %) (= :rect (first %)))) (mapv second)))
+        classes (fn [v] (->> (nodes v) (filter #(and (vector? %) (map? (second %)))) (keep #(get-in % [1 :class])) set))]
+    (testing "no box moves — an overlay restyles, it never reflows"
+      (is (= (rects plain) (rects overlaid))))
+    (testing "a drawn edge carries its class"
+      (is (contains? (classes overlaid) "module-edge convergent")))
+    (testing "a declaration nothing uses is drawn, dashed by its class, between the boxes it names"
+      (is (contains? (classes overlaid) "module-edge absent")))
+    (testing "a box carries its module's tier"
+      (is (some #(re-find #"tier-pure" %) (classes overlaid))))
+    (testing "the table names every edge that is not both declared and used"
+      (let [t (str/join " " (filter string? (nodes (views/conformance-table (:edges conf)))))]
+        (is (re-find #"declared, never used" t))
+        (is (not (re-find #"b\.y" t)) "a convergent edge is not a finding")))))
+
+(deftest a-dial-tints-by-share-or-by-rank-and-a-treemap-is-drawn-by-size
+  ;; A SHARE reads as a fraction of the module's own forms, so it means the
+  ;; same on any store; a COUNT is ranked within this one, so the darkest is
+  ;; the most HERE. Zero is always untinted — nothing to see is not a rung.
+  (let [share {:kind "share" :modules [{:module "a" :value 0 :of 10} {:module "b" :value 1 :of 10}
+                                       {:module "c" :value 10 :of 10}]}
+        cnt   {:kind "count" :modules [{:module "a" :value 0 :of 1} {:module "b" :value 5 :of 1}
+                                       {:module "c" :value 50 :of 1} {:module "d" :value 7 :of 1}]}
+        text  (fn [h] (str/join " " (filter string? (nodes h))))]
+    (is (= {"a" 0 "b" 1 "c" 4} (views/dial-steps share :modules)))
+    (is (= {"a" 0 "b" 2 "d" 3 "c" 4} (views/dial-steps cnt :modules)))
+    (testing "the dial bar names every dial and marks the one in force"
+      (let [b (views/dial-bar "/store" "effects")]
+        (is (some #(and (map? %) (= "/store?overlay=size" (:href %))) (nodes b)))
+        (is (re-find #"effects" (text b)))
+        (is (not (some #(and (map? %) (= "/store?overlay=effects" (:href %))) (nodes b)))
+            "the dial in force is not a link to itself")))
+    (testing "a treemap cell is its namespace, linked, and tinted by its step"
+      (let [v (views/treemap-svg {:width 400 :height 200
+                                  :modules [{:key "m.a" :x 0 :y 0 :w 200 :h 200}]
+                                  :cells [{:key "m.a.x" :module "m.a" :x 3 :y 18 :w 100 :h 50}]}
+                                 {"m.a.x" 4})]
+        (is (some #(and (map? %) (= "/store/ns/m.a.x" (:href %))) (nodes v)))
+        (is (some #(and (map? %) (re-find #"gap-w4" (str (:class %)))) (nodes v)))))))
+
+(deftest the-data-screen-reads-as-keys-and-a-key-reads-as-its-users
+  ;; The dictionary as a table, every key linked to who uses it; a key panel
+  ;; saying, per module, which forms name it and which destructure it.
+  (let [text  (fn [h] (str/join " " (filter string? (nodes h))))
+        hrefs (fn [h] (->> (nodes h) (filter map?) (keep :href) set))
+        doc   {:keys [{:kw "order/total" :modules 3 :namespaces 4 :forms 7 :destructured 2}]
+               :total 9 :shown 1
+               :key {:kw "order/total"
+                     :modules [{:module "demo.core"
+                                :forms [{:form "demo.core/rate" :form-id "f1" :via ["destructuring"]}]}]
+                     :tests 2}}
+        v     (views/data-main doc {})]
+    (is (contains? (hrefs v) "/store/data?key=order/total") "a key opens who uses it")
+    (is (re-find #"1 of 9" (text v)) "a capped list says what it held back")
+    (is (contains? (hrefs v) "/store/data?bare=true") "plain keywords are one link away")
+    (is (contains? (hrefs v) "/store/form/f1"))
+    (is (re-find #"destructures it" (text v)))
+    (is (re-find #"2 test namespaces" (text v)))))

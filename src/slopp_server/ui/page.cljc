@@ -190,6 +190,17 @@
    "/api/ns/:ns"              :ns
    "/api/module/:m"           :module
    "/api/form/:id"            :form
+   ;; the STORY lens, both grains — one fixture, since the screen reads the
+   ;; grain from the document rather than from the address
+   "/api/story/:grain/:subject" :story
+   ;; the BEHAVIOUR axis: the doors, one form's trace, the path between two
+   "/api/entries"             :entries
+   "/api/form/:id/sequence"   :sequence
+   "/api/flow"                :flow
+   ;; the DIAL — asked by the treemap always and by the map when one is chosen
+   "/api/overlay/:dial"       :overlay
+   ;; the DATA DICTIONARY, index and chosen key in one document
+   "/api/data"                :data
    "/api/source/:ns/:name"    :source})
 
 (def content-document
@@ -525,7 +536,19 @@
                                               :status "added" :callers 1
                                               :diff [["add" "(defn- band-for [kg] …)"]]}]}]}]}
 
-   :code   {:modules [{:module "demo.web" :namespaces ["demo.web"] :tests 2
+   :code   {;; the CONFORMANCE of every edge below: four kinds, so every mark the
+            ;; lens draws renders on a driven page. The billing → orders half of
+            ;; the knot is used but never declared; web → orders is declared
+            ;; and never used; billing → util is declared and used only by tests.
+            :conformance {:edges [{:from "demo.billing" :to "demo.orders" :class "divergent"}
+                                  {:from "demo.billing" :to "demo.util" :class "test-only"}
+                                  {:from "demo.core" :to "demo.util" :class "convergent"}
+                                  {:from "demo.orders" :to "demo.billing" :class "convergent"}
+                                  {:from "demo.orders" :to "demo.util" :class "convergent"}
+                                  {:from "demo.web" :to "demo.core" :class "convergent"}
+                                  {:from "demo.web" :to "demo.orders" :class "absent"}
+                                  {:from "demo.web" :to "demo.util" :class "convergent"}]}
+            :modules [{:module "demo.web" :namespaces ["demo.web"] :tests 2
                        :tier "external" :foundation false
                        ;; TWO deps, so the table's ", " separator is driven. A
                        ;; separator supplied by CSS is nothing at all to a
@@ -584,6 +607,9 @@
             :layers [["demo.billing" "demo.core" "demo.orders"] ["demo.web"]] :cycles [["demo.billing" "demo.orders"]]}
 
    :module {:module "demo.core" :tier "pure"
+            :tests [{:ns "demo.core-test" :count 3
+                     :names ["rate-needs-a-zone" "rate-rounds-a-boundary-weight-up"]
+                     :more 1}]
             :namespaces [{:ns "demo.core" :forms 11 :tier "pure"
                           :deps ["demo.core.calc"]
                           :gaps {:forms 11 :no-doc 0 :no-why 1 :uncovered 2}}
@@ -659,6 +685,11 @@
    :ns     {:ns "demo.core" :tier "pure"
             :gaps {:forms 11 :no-doc 0 :no-why 1 :uncovered 2}
             :tested-by ["demo.core-test"]
+            ;; NAMES, which is what the rail renders as sentences. Three reach
+            ;; it and two are shown so the "and 1 more" branch is driven too.
+            :tests [{:ns "demo.core-test" :count 3
+                     :names ["rate-needs-a-zone" "rate-rounds-a-boundary-weight-up"]
+                     :more 1}]
             ;; **Every key the contract REQUIRES is present, including the ones that
             ;; are null on the wire.** This vector omitted `:sig`, `:schema`,
             ;; `:private?`, `:exported?`, `:effectful?` and `:callers-out-test`
@@ -726,6 +757,10 @@
             :sig "[kg zone]" :doc "Rate for a weight in a zone."
             :why "the order path was guessing at prices"
             :warranty {:covered 3}
+            :keys [{:kw "order/total" :via "destructuring"}]
+            :tests {:count 3
+                    :shown [{:test "demo.core-test/rate-rounds-a-boundary-weight-up"
+                             :via ["observed" "static"] :hops 1}]}
             :tokens [["text" "(defn rate "] ["delim" "["] ["text" "kg zone])"]]
             :callers [{:via "static" :count 1
                        :forms [{:form "quote" :ns "demo.order" :module "demo.order"
@@ -754,6 +789,83 @@
                        :doc "Round a rate up to the nearest cent."
                        :warranty {:covered 2}}]
             :note "edges are a syntactic floor, not a census"}
+   ;; TWO commit points and work in flight, so every branch of the story
+   ;; screen is driven: a row with a range and one without (the first commit
+   ;; point has nothing before it), asks past the cap, a red verdict, and the
+   ;; in-flight section. Shape copied from `slopp.read.history/story-rows`.
+   :story  {:grain "ns" :subject "demo.core" :page 0 :more 0
+            :rows [{:commit "d3457" :description "The API section navigates like an API browser"
+                    :status "green" :at "2026-08-08 02:09" :range "d3300..d3457"
+                    :asks ["rate needs a zone" "band-for rounds up on a boundary"]
+                    :more-asks 0 :forms 2}
+                   {:commit "d3300" :description "A third section: the API surface a project publishes"
+                    :status "red" :at "2026-08-08 01:47"
+                    :asks ["the order path was guessing at prices"] :more-asks 3 :forms 1}]
+            :working {:asks ["sharpen rate"] :more-asks 0 :forms 1 :since "d3457"}}
+   ;; the DOORS: a door with a form and one without, so the panel's linked and
+   ;; unlinked rows are both driven. The handler forms are the demo's own.
+   :entries {:kinds [{:kind "main" :note "the process entry — what runs when the app starts"
+                      :entries [{:kind "main" :label "app.main" :handler "demo.web/-main"
+                                 :module "demo.web" :form-id "f20"}]}
+                     {:kind "http" :note "HTTP routes — each request enters the code here"
+                      :entries [{:kind "http" :label "GET /quote" :handler "demo.web/quote-handler"
+                                 :module "demo.web" :form-id "f21"}
+                                {:kind "http" :label "POST /orders" :handler "demo.web/order-handler"
+                                 :module "demo.web"}]}]
+             :unreadable []}
+   ;; ONE of every step kind — a call, a cross-module call, a callee drawn
+   ;; already, a depth cut, a cycle and the calls a fan-out cap held back — so
+   ;; every branch of the sequence screen renders on a driven page.
+   :sequence {:root {:form "demo.core/rate" :form-id "f1" :module "demo.core"}
+              :lifelines ["demo.core" "demo.util"]
+              :steps [{:i 0 :depth 1 :from "demo.core/rate" :from-module "demo.core"
+                       :to "demo.core/band-for" :to-module "demo.core" :to-form-id "f2" :via "static"}
+                      {:i 1 :depth 2 :from "demo.core/band-for" :from-module "demo.core"
+                       :to "demo.util/round-up" :to-module "demo.util" :to-form-id "f3" :via "static"}
+                      {:i 2 :depth 1 :from "demo.core/rate" :from-module "demo.core"
+                       :to "demo.util/round-up" :to-module "demo.util" :to-form-id "f3" :via "static"
+                       :seen-at 1}
+                      {:i 3 :depth 1 :from "demo.core/rate" :from-module "demo.core"
+                       :to "demo.core.calc/tariff" :to-module "demo.core" :via "carrier" :deeper? true}
+                      {:i 4 :depth 1 :from "demo.core/rate" :from-module "demo.core"
+                       :to "demo.core/rate" :to-module "demo.core" :via "static" :cycle? true}
+                      {:i 5 :depth 1 :from "demo.core/rate" :from-module "demo.core" :more 2}]
+              :truncated {:depth true :steps false}
+              :note "the calls in the order they are WRITTEN, depth first — a static reading of the code, not a recording of a run"}
+   ;; the EFFECTS dial, a share: one module untinted, the others on three
+   ;; different rungs, so the ramp is visible on a driven page
+   ;; the DICTIONARY with a key chosen, so the key panel's both kinds of use
+   ;; and its test tally render on a driven page
+   :data {:keys [{:kw "order/total" :modules 3 :namespaces 4 :forms 7 :destructured 2}
+                 {:kw "order/id" :modules 2 :namespaces 2 :forms 3 :destructured 0}]
+          :total 2 :shown 2
+          :key {:kw "order/total"
+                :modules [{:module "demo.core"
+                           :forms [{:form "demo.core/rate" :form-id "f1" :via ["destructuring"]}]}
+                          {:module "demo.web"
+                           :forms [{:form "demo.web/quote-handler" :form-id "f21" :via ["literal"]}]}]
+                :tests 1}}
+   :overlay {:dial "effects" :kind "share" :label "effects"
+             :note "the share of forms that perform effects — the imperative shell reads dark and a pure core reads pale"
+             :namespaces [{:ns "demo.billing" :module "demo.billing" :value 2 :of 9}
+                          {:ns "demo.core" :module "demo.core" :value 0 :of 11}
+                          {:ns "demo.core.calc" :module "demo.core" :value 1 :of 9}
+                          {:ns "demo.orders" :module "demo.orders" :value 5 :of 14}
+                          {:ns "demo.util" :module "demo.util" :value 0 :of 6}
+                          {:ns "demo.web" :module "demo.web" :value 10 :of 12}]
+             :modules [{:module "demo.billing" :value 2 :of 9}
+                       {:module "demo.core" :value 1 :of 20}
+                       {:module "demo.orders" :value 5 :of 14}
+                       {:module "demo.util" :value 0 :of 6}
+                       {:module "demo.web" :value 10 :of 12}]}
+   :flow {:root {:form "demo.web/quote-handler" :form-id "f21" :module "demo.web"}
+          :lifelines ["demo.web" "demo.core" "demo.util"]
+          :steps [{:i 0 :depth 1 :from "demo.web/quote-handler" :from-module "demo.web"
+                   :to "demo.core/rate" :to-module "demo.core" :to-form-id "f1" :via "static"}
+                  {:i 1 :depth 2 :from "demo.core/rate" :from-module "demo.core"
+                   :to "demo.util/round-up" :to-module "demo.util" :to-form-id "f3" :via "static"}]
+          :truncated {:depth false :steps false}
+          :note "the shortest call path between the two, each hop as the code writes it — static, like every edge here"}
 ;; All three kinds and all four `:matched` values, because a fixture where
    ;; every hit matched its own name would show that the list renders and
    ;; nothing about what it SAYS. The source-only row is the one worth having

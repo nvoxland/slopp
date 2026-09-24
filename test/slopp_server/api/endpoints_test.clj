@@ -81,6 +81,7 @@
                          :mass 7 :calls [] :callers-out 0 :callers-out-test 0
                          :effectful? false :exported? false}]
                 :tested-by []
+                :tests []
                 ;; the THINNESS counts, exact on this fixture: a bare
                 ;; `(ns demo.core)` has no docstring, `store/ingest` records no
                 ;; write prompt so both forms are :no-why, and there is no
@@ -123,6 +124,7 @@
                          :mass 6 :calls [] :callers-out 0 :callers-out-test 0
                          :effectful? false :exported? false}]
                 :tested-by []
+                :tests []
                 ;; BOTH forms undocumented here, against demo.core's one — the
                 ;; count moves with the fixture, which is what makes it a
                 ;; measurement rather than a constant
@@ -303,7 +305,9 @@
                "/api/projects/:slug/module/:m" "/api/projects/:slug/form/:id"
                "/api/projects/:slug/search" "/api/projects/:slug/bundle" "/api/projects/:slug/cost"
                "/api/projects/:slug/rest/paths" "/api/projects/:slug/http/paths"
-               "/api/projects/:slug/webapp/paths" "/api/projects/:slug/config"}
+               "/api/projects/:slug/webapp/paths" "/api/projects/:slug/config"
+               "/api/projects/:slug/entries" "/api/projects/:slug/form/:id/sequence"
+               "/api/projects/:slug/flow" "/api/projects/:slug/overlay/:dial" "/api/projects/:slug/data" "/api/projects/:slug/story/:grain/:subject"}
              (set (keys by-path)))))
 
     (testing "every capability's publisher is IN the typed document, so a
@@ -406,7 +410,9 @@
           ;; the endpoint that describes the endpoints
           (is (= #{"namespaces" "ns-outline" "timeline" "change" "form" "source"
                    "modules" "module" "search" "bundle" "cost"
-                   "rest-paths" "http-paths" "webapp-paths" "config"}
+                   "rest-paths" "http-paths" "webapp-paths" "config"
+                   ;; the reading-the-code endpoints, 2026-09-24
+                   "story" "entries" "form-sequence" "flow" "overlay" "data"}
                  (set (:wrappers out)))
               (pr-str out)))
 
@@ -1068,7 +1074,15 @@
                     "/api/projects/demo/bundle?ask=hello"
                     (str "/api/projects/demo/form/" hello-id)
                     "/api/projects/demo/source/demo.core/hello"
-                    "/api/projects/demo/module/demo.core"]]
+                    "/api/projects/demo/module/demo.core"
+                    "/api/projects/demo/entries"
+                    (str "/api/projects/demo/form/" hello-id "/sequence")
+                    "/api/projects/demo/flow?from=demo.core/hello&to=demo.core/hello"
+                    "/api/projects/demo/flow"
+                    "/api/projects/demo/overlay/effects"
+                    "/api/projects/demo/overlay/size"
+                    "/api/projects/demo/data"
+                    "/api/projects/demo/data?bare=true&key=nope"]]
         (let [r (GET path)]
           (is (= 200 (:status r))
               (str path " did not honour its declared :rest/response once "
@@ -1097,7 +1111,9 @@
                              "/api/projects/:slug/cost" "/api/projects/:slug/search"
                              "/api/projects/:slug/bundle"
                              "/api/projects/:slug/form" "/api/projects/:slug/source"
-                             "/api/projects/:slug/module"]))
+                             "/api/projects/:slug/module"
+                             "/api/projects/:slug/entries" "/api/projects/:slug/flow"
+                             "/api/projects/:slug/data"]))
             plain  (for [row (:http/routes ctx)
                          :let [p (str (:path row))]
                          :when (and (str/starts-with? p prefix)

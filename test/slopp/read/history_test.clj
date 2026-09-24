@@ -138,3 +138,34 @@
       ;; of those as standing would report coverage that never happened
       (is (nil? (history/standing-full-check
                  {:id "d1" :op :verify :result {:status :green}} []))))))
+
+(deftest story-rows-fold-asks-under-the-commit-point-that-carried-them
+  ;; A subject's history told the way a reader asks it: which commit points
+  ;; touched it, and what was ASKED on the way to each. A pure fold over the
+  ;; delta log, so it needs no db and no session.
+  (let [ds [{:id "d1" :op :add :ns 'demo.core :form-id "f1" :prompt "rate needs a zone"}
+            {:id "d2" :op :add :ns 'demo.util :form-id "f9" :prompt "a helper elsewhere"}
+            {:id "d3" :op :commit :description "zones\n\nthe long body" :status :green :at 1754600000000}
+            {:id "d4" :op :commit :description "nothing here" :status :green}
+            {:id "d5" :op :replace :ns 'demo.core :form-id "f1" :prompt "round up"}
+            {:id "d6" :op :replace :ns 'demo.core :form-id "f2" :prompt "round up"}
+            {:id "d7" :op :test-run :ns 'demo.core}
+            {:id "d8" :op :commit :description "rounding" :status :red}
+            {:id "d9" :op :replace :ns 'demo.core :form-id "f1" :prompt "sharpen"}]
+        {:keys [rows working]} (history/story-rows ds #(= "demo.core" (str %)))]
+    (testing "newest first, and only the commit points that touched the subject"
+      (is (= ["d8" "d3"] (mapv :commit rows))))
+    (testing "a row carries its asks — distinct, in order — how many forms moved, and the range to open"
+      (is (= {:commit "d8" :description "rounding" :status "red" :range "d4..d8"
+              :asks ["round up"] :more-asks 0 :forms 2}
+             (first rows))))
+    (testing "the first commit point has nothing before it, so no range; the title line is the description"
+      (let [r (second rows)]
+        (is (= "zones" (:description r)))
+        (is (nil? (:range r)))
+        (is (= ["rate needs a zone"] (:asks r)) "another namespace's ask is not this one's")
+        (is (string? (:at r)))))
+    (testing "work since the last commit point is IN FLIGHT, not dropped"
+      (is (= {:asks ["sharpen"] :more-asks 0 :forms 1 :since "d8"} working)))
+    (testing "a subject nothing touched has no rows and nothing in flight"
+      (is (= {:rows [] :working nil} (history/story-rows ds #(= "demo.nope" (str %))))))))

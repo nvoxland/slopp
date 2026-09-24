@@ -133,38 +133,48 @@
     (testing "--tree is the bare materialization, untouched"
       (is (= {:built "/w/out"} (build-cli/artifact! {:built "/w/out"} :tree :sh sh :which (constantly true)))))))
 
-(deftest the-jar-artifact-runs-a-recipe-that-exists-and-refuses-when-none-does
+(deftest the-jar-artifact-runs-the-trees-recipe-and-lands-the-jar-in-the-project
   ;; A jar needs tools.build, which the slopp jar does not carry, so the verb
-  ;; runs a RECIPE: the project's own build.clj (slopp's case — it defaults
-  ;; to target/jar-src and writes target/slopp.jar, so it runs in the
-  ;; project with :src pointed at the tree), else one the tree carries, else
-  ;; a refusal that says a recipe is what is missing.
+  ;; runs the RECIPE the tree carries (build.clj, a store-tracked file build!
+  ;; materializes) with tools.build supplied inline — the same call the
+  ;; release lane makes on a projection checkout, so there is no :build alias
+  ;; and no build.clj on main. The jar it writes is copied up to the
+  ;; project's target/, where every doc and SLOPP_JAR point.
   (let [mk!   (fn [] (str (java.nio.file.Files/createTempDirectory
                            "slopp-build-jar" (make-array java.nio.file.attribute.FileAttribute 0))))
         calls (atom [])
-        sh    (fn [cmd dir] (swap! calls conj [cmd dir]) {:exit 0})]
-    (testing "the project's build.clj runs in the project, over the tree's src"
-      (let [proj (mk!) tree (str proj "/target/jar-src")]
-        (spit (io/file proj "build.clj") "(ns build)")
-        (let [r (build-cli/artifact! {:built tree} :jar :proj proj :sh sh :which (constantly true))]
-          (is (nil? (:error r)) (pr-str r))
-          (is (= [["clojure" "-T:build" "uber" ":src" (str "\"" tree "/src\"")] proj] (first @calls))
-              (pr-str @calls))
-          (is (= proj (:jar-recipe r))))))
-    (testing "a tree that carries its own recipe runs it there"
-      (reset! calls [])
-      (let [proj (mk!) tree (str proj "/out")]
-        (io/make-parents (io/file tree "build.clj"))
-        (spit (io/file tree "build.clj") "(ns build)")
-        (let [r (build-cli/artifact! {:built tree} :jar :proj proj :sh sh :which (constantly true))]
-          (is (= [["clojure" "-T:build" "uber" ":src" "\"src\""] tree] (first @calls)) (pr-str @calls)))))
-    (testing "no recipe anywhere is a refusal that names the gap"
+        sh    (fn [cmd dir]
+                (swap! calls conj [cmd dir])
+                (let [t (io/file dir "target")] (.mkdirs t) (spit (io/file t "app.jar") "jar"))
+                {:exit 0})
+        with-recipe! (fn [tree] (io/make-parents (io/file tree "build.clj")) (spit (io/file tree "build.clj") "(ns build)") tree)]
+    (testing "the recipe runs in the tree, tools.build inline, over the tree's own src; the jar lands in the project"
+      (let [proj (mk!) tree (with-recipe! (str proj "/target/jar-src"))
+            r    (build-cli/artifact! {:built tree} :jar :proj proj :sh sh :which (constantly true))
+            [cmd dir] (first @calls)]
+        (is (nil? (:error r)) (pr-str r))
+        (is (= tree dir) "run where the recipe lives")
+        (is (= ["clojure" "-Sdeps" build-cli/jar-recipe-deps "-M" "-e"] (take 5 cmd)) (pr-str cmd))
+        (is (re-find #"build/uber" (last cmd)))
+        (is (re-find #":src \"src\"" (last cmd)) "over the tree's own src, never a path outside it")
+        (is (= (str proj "/target/app.jar") (:jar r)) (pr-str r))
+        (is (.exists (io/file proj "target" "app.jar")) "copied up to the project's target/")
+        (is (some #(re-find #"target/app\.jar" %) (build-cli/report-lines r)) (pr-str (build-cli/report-lines r)))))
+    (testing "a tree with no recipe is a refusal that names what to track"
       (reset! calls [])
       (let [proj (mk!)
             r    (build-cli/artifact! {:built (str proj "/out")} :jar :proj proj :sh sh :which (constantly true))]
         (is (re-find #"build\.clj" (:error r)) (pr-str r))
+        (is (re-find #"file_put" (:error r)) "the way out is the files manifest")
         (is (empty? @calls))))
+    (testing "a recipe that wrote no jar is named, never reported as built"
+      (let [proj (mk!) tree (with-recipe! (str proj "/out"))
+            r    (build-cli/artifact! {:built tree} :jar :proj proj :sh (fn [_ _] {:exit 0}) :which (constantly true))]
+        (is (re-find #"no \.jar" (:error r)) (pr-str r))))
+    (testing "a recipe that failed says so, with its exit"
+      (let [proj (mk!) tree (with-recipe! (str proj "/out"))
+            r    (build-cli/artifact! {:built tree} :jar :proj proj :sh (fn [_ _] {:exit 2}) :which (constantly true))]
+        (is (re-find #"exited 2" (:error r)) (pr-str r))))
     (testing "the clojure CLI is checked first"
-      (let [proj (mk!)]
-        (spit (io/file proj "build.clj") "(ns build)")
-        (is (re-find #"clojure" (:error (build-cli/artifact! {:built (str proj "/t")} :jar :proj proj :sh sh :which #{}))))))))
+      (let [proj (mk!) tree (with-recipe! (str proj "/out"))]
+        (is (re-find #"clojure" (:error (build-cli/artifact! {:built tree} :jar :proj proj :sh sh :which #{}))))))))

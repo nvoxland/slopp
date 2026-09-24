@@ -519,6 +519,10 @@
         (is (true? (get-in by-name ["eval" :annotations :readOnlyHint]))
             "the oracle is observe-only by gate — clients may trust it")
         (is (true? (get-in by-name ["orient" :annotations :readOnlyHint])))
+        (is (true? (get-in by-name ["verify" :annotations :readOnlyHint]))
+            "a verification reads the code and records a verdict; restart left for build, so the family carries the hint")
+        (is (nil? (get-in by-name ["build" :annotations]))
+            "build holds restart now — a rebuilt image is not a read")
         (is (nil? (get-in by-name ["edit" :annotations]))
             "writes carry NO read-only claim")
         (is (nil? (get-in by-name ["declare" :annotations]))))
@@ -566,7 +570,7 @@
         (is (some #{"review_scan"} (get-in by-name ["verify" :inputSchema :properties :op :enum]))
             "indexed by the verify family (D-families)")
         (is (contains? tools/read-only-tools "review_scan")
-            "read-only in the registry; the verify family mixes reads and writes, so the hint rides the op, not the family"))
+            "read-only in the registry — and every other verify op is too, so the family carries the hint as a whole"))
       (call! sess "ns_create" {:ns "rw.io" :source "(ns rw.io)\n(defn zap! [x] (spit \"/dev/null\" x))\n"})
       (let [r (call! sess "review_scan" {})]
         (is (re-find #":flagged" r) r)
@@ -1986,9 +1990,15 @@
         "an MCP descriptor must carry no key the protocol does not define")
     (is (some #(= {:readOnlyHint true} (:annotations %)) tools/registry)
         "the annotation the marker exists to produce is still set"))
-  (testing "the classification itself did not change — this is a refactor"
-    ;; positive control on the refactor: same answer, different home
-    (is (= 37 (count tools/read-only-tools)))
+  (testing "the classification, pinned — 37 at the refactor, 41 once verification joined"
+    ;; positive control: same answer, different home. Then 2026-09-24: the
+    ;; verify ops qualify on the query_observe judgement — a verdict delta is
+    ;; a journal record about the code, never code — and restart does not.
+    (is (= 41 (count tools/read-only-tools)))
+    (is (every? tools/read-only-tools ["screen" "test_run" "full_check" "draft_test" "review_scan"])
+        "verification never modifies the store")
+    (is (not (contains? tools/read-only-tools "restart"))
+        "a rebuilt image is an effect")
     (is (contains? tools/read-only-tools "query_store"))
     (is (contains? tools/read-only-tools "store_doctor"))
     (is (not (contains? tools/read-only-tools "build")))
@@ -2827,7 +2837,12 @@
           (let [placed (frequencies (mapcat :ops tools/families))]
             (is (every? #(= 1 %) (vals placed)) (pr-str (filter #(not= 1 (val %)) placed)))
             (is (= (set (keys placed)) (into #{} (map :name) tools/registry))
-                "the families cover the registry exactly")))
+                "the families cover the registry exactly"))
+          (let [ops-of (fn [fam] (:ops (some #(when (= fam (:name %)) %) tools/families)))]
+            (is (some #{"restart"} (ops-of "build"))
+                "restart rebuilds the image — a build, not a verification")
+            (is (nil? (some #{"restart"} (ops-of "verify")))
+                "so verify holds only reads and can carry the read-only hint")))
         (testing "the edit family advertises the ONE write verb"
           (let [edit (some #(when (= "edit" (:name %)) %) advertised)
                 enum (get-in edit [:inputSchema :properties :op :enum])]

@@ -333,6 +333,8 @@
                           " and an untested namespace would render identically, and"
                           " the second is a finding worth showing")}
     [:sequential :string]]
+   [:tests {:doc (str "the deftests that reach this, grouped by test namespace — ONE hop," " static reference or observed run. The names are written as sentences," " so they say what the code does. Always present, EMPTY when nothing" " reaches it, which is a finding rather than an absence")}
+    [:sequential [:map [:ns {:doc "the test namespace"} :string] [:count {:doc "how many of its deftests reach the subject"} :int] [:names {:doc "those deftests' names, sorted and capped — a hyphenated sentence each"} [:sequential :string]] [:more {:doc "how many names the cap held back; 0 when none"} :int]]]]
    [:gaps {:doc "where this namespace is thin"} gaps]])
 
 (def module-row
@@ -368,7 +370,11 @@
                      " other end of every edge, which is what lets a consumer draw"
                      " the graph instead of asking the producer for a picture")}
     [:sequential :string]]
-   [:gaps {:doc "where this module is thin"} gaps]])
+   [:gaps {:doc "where this module is thin"} gaps]
+   [:declared {:optional true
+               :doc (str "the modules it is DECLARED to depend on, foundation included —"
+                         " beside :deps, what it uses, so the two can be compared")}
+    [:sequential :string]]])
 
 (def module-index
   "`GET /api/modules` — the Code landing: one row per module, the layering,
@@ -405,7 +411,13 @@
                        " tangled store it is the most useful thing on the screen,"
                        " and a consumer that only wants the verdict should not have"
                        " to read geometry to find it")}
-    [:sequential [:sequential :string]]]])
+    [:sequential [:sequential :string]]]
+   [:conformance {:optional true
+                  :doc (str "the DECLARED module edges against the ones the code uses — a"
+                            " reflexion model. Every edge either side knows of, classed by"
+                            " which sides know it, so where the code departs from its"
+                            " declared architecture is a list rather than a hunt")}
+    [:map [:edges {:doc "every module edge declared or used, production modules only, sorted"} [:sequential [:map [:from {:doc "the depending module"} :string] [:to {:doc "the module it depends on"} :string] [:class {:doc "convergent: declared and used · divergent: used, never declared · absent: declared, never used · test-only: declared, used only by tests"} [:enum "convergent" "divergent" "absent" "test-only"]]]]]]]])
 
 (def module-detail
   "`GET /api/module/:m` — one module from the inside: its namespaces, how they
@@ -472,7 +484,9 @@
     [:sequential [:sequential :string]]]
    [:cycles {:doc (str "dependency cycles among this module's own namespaces, each"
                        " entry the namespaces caught in one. Empty is healthy")}
-    [:sequential [:sequential :string]]]])
+    [:sequential [:sequential :string]]]
+   [:tests {:doc (str "the deftests that reach this, grouped by test namespace — ONE hop," " static reference or observed run. The names are written as sentences," " so they say what the code does. Always present, EMPTY when nothing" " reaches it, which is a finding rather than an absence")}
+    [:sequential [:map [:ns {:doc "the test namespace"} :string] [:count {:doc "how many of its deftests reach the subject"} :int] [:names {:doc "those deftests' names, sorted and capped — a hyphenated sentence each"} [:sequential :string]] [:more {:doc "how many names the cap held back; 0 when none"} :int]]]]])
 
 (def search-request
   "`GET /api/projects/:slug/search` — what a caller SENDS: the query text and a
@@ -651,6 +665,13 @@
                         " of the graph. Each carries its own :via inline, where a"
                         " caller's sits on the group")}
     [:sequential neighbour-card]]
+   [:keys {:optional true
+           :doc "the namespaced keys this form touches, and how — the data it speaks"}
+    [:sequential [:map [:kw {:doc "the key's name, without its colon"} :string] [:via {:doc "how the form touches it: literal or destructuring"} :string]]]]
+   [:tests {:optional true
+            :doc (str "the tests that reach this form BY NAME, with how each is"
+                      " known — the warranty's count made readable")}
+    [:map [:count {:doc "every test that reaches it, before the cap"} :int] [:shown {:doc "the first eight, observed runs first then by hops"} [:sequential [:map [:test {:doc "the deftest, ns/name — the name is a hyphenated sentence"} :string] [:via {:doc "how it is known: observed, static, declared — not the same evidence"} [:sequential :string]] [:hops {:optional true :doc "static distance; absent when only observed or declared"} :int]]]]]]
    [:note {:doc (str "the standing caveat on :callers and :callees, in words: the"
                      " edges come from a SYNTACTIC reader over the store, so they are"
                      " a FLOOR and not a census — a call reached through a binding or"
@@ -1055,3 +1076,127 @@
                         " which no rule can place in a bracket. A count rather than a"
                         " block — with no clock there is nothing to attribute, only"
                         " something to disclose. Absent when there are none")} :int]])
+
+(def story-request
+  "`GET /api/projects/:slug/story/:grain/:subject` — what a caller SENDS."
+  [:map
+   [:slug {:doc "the project slug — the open project to read; interpolated into the PATH"} :string]
+   [:grain {:doc "what the subject is — a namespace or a module; PATH"} [:enum "ns" "module"]]
+   [:subject {:doc "the namespace's or module's full name; PATH"} :string]
+   [:page {:optional true
+           :doc "which page of twenty commit points, newest first; query parameter, 0 when omitted"} :int]])
+
+(def story
+  "`GET /api/projects/:slug/story/:grain/:subject` — a namespace's or a
+  module's history told by commit point, in the words that shaped it: each
+  commit point that touched it, newest first, with the recorded asks behind
+  the writes.
+
+  The ASKS are the payload. The code says what a subject does; the recorded
+  prompts say why it is the way it is, and nothing else in the store can."
+  [:map
+   [:grain {:doc "echoes the request: \"ns\" or \"module\""} :string]
+   [:subject {:doc "echoes the request"} :string]
+   [:page {:doc "which page this is, from 0"} :int]
+   [:more {:doc "how many older commit points are past this page — counted, never dropped"} :int]
+   [:rows {:doc "the commit points that touched the subject, newest first, twenty to a page"}
+    [:sequential [:map [:commit {:doc "the commit point's id"} :string] [:description {:doc "its title line"} :string] [:status {:optional true :doc "the verdict it was recorded under — green or red"} :string] [:at {:optional true :doc "when, as local time"} :string] [:range {:optional true :doc "previous..this — the change screen's address; absent on the first commit point, which has nothing before it"} :string] [:asks {:doc "the distinct recorded prompts that touched the subject, in order, capped at six"} [:sequential :string]] [:more-asks {:doc "how many asks the cap held back"} :int] [:forms {:doc "how many of the subject's forms moved"} :int]]]]
+   [:working {:optional true
+              :doc "what touched the subject since the last commit point; absent when nothing did"}
+    [:map [:asks {:doc "the recorded prompts since the last commit point, capped at six"} [:sequential :string]] [:more-asks {:doc "how many asks the cap held back"} :int] [:forms {:doc "how many of the subject's forms moved"} :int] [:since {:optional true :doc "the commit point this work follows"} :string]]]])
+
+(def entries-request
+  "`GET /api/projects/:slug/entries` — what a caller SENDS."
+  [:map
+   [:slug {:doc "the project slug — the open project to read; interpolated into the PATH"} :string]])
+
+(def entries
+  "`GET /api/projects/:slug/entries` — every DOOR into the store, by kind:
+  the process entry, HTTP routes, commands, browser screens and forms marked
+  `^:entry-point`. Each door names the form it opens on, which is what turns
+  \"what can this do\" into \"what happens then\" in one step."
+  [:map
+   [:kinds {:doc "the kinds that have doors, in door order; a kind with none is absent"}
+    [:sequential [:map
+                  [:kind {:doc "main, http, cli, webapp or entry-point"} :string]
+                  [:note {:doc "what this kind of door is, in words"} :string]
+                  [:entries {:doc "its doors, by label"} [:sequential [:map [:kind {:doc "which kind of door"} :string] [:label {:doc "what a reader calls it: the route, the command, the screen's address"} :string] [:handler {:doc "the qualified name of the form it opens on"} :string] [:module {:doc "that form's module"} :string] [:form-id {:optional true :doc "the form's stable address, for the link to what happens when it runs"} :string]]]]]]]
+   [:unreadable {:doc (str "declarations the store could not read — listed so they read as"
+                           " unknown rather than as absent")}
+    [:sequential :string]]])
+
+(def sequence-request
+  "`GET /api/projects/:slug/form/:id/sequence` — what a caller SENDS."
+  [:map
+   [:slug {:doc "the project slug — the open project to read; interpolated into the PATH"} :string]
+   [:id {:doc "the root form's stable id; PATH"} :string]
+   [:depth {:optional true :doc "how many calls deep to follow, 1–8; query parameter, 4 when omitted"} :int]
+   [:steps {:optional true :doc "the most steps to draw, 1–500; query parameter, 200 when omitted"} :int]])
+
+(def flow-request
+  "`GET /api/projects/:slug/flow` — what a caller SENDS."
+  [:map
+   [:slug {:doc "the project slug — the open project to read; interpolated into the PATH"} :string]
+   [:from {:optional true
+          :doc "where the path starts: a form id or a qualified ns/name; query parameter. Omitted, the answer is an empty trace saying what to pick"} :string]
+   [:to {:optional true :doc "where it ends, the same way; query parameter"} :string]])
+
+(def call-sequence
+  "A call trace as a document a screen draws: `GET /api/projects/:slug/form/:id/sequence`
+  (what happens when one form runs) and `GET /api/projects/:slug/flow` (the
+  path between two) both answer it. One LANE per module, one STEP per call,
+  in the order the calls are WRITTEN — a static reading, and `:note` says so
+  wherever it is shown."
+  [:map
+   [:root {:optional true
+           :doc "where the trace starts; absent on a path with no ends picked yet"}
+    [:map
+     [:form {:doc "its qualified name"} :string]
+     [:module {:doc "its module — the first lane"} :string]
+     [:form-id {:optional true :doc "its stable address"} :string]]]
+   [:lifelines {:doc "the modules the trace passes through, in first-appearance order — one lane each"}
+    [:sequential :string]]
+   [:steps {:doc "the calls, depth first in body order"} [:sequential [:map [:i {:doc "the step's number, in order"} :int] [:depth {:doc "how many calls deep — 1 is called by the root directly"} :int] [:from {:doc "the caller, ns/name"} :string] [:from-module {:doc "the caller's module — its lane"} :string] [:to {:optional true :doc "the callee, ns/name; absent on a :more step"} :string] [:to-module {:optional true :doc "the callee's module — the lane the arrow ends on"} :string] [:to-form-id {:optional true :doc "the callee's stable address"} :string] [:via {:optional true :doc "how the edge is known: static is a written call, carrier a reference held as a value"} :string] [:cycle? {:optional true :doc "the callee is already on this path — recursion, or a loop through several forms"} :boolean] [:seen-at {:optional true :doc "the step that already expanded this callee; it is not drawn twice"} :int] [:deeper? {:optional true :doc "the depth bound stopped here with calls still below"} :boolean] [:more {:optional true :doc "how many further callees the fan-out cap held back"} :int]]]]
+   [:truncated {:doc "which bound, if any, cut the trace short — so a short trace can be told from a cut one"}
+    [:map
+     [:depth {:doc "the depth bound stopped it somewhere with calls still below"} :boolean]
+     [:steps {:doc "the step bound was reached"} :boolean]]]
+   [:note {:doc "what this trace is and is not, in words — render it wherever the trace is shown"} :string]])
+
+(def overlay-request
+  "`GET /api/projects/:slug/overlay/:dial` — what a caller SENDS."
+  [:map
+   [:slug {:doc "the project slug — the open project to read; interpolated into the PATH"} :string]
+   [:dial {:doc "what to tint by: size, effects, warranty, churn or risk; PATH"} :string]])
+
+(def overlay
+  "`GET /api/projects/:slug/overlay/:dial` — what one DIAL tints the Code map
+  by: a numerator and a denominator per namespace and per module, the kind of
+  number it is, and the sentence that says what the tint means. The page asks
+  for it only when a dial is chosen, because two of the five are expensive."
+  [:map
+   [:dial {:doc "echoes the request"} :string]
+   [:kind {:doc "share: read value over of · count: ranked within the store"} [:enum "share" "count"]]
+   [:label {:doc "what to call it on a control"} :string]
+   [:note {:doc "what the tint means, in words — render it beside the tint"} :string]
+   [:namespaces {:doc "production namespaces, sorted"} [:sequential [:map [:ns {:doc "the namespace"} :string] [:module {:doc "its module"} :string] [:value {:doc "the dial's numerator for it"} :int] [:of {:doc "its named forms — the denominator a share is read against"} :int]]]]
+   [:modules {:doc "modules, sorted — each the sum of its namespaces"} [:sequential [:map [:module {:doc "the module"} :string] [:value {:doc "its namespaces' numerators, summed"} :int] [:of {:doc "its named forms"} :int]]]]])
+
+(def data-request
+  "`GET /api/projects/:slug/data` — what a caller SENDS."
+  [:map
+   [:slug {:doc "the project slug — the open project to read; interpolated into the PATH"} :string]
+   [:q {:optional true :doc "keep keys whose name contains this; query parameter"} :string]
+   [:bare {:optional true :doc "\"true\" includes plain keywords beside namespaced ones; query parameter"} :string]
+   [:key {:optional true :doc "one key's name, to add who uses it as :key; query parameter"} :string]
+   [:limit {:optional true :doc "how many keys to show, 1–500; query parameter, 100 when omitted"} :int]])
+
+(def data-dictionary
+  "`GET /api/projects/:slug/data` — the keys the code passes around, ranked by
+  how far each travels, and with `?key=` who uses one. A system's map keys are
+  much of its architecture, and no file tree shows them."
+  [:map
+   [:keys {:doc "the keys, most widely used first"} [:sequential [:map [:kw {:doc "the key's name, without its colon"} :string] [:modules {:doc "how many modules touch it"} :int] [:namespaces {:doc "how many namespaces"} :int] [:forms {:doc "how many forms"} :int] [:destructured {:doc "how many forms destructure it — demonstrably READ it"} :int]]]]
+   [:total {:doc "how many keys matched before the limit"} :int]
+   [:shown {:doc "how many are in :keys"} :int]
+   [:key {:optional true :doc "the key asked for with ?key=, and every form that touches it"} [:map [:kw {:doc "the key's name, without its colon"} :string] [:modules {:doc "the production modules whose forms touch it"} [:sequential [:map [:module {:doc "the module"} :string] [:forms {:doc "its forms that touch the key"} [:sequential [:map [:form {:doc "ns/name"} :string] [:form-id {:doc "its stable address"} :string] [:via {:doc "how: literal names it, destructuring reads it"} [:sequential :string]]]]]]]] [:tests {:doc "how many test namespaces touch it — counted, not listed"} :int]]]])

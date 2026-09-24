@@ -513,3 +513,59 @@
       (is (= {:module "demo.app" :deps ["demo.lib"] :foundation false
               :namespaces ["demo.app.core"] :tests 1}
              (nth order 2))))))
+
+(deftest a-sequence-lays-out-one-lane-per-module-and-one-row-per-step
+  ;; A lane is a MODULE, not a form: five to fifteen lanes stay legible where
+  ;; one per form would not, and crossing a module boundary is the event worth
+  ;; seeing. Rows go down in step order; a row that is not a new call — a
+  ;; cycle, the calls a cap held back — keeps its row and says what it is.
+  (let [doc {:lifelines ["demo.web" "demo.core"]
+             :steps [{:i 0 :depth 1 :from "demo.web/h" :from-module "demo.web"
+                      :to "demo.core/rate" :to-module "demo.core" :via "static"}
+                     {:i 1 :depth 2 :from "demo.core/rate" :from-module "demo.core"
+                      :to "demo.core/band" :to-module "demo.core" :via "static"}
+                     {:i 2 :depth 2 :from "demo.core/rate" :from-module "demo.core"
+                      :to "demo.core/rate" :to-module "demo.core" :cycle? true}
+                     {:i 3 :depth 1 :from "demo.web/h" :from-module "demo.web" :more 3}]}
+        {:keys [lanes rows width height]} (graph/sequence-layout doc)]
+    (is (= ["demo.web" "demo.core"] (mapv :module lanes)))
+    (is (apply < (map :x lanes)) "lanes left to right, in first-appearance order")
+    (is (apply < (map :y rows)) "rows top to bottom, in step order")
+    (is (= [:call :self :back :more] (mapv :kind rows)))
+    (is (= ["rate" "band" "rate" "and 3 more"] (mapv :label rows)))
+    (is (= (:x (second lanes)) (:x2 (first rows))) "a call ends on its callee's lane")
+    (is (every? #(<= 0 (:x1 %) width) rows))
+    (is (< (:y (last rows)) height))))
+
+(deftest squarify-fills-the-frame-in-proportion-and-keeps-cells-near-square
+  ;; A treemap is only readable when a cell's AREA is its value and no cell is
+  ;; a sliver; slice-and-dice keeps the first and loses the second, which is
+  ;; why this is squarified (Bruls, Huizing and van Wijk).
+  (let [vals  [6 6 4 3 2 2 1]
+        items (map-indexed (fn [i v] {:key (str "k" i) :value v}) vals)
+        rs    (graph/squarify items {:x 0 :y 0 :w 600 :h 400})
+        area  #(* (:w %) (:h %))
+        near  (fn [a b] (< (Math/abs (- (double a) (double b))) 0.01))]
+    (testing "every item gets a cell, and the cells tile the frame"
+      (is (= (count vals) (count rs)))
+      (is (near 240000 (reduce + (map area rs)))))
+    (testing "a cell's area is its value's share of the frame"
+      (doseq [r rs] (is (near (area r) (* 240000 (/ (:value r) 24))) (pr-str r))))
+    (testing "inside the frame, and no sliver"
+      (is (every? #(and (>= (:x %) -0.001) (>= (:y %) -0.001)
+                        (<= (+ (:x %) (:w %)) 600.001) (<= (+ (:y %) (:h %)) 400.001))
+                  rs))
+      (is (< (apply max (map #(max (/ (:w %) (:h %)) (/ (:h %) (:w %))) rs)) 3)))
+    (testing "one item fills the frame; nothing to draw is nothing drawn; the same input, the same cells"
+      (is (= [[0.0 0.0 10.0 10.0]] (mapv (juxt :x :y :w :h) (graph/squarify [{:key "a" :value 5}] {:x 0 :y 0 :w 10 :h 10}))))
+      (is (= [] (graph/squarify [{:key "z" :value 0}] {:x 0 :y 0 :w 10 :h 10})))
+      (is (= rs (graph/squarify items {:x 0 :y 0 :w 600 :h 400}))))
+    (testing "the two-level map: modules by their namespaces' forms, a namespace inside its module"
+      (let [tm (graph/treemap [{:module "m.a" :namespaces ["m.a" "m.a.x"]}
+                               {:module "m.b" :namespaces ["m.b"]}
+                               {:module "m.c" :namespaces ["m.c"]}]
+                              [{:ns "m.a" :forms 3} {:ns "m.a.x" :forms 1} {:ns "m.b" :forms 4}]
+                              {:w 400 :h 200})]
+        (is (= #{"m.a" "m.b"} (set (map :key (:modules tm)))) "a module with no forms takes no space")
+        (is (= #{"m.a" "m.a.x" "m.b"} (set (map :key (:cells tm)))))
+        (is (every? :module (:cells tm)))))))

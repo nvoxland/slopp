@@ -498,3 +498,124 @@
               :band     band
               :layers   (into [] (comp (map #(vec (remove band %))) (remove empty?))
                               layers)})))
+
+(defn sequence-layout
+  "Geometry for a call-sequence document: one LANE per module, left to right
+  in first-appearance order, and one ROW per step, top to bottom in step order
+  — `{:lanes [{:module :x}] :rows [{:i :y :x1 :x2 :kind :label :via :depth}]
+  :width :height}`.
+
+  A lane is a MODULE, not a form. A diagram with a lane per form is unreadable
+  past a dozen calls; five to fifteen modules stay legible, and crossing a
+  module boundary is the event worth seeing. Kinds: `:call` (an arrow between
+  lanes), `:self` (a call inside one lane, drawn as a loop), and three rows that
+  draw no new call and say why — `:back` (a cycle), `:seen` (drawn already)
+  and `:more` (the calls a fan-out cap held back). Coordinates depend only on
+  the document, so an overlay that restyles rows can never move them."
+  [{:keys [lifelines steps]}]
+  (let [lane-w 190
+        top    56
+        row-h  26
+        pad    20
+        x-of   (into {} (map-indexed (fn [i m] [m (+ pad (quot lane-w 2) (* i lane-w))])) lifelines)
+        short  (fn [q] (let [s (str q) i (.lastIndexOf s "/")] (if (neg? i) s (subs s (inc i)))))]
+    {:lanes  (mapv (fn [m] {:module m :x (x-of m)}) lifelines)
+     :rows   (vec (map-indexed
+                   (fn [k {:keys [i depth from-module to-module to more cycle? seen-at deeper? via]}]
+                     (let [x1 (get x-of from-module pad)]
+                       (cond-> {:i     i
+                                :y     (+ top (* k row-h))
+                                :x1    x1
+                                :x2    (get x-of (or to-module from-module) x1)
+                                :depth depth
+                                :kind  (cond more                       :more
+                                             cycle?                     :back
+                                             seen-at                    :seen
+                                             (= from-module to-module)  :self
+                                             :else                      :call)
+                                :label (if more (str "and " more " more") (short to))}
+                         via     (assoc :via via)
+                         seen-at (assoc :seen-at seen-at)
+                         deeper? (assoc :deeper? true))))
+                   steps))
+     :width  (+ (* 2 pad) (* lane-w (max 1 (count lifelines))))
+     :height (+ top (* row-h (max 1 (count steps))) pad)}))
+
+(defn squarify
+  "Lay `items` (`[{:key :value}]`) out as rectangles filling `frame`
+  (`{:x :y :w :h}`), each cell's AREA its value's share of the frame and
+  every cell kept as near to square as the values allow — the squarified
+  treemap (Bruls, Huizing and van Wijk). Slice-and-dice keeps the areas and
+  loses the shape, and a sliver cannot carry a label or be clicked.
+
+  Largest first, ties by key, so the same input always gives the same cells.
+  Items with no positive value take no space."
+  [items {:keys [x y w h]}]
+  (let [items (->> items (filter #(pos? (or (:value %) 0))) (sort-by (juxt (comp - :value) :key)) vec)
+        total (reduce + 0 (map :value items))]
+    (if (or (empty? items) (<= w 0) (<= h 0))
+      []
+      (let [scale (/ (* (double w) h) total)
+            areas (mapv #(assoc % :area (* scale (:value %))) items)
+            worst (fn [row s]
+                    (let [sum (reduce + (map :area row))
+                          mx  (apply max (map :area row))
+                          mn  (apply min (map :area row))]
+                      (max (/ (* s s mx) (* sum sum)) (/ (* sum sum) (* s s mn)))))
+            place (fn [row {:keys [x y w h]}]
+                    (let [sum (reduce + (map :area row))]
+                      (if (>= w h)
+                        (let [rw (/ sum h)]
+                          [(first (reduce (fn [[acc yy] it]
+                                            (let [ih (/ (:area it) rw)]
+                                              [(conj acc {:key (:key it) :value (:value it)
+                                                          :x (double x) :y (double yy) :w (double rw) :h (double ih)})
+                                               (+ yy ih)]))
+                                          [[] y] row))
+                           {:x (+ x rw) :y y :w (- w rw) :h h}])
+                        (let [rh (/ sum w)]
+                          [(first (reduce (fn [[acc xx] it]
+                                            (let [iw (/ (:area it) rh)]
+                                              [(conj acc {:key (:key it) :value (:value it)
+                                                          :x (double xx) :y (double y) :w (double iw) :h (double rh)})
+                                               (+ xx iw)]))
+                                          [[] x] row))
+                           {:x x :y (+ y rh) :w w :h (- h rh)}]))))]
+        (loop [todo areas row [] r {:x x :y y :w w :h h} out []]
+          (if (empty? todo)
+            (if (seq row) (into out (first (place row r))) out)
+            (let [it   (first todo)
+                  s    (min (:w r) (:h r))
+                  row' (conj row it)]
+              (if (or (empty? row) (<= (worst row' s) (worst row s)))
+                (recur (rest todo) row' r out)
+                (let [[placed r'] (place row r)]
+                  (recur todo [] r' (into out placed)))))))))))
+
+(defn treemap
+  "The Code map as a two-level treemap: each module a rectangle whose area is
+  its namespaces' named forms, each namespace a cell inside it, both laid out
+  by [[squarify]] — `{:width :height :modules [...] :cells [...]}`.
+
+  `sizes` is `/api/namespaces`' rows (`[{:ns :forms}]`). A module with no
+  forms takes no space; anything that is not such a row is ignored, so a
+  document of the wrong shape draws an empty map rather than throwing. The
+  containment is the point of this lens and not its argument: it answers
+  WHERE the code's weight is, and the dial says what that weight is like."
+  [modules sizes {:keys [w h] :or {w 960 h 560}}]
+  (let [forms (into {} (keep (fn [r] (when (and (map? r) (:ns r)) [(str (:ns r)) (or (:forms r) 0)])))
+                    (when (sequential? sizes) sizes))
+        items (for [m modules
+                    :let [kids  (vec (for [n (:namespaces m)] {:key (str n) :value (get forms (str n) 0)}))
+                          total (reduce + 0 (map :value kids))]
+                    :when (pos? total)]
+                {:key (:module m) :value total :children kids})
+        mods  (squarify items {:x 0 :y 0 :w w :h h})
+        kids  (into {} (map (juxt :key :children)) items)]
+    {:width   w
+     :height  h
+     :modules mods
+     :cells   (vec (for [{:keys [key x y w h]} mods
+                         c (squarify (kids key) {:x (+ x 3) :y (+ y 18)
+                                                 :w (max 0 (- w 6)) :h (max 0 (- h 21))})]
+                     (assoc c :module key)))}))

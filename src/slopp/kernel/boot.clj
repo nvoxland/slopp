@@ -678,8 +678,8 @@
                      (.getSimpleName (class m)))
                    ", the shape slopp used before capabilities existed. The jar"
                    " and the code reading it are from different builds, which"
-                   " only happens under --live: rebuild the jar (materialize the"
-                   " store, then `clojure -T:build uber`) and restart the host."
+                   " only happens under --live: rebuild the jar (`slopp build . --jar`)"
+                   " and restart the host."
                    (when-let [h (jar-head)]
                      (str " This jar was built from store head " h "."))
                    " If the tools are already wedged, build a jar without reading"

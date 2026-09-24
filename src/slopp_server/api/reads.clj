@@ -13,7 +13,7 @@
   slopp.api.model, which is where a static JSON sink would attach."
   (:require [rewrite-clj.node :as n]
             [slopp.store :as store]
-            [slopp-server.api.model :as model] [clojure.string :as str] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers] [slopp.edit.http :as edit.http] [slopp.rest.paths :as rest.paths] [slopp.http.paths :as http.paths] [slopp.rules.webapp :as rules.webapp] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http] [slopp.ops :as ops] [slopp.read.orient :as orient] [slopp.read.modules :as read.modules] [slopp.read.history :as history] [slopp.store.db :as db] [clojure.edn :as edn] [slopp.read.query :as query]))
+            [slopp-server.api.model :as model] [clojure.string :as str] [slopp.edit.modules :as edit.modules] [slopp.edit.tiers :as tiers] [slopp.edit.http :as edit.http] [slopp.rest.paths :as rest.paths] [slopp.http.paths :as http.paths] [slopp.rules.webapp :as rules.webapp] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http] [slopp.ops :as ops] [slopp.read.orient :as orient] [slopp.read.modules :as read.modules] [slopp.read.history :as history] [slopp.store.db :as db] [clojure.edn :as edn] [slopp.read.query :as query] [slopp.ops.review :as review]))
 
 (defn ^{:http/read :browse/namespaces} namespaces-read
   "Read performer: `{:ns sym :forms n}` rows for every namespace, sorted."
@@ -152,6 +152,9 @@
                                         :form-id (:id e)}))))
                       (store/forms st sym))
          :tested-by (model/tests-covering st sym)
+         ;; the deftests inside those namespaces, by NAME — which namespace to
+         ;; open is the line above; what the tests say this one does is here
+         :tests     (model/tests-of st (:test-map @session) [sym])
          ;; NAMESPACE grain, deliberately not a row field. A row's
          ;; `:effectful?` says what THAT form does; the tier says what this
          ;; namespace is ALLOWED to do, and the two disagree constantly — a
@@ -611,3 +614,73 @@
                 {:query-params (cond-> {:ask ask}
                                  sid  (assoc :session-id sid)
                                  cli? (assoc :cli "1"))}))
+
+(defn ^{:http/read :ui/story} story-read
+  "Read performer: one subject's story — `/story/:grain/:subject?page=`.
+  Hydrates only the content deltas and the commit markers, which is all the
+  fold reads, rather than the whole journal."
+  [{:keys [session]} {:keys [path-params query-params]}]
+  (model/story (:store @(ops/with-history session :ops (vec (conj history/content-ops :commit))))
+               (:grain path-params) (:subject path-params)
+               (or (parse-long (str (:page query-params))) 0)))
+
+(defn ^{:http/read :ui/entries} entries-read
+  "Read performer: every door into this store — [[model/entry-points]], with
+  the process entry read from the `app.main` capability."
+  [{:keys [session]} _]
+  (model/entry-points session
+                      (some-> (capabilities/effective (:store @session) "app.main") str symbol)))
+
+(defn ^{:http/read :ui/sequence} sequence-read
+  "Read performer: what happens when one form runs — `?depth=&steps=` bound it."
+  [{:keys [session]} {:keys [path-params query-params]}]
+  (model/sequence-view session (str (:id path-params))
+                       {:depth (parse-long (str (:depth query-params)))
+                        :steps (parse-long (str (:steps query-params)))}))
+
+(defn ^{:http/read :ui/flow} flow-read
+  "Read performer: the call path between `?from=` and `?to=` — ids or names."
+  [{:keys [session]} {:keys [query-params]}]
+  (let [{:keys [from to]} query-params]
+    ;; no ends picked is the picker's own state, not an error: an empty trace
+    ;; that says what to do, so the page renders the picker rather than a 404
+    (if (and (seq (str from)) (seq (str to)))
+      (model/path-view session from to)
+      {:lifelines [] :steps [] :truncated {:depth false :steps false}
+       :note "pick two forms — the call path between them is drawn here"})))
+
+(defn ^{:http/read :ui/overlay} overlay-read
+  "Read performer: one dial's tint facts — [[model/overlay-doc]] over the
+  numerators this dial counts. Each is computed only when ITS dial is asked
+  for: churn hydrates the history and risk runs the review scan, and neither
+  belongs on every load of the Code map. nil for an unknown dial."
+  [{:keys [session]} {:keys [path-params]}]
+  (let [dial (str (:dial path-params))
+        st   (:store @session)
+        numerators
+        (case dial
+          "size"     (model/size-by-ns st)
+          "effects"  (model/effects-by-ns st)
+          "warranty" (into {} (map (fn [[n g]] [n (:uncovered g)]))
+                           (model/gaps-by-ns st (:test-map @session)))
+          "churn"    (model/churn-by-ns
+                      (:store @(ops/with-history session :ops (vec (conj history/content-ops :commit))))
+                      5)
+          "risk"     (frequencies
+                      (for [row (:top (review/review-scan session :limit 1000000))
+                            :when (pos? (or (:risk row) 0))]
+                        (symbol (namespace (symbol (str (:form row)))))))
+          nil)]
+    (when numerators
+      (model/overlay-doc st dial numerators))))
+
+(defn ^{:http/read :browse/data} data-read
+  "Read performer: the data dictionary — and, with `?key=`, who uses that key.
+  One document for both, so the screen makes one ask whichever it shows."
+  [{:keys [session]} {:keys [query-params]}]
+  (let [st (:store @session)
+        {:keys [q bare key limit]} query-params]
+    (cond-> (model/data-index st {:prefix (str (or q ""))
+                                  :bare?  (= "true" (str bare))
+                                  :limit  (parse-long (str limit))})
+      (seq (str key)) (as-> doc (if-let [v (model/key-view st key)] (assoc doc :key v) doc)))))

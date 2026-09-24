@@ -370,3 +370,111 @@
             (empty? next) (finish order seen depth false)
             (< reach-node-cap (+ (count seen) (count next))) (finish order seen d true)
             :else (recur (inc d) next (into seen next) (into order next))))))))
+
+(defn ^:export ordered-callees
+  "qsym → the STORE-INTERNAL forms it calls in BODY order — the order the calls
+  are written, each callee once at its first call — as `[{:to qsym :via kw}]`.
+
+  [[callee-adjacency]] answers WHO a form calls and sorts them, which is right
+  for a path search and wrong for reading: a sequence of calls told
+  alphabetically is not the sequence. The analysis already carries each
+  usage's row and column, so the written order costs a sort — and it is
+  derived here, from the same cached analysis, rather than stored in the
+  reference index, whose persisted rows would not carry it until every
+  namespace was rewritten.
+
+  References a form holds as VALUES — `#'var` in a registry, a handler named
+  in a map — follow the written calls with `:via :carrier`. The reference graph
+  knows they exist and not when they run, so they come LAST and say so rather
+  than being interleaved by position as though they were calls."
+  [st]
+  (let [internal? (:namespaces st)
+        written   (reduce
+                   (fn [adj ns-sym]
+                     (let [an (analyze/analyze (store.render/render-ns st ns-sym))]
+                       (reduce (fn [adj u]
+                                 (if (and (:from-var u) (:row u) (internal? (:to u)))
+                                   (update adj (symbol (str (:from u)) (str (:from-var u)))
+                                           (fnil conj [])
+                                           [(:row u) (or (:col u) 0)
+                                            (symbol (str (:to u)) (str (:name u)))])
+                                   adj))
+                               adj (:var-usages an))))
+                   {} (keys (:namespaces st)))
+        ordered   (into {} (map (fn [[q us]]
+                                  [q (->> (sort us) (map peek) distinct
+                                          (mapv (fn [c] {:to c :via :static})))]))
+                        written)
+        carried   (reduce (fn [m r]
+                            (if (and (= :carrier (:via r)) (:from-var r) (internal? (:to-ns r)))
+                              (update m (symbol (str (:from-ns r)) (str (:from-var r)))
+                                      (fnil conj [])
+                                      (symbol (str (:to-ns r)) (str (:to-name r))))
+                              m))
+                          {} (refs/refs st))]
+    (into {}
+          (for [q (distinct (concat (keys ordered) (keys carried)))
+                :let [calls (get ordered q [])
+                      seen  (into #{} (map :to) calls)]]
+            [q (into calls
+                     (comp (remove seen) (distinct) (map (fn [c] {:to c :via :carrier})))
+                     (get carried q))]))))
+
+(defn ^:export call-sequence
+  "What happens when `root` runs, as far as the code SAYS: its calls in body
+  order ([[ordered-callees]]), depth first, each callee's calls beneath it —
+  `{:root :steps [...] :truncated {:depth :steps}}`.
+
+  A step is `{:i :depth :from :to :via}`, and three marks say why the walk did
+  not descend: `:cycle? true`, the callee is already on the path (recursion,
+  or a loop through several forms); `:seen-at i`, it was expanded at step `i`
+  and is not drawn twice; `:deeper? true`, the depth bound stopped it with
+  calls still below. A form calling more than `children` others ends with one
+  `{:more n}` step instead of the rest. `steps` bounds the whole walk, and
+  `:truncated` says which bound was reached — so a short trace can always be
+  told from a cut one.
+
+  STATIC: this is the order the calls are WRITTEN, not the order they run. A
+  branch not taken, a loop, and a call through a binding all read the same,
+  which is why every screen showing it says so."
+  [st root & {:keys [depth steps children adj] :or {depth 4 steps 200 children 12}}]
+  ;; a FOLD, not volatiles: the walk threads its output, the steps already
+  ;; drawn and the cut flags, so the answer is a value and the function stays
+  ;; pure for everything built on it
+  (let [adj (or adj (ordered-callees st))]
+    (letfn [(emit [acc m]
+              (let [n (count (:out acc))]
+                (if (< n steps)
+                  [(update acc :out conj (assoc m :i n)) n]
+                  [(assoc-in acc [:cut :steps] true) nil])))
+            (walk [acc q d path]
+              (let [cs    (get adj q [])
+                    shown (take children cs)
+                    more  (- (count cs) (count shown))
+                    acc   (reduce
+                           (fn [acc {:keys [to via]}]
+                             (let [step {:depth d :from q :to to :via via}
+                                   drawn (get (:seen acc) to)]
+                               (cond
+                                 (contains? path to)
+                                 (first (emit acc (assoc step :cycle? true)))
+
+                                 (contains? (:seen acc) to)
+                                 (first (emit acc (cond-> step drawn (assoc :seen-at drawn))))
+
+                                 (>= d depth)
+                                 (let [below   (seq (get adj to))
+                                       [acc i] (emit acc (cond-> step below (assoc :deeper? true)))]
+                                   (cond-> acc (and i below) (assoc-in [:cut :depth] true)))
+
+                                 :else
+                                 (let [[acc i] (emit acc step)]
+                                   (if i
+                                     (walk (assoc-in acc [:seen to] i) to (inc d) (conj path to))
+                                     acc)))))
+                           acc shown)]
+                (if (pos? more)
+                  (first (emit acc {:depth d :from q :more more}))
+                  acc)))]
+      (let [acc (walk {:out [] :seen {root nil} :cut {:depth false :steps false}} root 1 #{root})]
+        {:root root :steps (:out acc) :truncated (:cut acc)}))))

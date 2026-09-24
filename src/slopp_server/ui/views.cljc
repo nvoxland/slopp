@@ -540,70 +540,6 @@
   [s]
   (first (filter #(= (str s) (:data %)) display-options)))
 
-(defn ns-rail
-  "The Code section's right RAIL for one namespace: what you SET while reading
-  it, where [[form-rail]] is what you consult.
-
-  Returns a VECTOR of sections, which is what `app-shell` splices into the
-  rail — so this grows by appending a section, and the one that exists today
-  is `display`.
-
-  The toggles are built from [[display-options]] rather than written out. That
-  is not tidiness: an option the rail draws but the filter ignores, or the
-  reverse, looks exactly like an option nobody has clicked, so the failure is
-  invisible in the one place a reader would look for it. Adding an option is
-  an entry in that vector and nothing here changes.
-
-  **Each toggle says how many rows it controls.** \"private definitions · 4\"
-  turns the choice into an informed one, and a zero says the toggle would do
-  nothing — which is worth knowing before clicking it rather than after. The
-  count is of the WHOLE namespace, not of what is currently visible, because
-  it answers \"what am I not seeing\".
-
-  The namespace's own row is excluded from the counts for the same reason
-  [[ns-outline-main]] excludes it from the listing: it is the header, not a
-  definition, and no toggle governs it."
-  [{:keys [ns forms tested-by]} show]
-  (let [defs (remove #(= (str ns) (str (:name %))) forms)]
-    [(into [:section
-            [:h3 "display"]]
-           (for [{:keys [key data label hides?]} display-options]
-             [:label {:class "rail-toggle"}
-              ;; the action carries the value it SETS, computed from what the view
-              ;; already knows — so the handler never has to read `.-checked`
-              ;; off a DOM node, which is the one thing that cannot run on a JVM
-              [:input (cond-> {:type "checkbox" :class "display-toggle"
-                               :data-show data
-                               :on {:change [:display/set key (not (boolean (get show key)))]}}
-                        (get show key) (assoc :checked true))]
-              [:span label]
-              [:small (str " · " (count (filter hides? defs)))]]))
-     ;; comments get BUTTONS, not a checkbox, and that is a deliberate
-     ;; difference from the display toggles above. A toggle is a preference
-     ;; you set; expand-all is an ACTION you take on what is in front of you.
-     ;; Both are always drawn so the pair reads as one two-position control
-     ;; rather than a button that disappears when used, and each carries the
-     ;; state it SETS rather than the state it is in — the browser hands back
-     ;; a string, and a control naming its own state would have to be read
-     ;; backwards somewhere.
-     [:section
-      [:h3 "comments"]
-      [:div {:class "rail-buttons"}
-       (for [[k label] [["collapse" "collapse all"] ["expand" "expand all"]]]
-         [:button (cond-> {:class "doc-toggle" :data-docs k
-                           :on {:click [:docs/all (= k "expand")]}}
-                    (= (boolean (:docs? show)) (= k "expand"))
-                    (assoc :disabled true))
-          label])]
-      [:p [:small "collapsed shows each comment's first sentence"]]]
-     [:section
-      [:h3 "tested by"]
-      (if (seq tested-by)
-        (into [:ul]
-              (for [t tested-by]
-                [:li [:a {:href (str "/store/ns/" t)} (str t)]]))
-        [:p [:small "no tests require this namespace directly"]])]]))
-
 (defn form-href
   "Where an outline row for `ns` points: the FORM page when the row carries a
   `:form-id`, its source otherwise.
@@ -956,83 +892,6 @@
                           :href (str "/store/form/" (:form-id r))}
                       (str "+" (- (count alts) cap) " more")])])])))]))
 
-(defn form-rail
-  "The Code section's right RAIL for one form: what you consult while reading
-  it — the recorded ask, the warranty, who calls it, and what it calls, each
-  with its signature and doc INLINED.
-
-  Returns a VECTOR of sections, which is what `app-shell` splices into the
-  rail.
-
-  The inlining is the point and it is why the rail exists: a link is not
-  visibility, and the reason to open this screen is almost always to read the
-  form WITH the things it reaches.
-
-  **This is the EGO half of `ego re-center + path spine`** — the plan's
-  call-navigation decision, of which only the spine had shipped. It goes
-  through [[slopp-server.ui.callgraph/ego]]: ranked, capped, and honest about what it
-  held back. Before that it rendered the wire list raw, so a form with forty
-  callers got forty unranked rows — which is the wall `ego` was written to
-  prevent, quoting its own docstring: past about six neighbours an unranked
-  list ranks nothing, because it is doing the reader's sorting for them badly.
-
-  **`:more` is a sentence, never a silent cut.** A list that truncates without
-  saying so lets a reader conclude a function has no other callers, which is
-  the specific way a comprehension tool produces a confident false belief —
-  worse than showing nothing, because the reader does not know to look.
-
-  **Both sides render identically, and that is now TRUE rather than aspirational.**
-  The wire used to send callers as bare names and callees with their card
-  (the reader-API gap `from-form-view` records); slopp fixed it and both
-  sides carry `:sig`, `:doc`, `:why` and `:warranty`. Measured on the live
-  listener, not read off a docstring — `from-form-view`'s still said
-  otherwise.
-
-  Every row is an ordinary href, so clicking a neighbour RE-CENTRES the page
-  there and the back stack is the trail. That is the whole navigation model;
-  it needs no state in `client.app`.
-
-  `:via` arrives as a STRING — it is a keyword in the store and JSON has no
-  keywords, so this renders it directly rather than calling `name` on it."
-  [{:keys [why warranty note] :as data}]
-  (let [{:keys [callers callees]} (callgraph/ego (callgraph/from-form-view data) (:form-id data))
-        row  (fn [r]
-               [:article
-                ;; the separators are MARKUP. Inline siblings with only a CSS
-                ;; margin between them have nothing between them in the text,
-                ;; and a name running into its module is a wrong word.
-                ;; the heading is the NAME. Module and via are metadata and get their
-                ;; own line — a heading whose text is name+module+via is a bad
-                ;; heading for anyone navigating the rail by heading, and the
-                ;; separators inside it were being lost, so the row read
-                ;; `quotedemo.orderstatic`: not a missing space but a wrong word.
-                [:h4 (if (:form-id r)
-                       [:a {:href (str "/store/form/" (:form-id r))} (:form r)]
-                       [:span (:form r)])]
-                [:p {:class "ego-meta"}
-                 [:small {:class "module-tag"} (:module r)]
-                 (when (:via r)
-                   [:span " " [:span {:class (str "via-" (:via r))} (:via r)]])]
-                (when (seq (:sig r))
-                  [:p [:code (if (coll? (:sig r)) (str/join "  " (:sig r)) (str (:sig r)))]])
-                (when (:doc r) [:p (first-sentence (:doc r))])])
-        side (fn [heading {:keys [shown more]} empty-note]
-               (into [:section [:h3 heading]]
-                     (if (empty? shown)
-                       [[:p [:small empty-note]]]
-                       (cond-> (mapv row shown)
-                         (pos? more)
-                         (conj [:p {:class "ego-more"}
-                                [:small (str "and " more " more — open the form to see "
-                                             "them ranked among their own neighbours")]])))))]
-    [[:section
-      [:h3 "warranty"]
-      [:p [:small (plural (:covered warranty) "covering test")]]
-      (when why [:p [:em why]])]
-     (side "callers" callers "nothing in this store calls it")
-     (side "callees" callees "it calls nothing else in this store")
-     [:footer [:small note]]]))
-
 (defn source-main
   "The Code section's main pane for one form addressed by NAME. Takes
   `GET /api/source/:ns/:name`'s shape.
@@ -1158,12 +1017,16 @@
   through the boxes it was routed around."
   ([picture] (module-graph picture nil nil))
   ([picture targets] (module-graph picture targets nil))
-  ([{:keys [nodes band edges width height sketch]} targets tints]
+  ([{:keys [nodes band edges width height sketch overlay]} targets tints]
    (let [root  (nsfilter/common-root (map :module (concat nodes band)))
          box   (fn [{:keys [module x y w h]} kind]
                  (let [g [:g {:class (str "module-node " kind
                                           (when-let [t (get tints module)]
-                                            (str " gap-w" t)))
+                                            (str " gap-w" t))
+                                          ;; an OVERLAY class — the conformance
+                                          ;; lens badges each box with its tier
+                                          (when-let [c (get (:node-classes overlay) module)]
+                                            (str " " c)))
                               :data-module module}
                           ;; hand-drawn strokes REPLACE the rect rather than
                           ;; layering over it — two outlines at slightly
@@ -1204,9 +1067,17 @@
             (when root [:text {:class "graph-root" :x 8 :y (- height 8)} root])]
            (concat
             (for [e edges]
-              [:path {:class "module-edge" :d (curve e)
+              [:path {:class (str "module-edge"
+                                  (when-let [c (get (:edge-classes overlay) [(:from e) (:to e)])]
+                                    (str " " c)))
+                      :d (curve e)
                       :marker-end "url(#arrow)"
                       :data-from (:from e) :data-to (:to e)}])
+            ;; edges an overlay ADDS — a declaration nothing uses has no route,
+            ;; so it is drawn straight between the boxes, which do not move
+            (for [{:keys [from to class x1 y1 x2 y2]} (:extra overlay)]
+              [:line {:class (str "module-edge " class) :x1 x1 :y1 y1 :x2 x2 :y2 y2
+                      :marker-end "url(#arrow)" :data-from from :data-to to}])
             (for [n nodes] (box n "layered"))
             (for [b band] (box b "foundation")))))))
 
@@ -1290,96 +1161,6 @@
                                       [:a {:href (str "/store/module/" d)} d])))
                    "—")]]))])
 
-(defn code-index-main
-  "The Code section's main pane: the architecture as a picture.
-
-  This pane used to be near-empty, on the reasoning that the namespace list
-  was already the left pane and repeating it would show one list twice. That
-  reasoning was right and the conclusion was wrong: what belongs here is not
-  a list but the SHAPE of the system, which a nav cannot show.
-
-  Cycles are called out ABOVE the diagram rather than left to be spotted in
-  it. On a tangled store 'these modules are mutually entangled' is the most
-  useful sentence on the screen, and geometry is a poor place to hide a
-  finding.
-
-  The link targets are computed HERE and handed down, because `modules` — the
-  wire shape — is what knows which namespaces a module holds, and the
-  `:picture` deliberately does not: it carries geometry and nothing else, so
-  that a different layout could be swapped in without teaching it about code.
-
-  Takes `GET /api/modules`'s shape PLUS a `:picture`, which does not come
-  over the wire: `client.app` derives it with `slopp-server.ui.graph/picture-of` on
-  arrival and adds it to the data. The API used to send placed boxes, and
-  that is the arrangement this project's existence argued against — a
-  producer that ships coordinates decides the diagram for every consumer it
-  will ever have.
-
-  **The `table` lens REPLACES the picture; the `gaps` lens tints it.** That is
-  the difference between an alternative view and an overlay, and it is why the
-  two are separate lenses rather than one busier screen: the picture is what
-  the table exists to be readable INSTEAD of, so leaving it above would make
-  the switch an addition rather than a choice."
-  [{:keys [modules picture cycles layers]} lens]
-  (let [nses    (reduce + 0 (map (comp count :namespaces) modules))
-        band    (filter :foundation modules)
-        ;; DESCEND. A box stands for a module, and since `/store/module/:m`
-          ;; exists that is where it goes — the rung between the diagram and a
-          ;; namespace. It used to jump PAST that page to a representative
-          ;; namespace, which was right before the page existed and left it
-          ;; almost unreachable after.
-          ;;
-          ;; Every module is a link, including one with no namespaces. The old
-          ;; rule declined those because no representative namespace existed; a
-          ;; module PAGE always does, so the box now goes somewhere real.
-        targets (into {} (map (juxt :module #(str "/store/module/" (:module %)))) modules)]
-    [:div
-     [:h1 "code"]
-     [:p (str (plural (count modules) "module") ", "
-              (plural nses "namespace")
-              (when (seq band)
-                ;; NOT `plural` — it pluralises a NOUN by adding an s, and "of them"
-                ;; is a phrase, so it rendered "5 of thems foundation" on the
-                ;; served page for as long as the sentence existed
-                (str " — " (count band) " of them foundation")))]
-     ;; Under the gaps lens the numbers go BESIDE the picture, because a colour
-     ;; is not a measurement — a reader can see that one box is darker and
-     ;; cannot see by how much or in what.
-     (when (= "gaps" lens)
-       (let [g   (keep :gaps modules)
-             sum (fn [k] (reduce + 0 (map #(or (k %) 0) g)))]
-         [:div {:class "gap-summary"}
-          [:h2 "where the record is thin"]
-          [:p (str (sum :no-doc) " of " (sum :forms)
-                   " forms carry no comment, and " (sum :no-why)
-                   " have no recorded ask — nothing says why they were written.")]
-          [:p [:small (str (sum :uncovered) " are uncovered. That one is measured "
-                           "against THIS SESSION's trace map, so a process that "
-                           "has run little reports much — which is why the tint "
-                           "above ignores it and reads only the two counts that "
-                           "mean the same thing in any process.")]]
-          (into [:ul {:class "gap-rows"}]
-                (for [m (->> modules
-                             (filter :gaps)
-                             (sort-by #(- (gap-step (:gaps %))))
-                             (take 8))
-                      :let [{:keys [forms no-doc no-why uncovered]} (:gaps m)]]
-                  [:li {:class (str "gap-w" (gap-step (:gaps m)))}
-                   [:a {:href (str "/store/module/" (:module m))} (:module m)]
-                   " " [:small (str no-doc " undocumented, " no-why " with no ask, "
-                                    uncovered " uncovered, of " forms)]]))]))
-     (when (seq cycles)
-       [:div {:class "finding cycles"}
-        [:h2 (str (plural (count cycles) "dependency cycle"))]
-        (into [:ul]
-              (for [c cycles]
-                [:li (clojure.string/join " → " (concat c [(first c)]))]))])
-     (if (= "table" lens)
-       (module-table {:modules modules :layers layers})
-       (module-graph picture targets
-                     (when (= "gaps" lens)
-                       (into {} (map (juxt :module #(gap-step (:gaps %)))) modules))))]))
-
 (defn current-section
   "The section `path` belongs to, or nil.
 
@@ -1447,9 +1228,10 @@
   is visible as a deferral instead of as a dead url.
 
   `table` on the store is BACK, by the only route that admits one: it renders
-  now. The remaining four are still deferrals, and `:module` and `:ns` need a
-  plumbing change before they can be anything else — `app-view` hands `lens`
-  to the code and form panes only.
+  now. So is a lens on `:module` and `:ns` — `story`, the subject's history
+  as the asks that shaped it. The plumbing this once said they lacked is
+  gone: a lens is a page of its own at `<subject>/<lens>`, and the bare page
+  honours `(:lens state)` only as the registry test's seam.
 
   Bar order puts `table` beside the default because the two are alternative
   renderings of the whole subject; `gaps` is an overlay on one of them and
@@ -1457,8 +1239,10 @@
 
   Pinned by `every-declared-lens-actually-renders-something-different`, which
   asserts each entry both routes AND renders something the default does not."
-  {:code ["table" "gaps"]
-   :form ["source"]})
+  {:code   ["table" "gaps" "conformance" "treemap"]
+   :module ["story"]
+   :ns     ["story"]
+   :form   ["source" "sequence"]})
 
 (def default-view
   "What the BARE path of each screen shows, NAMED — one entry per screen in
@@ -1474,8 +1258,10 @@
   `a-screen-that-offers-lenses-shows-a-way-to-switch` asserts the key sets are
   equal. Two halves of one registry are exactly the pairing this codebase keeps
   paying for when nothing checks them."
-  {:code "diagram"
-   :form "what it is"})
+  {:code   "diagram"
+   :module "inside"
+   :ns     "outline"
+   :form   "what it is"})
 
 (defn with-lens
   "The address of subject `path` seen through `lens` — the bare path when
@@ -1515,7 +1301,7 @@
   takes one, empty when the address names none."
   ([data] (form-main data nil nil))
   ([data lens prefer]
-   (let [{:keys [form form-id ns module tokens sig doc why warranty]} data
+   (let [{:keys [form form-id ns module tokens sig doc why warranty keys]} data
          nbhd (callgraph/from-form-view data)
          gap  (fn [text] [:p {:class "src-gap"} [:small text]])]
      [:div
@@ -1545,6 +1331,14 @@
            (gap "no covering test — nothing proves this behaves"))
          (spine-view form-id (assoc (callgraph/spine nbhd form-id (or prefer #{}))
                                     :truncated (:truncated nbhd)))
+         ;; the DATA it speaks: its namespaced keys, each opening the dictionary
+         (when (seq keys)
+           (into [:p [:small "data it touches: "]]
+                 (interpose " "
+                            (for [{:keys [kw via]} keys]
+                              [:a {:href (str "/store/data?key=" kw)
+                                   :title (if (= "destructuring" via) "destructures it" "names it")}
+                               (str ":" kw)]))))
          [:p {:class "src-escape-link"}
           [:a {:href (with-lens (str "/store/form/" form-id) "source")}
            "read the source"]
@@ -1661,6 +1455,14 @@
    {:screen :code         :path "/p/:slug/store"          :sample {:slug "demo"}}
    {:screen :search       :path "/p/:slug/store/search"   :sample {:slug "demo"}
     :defaults {:q ""}}
+   ;; the PATH PICKER: two ends in the query string, like search's one — the
+   ;; screen reads the same shape whether or not both have been typed
+   {:screen :flow         :path "/p/:slug/store/flow"     :sample {:slug "demo"}
+    :defaults {:from "" :to ""}}
+   ;; the DATA DICTIONARY: filter, the plain-keyword toggle and a chosen key,
+   ;; all in the query string — one screen whichever it shows
+   {:screen :data         :path "/p/:slug/store/data"     :sample {:slug "demo"}
+    :defaults {:q "" :bare "" :key ""}}
    {:screen :rest-paths   :path "/p/:slug/rest/paths"     :sample {:slug "demo"}}
    {:screen :http-paths   :path "/p/:slug/http/paths"     :sample {:slug "demo"}}
    {:screen :webapp-pages :path "/p/:slug/webapp/pages"   :sample {:slug "demo"}}
@@ -2008,124 +1810,6 @@
        :cycles     []
        :pending    "the structure INSIDE this module is not on the wire yet —
                     GET /api/module/:m would carry the namespace-level edges"})))
-
-(defn module-main
-  "One module from the inside: its namespaces, how they depend on each other,
-  and what crosses its boundary.
-
-  The rung the hierarchy was missing. `/store` drew the architecture at module
-  grain and a box led straight to a representative NAMESPACE, so the obvious
-  question a diagram provokes — *what is this thing made of* — had nowhere to
-  go and no data behind it either.
-
-  Rendered by [[module-graph]] unchanged: at this grain a box IS a namespace,
-  so the `targets` map that makes boxes links is the identity over the
-  namespaces drawn, and every box already points at `/store/ns/…`.
-
-  **The boundary is why this is not just a smaller diagram.** A descended view
-  that draws only the edges INSIDE the module cannot distinguish the namespace
-  everything outside comes through from one nothing outside has heard of — and
-  that distinction is most of what a reader wants at this level.
-
-  **Every count here is over something the response actually carries.** Three
-  false sentences shipped green before anyone opened the page: `0 forms` for an
-  index that carries no form counts, and `1 of them reached from outside` on
-  every module of every store — because until `GET /api/module/:m` exists the
-  boundary rows are MODULE-grain, so their near end is always this module and
-  counting distinct near ends always yields one. A number that cannot vary is
-  not a measurement. So the summary counts modules when the rows are
-  module-grain and namespaces when they are not, and an unknown total is
-  omitted rather than printed as zero.
-
-  Boundary rows lead with the module at their FAR end. The near end is the page
-  you are already on, and printing it once per row is the heading repeated."
-  [{:keys [module tier namespaces boundary picture cycles pending]}]
-  (let [forms   (keep :forms namespaces)
-        ;; at THIS grain a box is a namespace, so the /store/ns/ prefix belongs
-        ;; here — in the caller that knows what its boxes stand for, rather
-        ;; than in the component that draws them. That split is what lets the
-        ;; store view descend into a module from the same component.
-        targets (into {} (map (juxt :ns #(str "/store/ns/" (:ns %)))) namespaces)
-        ;; Count the FAR end by its OWN key, at whatever grain the rows have.
-        ;; While `:pending` the boundary is module-grain and `:from` equals
-        ;; `:from-module`; the real endpoint sends `:from` as an outside
-        ;; NAMESPACE. Reading `:from-module` while labelling it "namespace"
-        ;; was unfalsifiable against the fallback — the two keys held one
-        ;; string — and began lying the moment the endpoint answered.
-        far     (fn [rows k] (into #{} (map k) rows))
-        ins     (far (:in boundary) :from)
-        outs    (far (:out boundary) :to)
-        unit    (if pending "module" "namespace")
-        edge-list
-        ;; ONE ROW PER FAR MODULE, not per edge. `slopp.edit` has 32 inbound
-        ;; edges from 15 namespaces, and rendering them raw put `slopp.ops →`
-        ;; on screen nine times — an ungrouped list long enough that the thing
-        ;; a reader wants (WHICH modules depend on this, through what) is
-        ;; somewhere inside it rather than on it. Grouping by the far module is
-        ;; the documented fan-out remedy and it is the grain the question is
-        ;; asked at anyway.
-        ;;
-        ;; The far NAMESPACE is deliberately not shown. It was a parameter
-        ;; here until the grouping stopped reading it, and a parameter callers
-        ;; supply while the body ignores it is the same species of lie as a
-        ;; docstring describing code that moved.
-        (fn [heading rows far-module near-k empty-note]
-          [:section
-           [:h2 heading]
-           (if (seq rows)
-             (into [:ul]
-                   (for [[m es] (sort-by key (group-by far-module rows))
-                         :let [nears (distinct (sort (map near-k es)))]]
-                     [:li [:strong m]
-                      " " [:small (plural (count es) "edge")]
-                      (when-not pending
-                        ;; the arrow is DERIVED from which key names the NEAR side, so it
-                        ;; cannot disagree with the direction this row is about.
-                        ;; `:to` means our namespace is the target — they name
-                        ;; us, so the arrow points in. `:from` means ours is the
-                        ;; source — we name them, so it points out.
-                        ;;
-                        ;; It was hardcoded `→`: right for inbound, backwards
-                        ;; for outbound, so `depends on` claimed the far module
-                        ;; named us when we name it. Invisible because `:out`
-                        ;; was empty in the only fixture that drives this
-                        ;; screen, and it is non-empty on any real store.
-                        (into [:span (if (= near-k :to) " → " " ← ")]
-                              (interpose
-                               ", "
-                               (for [n nears]
-                                 [:a {:href (str "/store/ns/" n)}
-                                  (nsfilter/without-root module n)]))))]))
-             [:p [:small empty-note]])])]
-    [:div
-     [:nav [:a {:href "/store"} "code"] " / " module]
-     [:h1 module (tier-mark tier)]
-     [:p (str (plural (count namespaces) "namespace")
-              (when (seq forms) (str ", " (plural (reduce + 0 forms) "form")))
-              (when (seq ins) (str " — used by " (plural (count ins) unit)))
-              (when (seq outs) (str ", depends on " (plural (count outs) unit))))]
-     (when (seq cycles)
-       [:div {:class "finding cycles"}
-        [:h2 (str (plural (count cycles) "dependency cycle") " inside this module")]
-        (into [:ul]
-              (for [c cycles]
-                [:li (str/join " → " (concat c [(first c)]))]))])
-     (cond
-       picture (module-graph picture targets)
-       pending [:p {:class "src-gap"} [:small pending]]
-       :else   nil)
-     (when (seq namespaces)
-       [:section
-        [:h2 "namespaces"]
-        (into [:ul]
-              (for [n (sort-by :ns namespaces)]
-                [:li [:a {:href (str "/store/ns/" (:ns n))}
-                      (nsfilter/without-root module (:ns n))]
-                 (when (:forms n) [:small (str " · " (plural (:forms n) "form"))])]))])
-     (edge-list "used by" (:in boundary) :from-module :to
-                "nothing outside this module names any of its namespaces")
-     (edge-list "depends on" (:out boundary) :to-module :from
-                "this module depends on nothing outside itself")]))
 
 (defn toggle-all-docs
   "`show` with every comment set to `open?` — the rail's all-switch.
@@ -3739,3 +3423,771 @@
             (interpose " "
                        (cons (item nil (default-view screen))
                              (for [l ls] (item l l))))))))
+
+(defn behaviour
+  "A deftest name read back as the sentence it was written as: hyphens become
+  spaces and a possessive written `-s-` becomes `'s`.
+
+  This store names its tests as sentences on purpose, so the tests reaching a
+  namespace are a plain statement of what it does. Rendering them as symbols
+  keeps that statement behind the hyphens."
+  [test-name]
+  (-> (str test-name)
+      (str/replace #"-s-" "'s ")
+      (str/replace "-" " ")))
+
+(defn form-rail
+  "The Code section's right RAIL for one form: what you consult while reading
+  it — the recorded ask, the warranty, who calls it, and what it calls, each
+  with its signature and doc INLINED.
+
+  Returns a VECTOR of sections, which is what `app-shell` splices into the
+  rail.
+
+  The inlining is the point and it is why the rail exists: a link is not
+  visibility, and the reason to open this screen is almost always to read the
+  form WITH the things it reaches.
+
+  **This is the EGO half of `ego re-center + path spine`** — the plan's
+  call-navigation decision, of which only the spine had shipped. It goes
+  through [[slopp-server.ui.callgraph/ego]]: ranked, capped, and honest about what it
+  held back. Before that it rendered the wire list raw, so a form with forty
+  callers got forty unranked rows — which is the wall `ego` was written to
+  prevent, quoting its own docstring: past about six neighbours an unranked
+  list ranks nothing, because it is doing the reader's sorting for them badly.
+
+  **`:more` is a sentence, never a silent cut.** A list that truncates without
+  saying so lets a reader conclude a function has no other callers, which is
+  the specific way a comprehension tool produces a confident false belief —
+  worse than showing nothing, because the reader does not know to look.
+
+  **Both sides render identically, and that is now TRUE rather than aspirational.**
+  The wire used to send callers as bare names and callees with their card
+  (the reader-API gap `from-form-view` records); slopp fixed it and both
+  sides carry `:sig`, `:doc`, `:why` and `:warranty`. Measured on the live
+  listener, not read off a docstring — `from-form-view`'s still said
+  otherwise.
+
+  Every row is an ordinary href, so clicking a neighbour RE-CENTRES the page
+  there and the back stack is the trail. That is the whole navigation model;
+  it needs no state in `client.app`.
+
+  `:via` arrives as a STRING — it is a keyword in the store and JSON has no
+  keywords, so this renders it directly rather than calling `name` on it."
+  [{:keys [why warranty note tests] :as data}]
+  (let [{:keys [callers callees]} (callgraph/ego (callgraph/from-form-view data) (:form-id data))
+        row  (fn [r]
+               [:article
+                ;; the separators are MARKUP. Inline siblings with only a CSS
+                ;; margin between them have nothing between them in the text,
+                ;; and a name running into its module is a wrong word.
+                ;; the heading is the NAME. Module and via are metadata and get their
+                ;; own line — a heading whose text is name+module+via is a bad
+                ;; heading for anyone navigating the rail by heading, and the
+                ;; separators inside it were being lost, so the row read
+                ;; `quotedemo.orderstatic`: not a missing space but a wrong word.
+                [:h4 (if (:form-id r)
+                       [:a {:href (str "/store/form/" (:form-id r))} (:form r)]
+                       [:span (:form r)])]
+                [:p {:class "ego-meta"}
+                 [:small {:class "module-tag"} (:module r)]
+                 (when (:via r)
+                   [:span " " [:span {:class (str "via-" (:via r))} (:via r)]])]
+                (when (seq (:sig r))
+                  [:p [:code (if (coll? (:sig r)) (str/join "  " (:sig r)) (str (:sig r)))]])
+                (when (:doc r) [:p (first-sentence (:doc r))])])
+        side (fn [heading {:keys [shown more]} empty-note]
+               (into [:section [:h3 heading]]
+                     (if (empty? shown)
+                       [[:p [:small empty-note]]]
+                       (cond-> (mapv row shown)
+                         (pos? more)
+                         (conj [:p {:class "ego-more"}
+                                [:small (str "and " more " more — open the form to see "
+                                             "them ranked among their own neighbours")]])))))]
+    [[:section
+      [:h3 "warranty"]
+      [:p [:small (plural (:covered warranty) "covering test")]]
+      (when why [:p [:em why]])
+      ;; the tests BY NAME: what the form is promised to do, read as the
+      ;; sentences they were written as, each with how it is known
+      (when (seq (:shown tests))
+        (into [:ul]
+              (for [{:keys [test via hops]} (:shown tests)
+                    :let [i (str/index-of test "/")]]
+                [:li (behaviour (if i (subs test (inc i)) test))
+                 " " [:small (str (str/join ", " via)
+                                  (when hops (str " · " (plural hops "hop"))))]])))
+      (let [more (- (or (:count tests) 0) (count (:shown tests)))]
+        (when (pos? more)
+          [:p [:small (str "and " more " more reach it")]]))]
+     (side "callers" callers "nothing in this store calls it")
+     (side "callees" callees "it calls nothing else in this store")
+     [:footer [:small note]]]))
+
+(defn spec-list
+  "What the tests that reach a subject SAY it does: one group per test
+  namespace, linked, each deftest read back as its sentence through
+  [[behaviour]], and the count the cap held back stated rather than dropped.
+
+  `groups` is the `:tests` value `/api/ns/:ns` and `/api/module/:m` send.
+  Nothing reaching the subject renders as a finding, not as an empty section,
+  because an untested namespace is something a reader should be told."
+  ([groups] (spec-list groups :h3))
+  ([groups heading]
+   (into [:section [heading "behaviour"]]
+         (if (empty? groups)
+           [[:p [:small "no test reaches this"]]]
+           (for [{tns :ns n :count :keys [names more]} groups]
+             [:div
+              [:p [:a {:href (str "/store/ns/" tns)} tns] " " [:small (plural n "test")]]
+              (into [:ul] (for [nm names] [:li (behaviour nm)]))
+              (when (pos? (or more 0))
+                [:p [:small (str "and " more " more in " tns)]])])))))
+
+(defn ns-rail
+  "The Code section's right RAIL for one namespace: what you SET while reading
+  it, where [[form-rail]] is what you consult.
+
+  Returns a VECTOR of sections, which is what `app-shell` splices into the
+  rail — so this grows by appending a section, and the one that exists today
+  is `display`.
+
+  The toggles are built from [[display-options]] rather than written out. That
+  is not tidiness: an option the rail draws but the filter ignores, or the
+  reverse, looks exactly like an option nobody has clicked, so the failure is
+  invisible in the one place a reader would look for it. Adding an option is
+  an entry in that vector and nothing here changes.
+
+  **Each toggle says how many rows it controls.** \"private definitions · 4\"
+  turns the choice into an informed one, and a zero says the toggle would do
+  nothing — which is worth knowing before clicking it rather than after. The
+  count is of the WHOLE namespace, not of what is currently visible, because
+  it answers \"what am I not seeing\".
+
+  The namespace's own row is excluded from the counts for the same reason
+  [[ns-outline-main]] excludes it from the listing: it is the header, not a
+  definition, and no toggle governs it."
+  [{:keys [ns forms tested-by tests]} show]
+  (let [defs (remove #(= (str ns) (str (:name %))) forms)]
+    (cond->
+    [(into [:section
+            [:h3 "display"]]
+           (for [{:keys [key data label hides?]} display-options]
+             [:label {:class "rail-toggle"}
+              ;; the action carries the value it SETS, computed from what the view
+              ;; already knows — so the handler never has to read `.-checked`
+              ;; off a DOM node, which is the one thing that cannot run on a JVM
+              [:input (cond-> {:type "checkbox" :class "display-toggle"
+                               :data-show data
+                               :on {:change [:display/set key (not (boolean (get show key)))]}}
+                        (get show key) (assoc :checked true))]
+              [:span label]
+              [:small (str " · " (count (filter hides? defs)))]]))
+     ;; comments get BUTTONS, not a checkbox, and that is a deliberate
+     ;; difference from the display toggles above. A toggle is a preference
+     ;; you set; expand-all is an ACTION you take on what is in front of you.
+     ;; Both are always drawn so the pair reads as one two-position control
+     ;; rather than a button that disappears when used, and each carries the
+     ;; state it SETS rather than the state it is in — the browser hands back
+     ;; a string, and a control naming its own state would have to be read
+     ;; backwards somewhere.
+     [:section
+      [:h3 "comments"]
+      [:div {:class "rail-buttons"}
+       (for [[k label] [["collapse" "collapse all"] ["expand" "expand all"]]]
+         [:button (cond-> {:class "doc-toggle" :data-docs k
+                           :on {:click [:docs/all (= k "expand")]}}
+                    (= (boolean (:docs? show)) (= k "expand"))
+                    (assoc :disabled true))
+          label])]
+      [:p [:small "collapsed shows each comment's first sentence"]]]
+     [:section
+      [:h3 "tested by"]
+      (if (seq tested-by)
+        (into [:ul]
+              (for [t tested-by]
+                [:li [:a {:href (str "/store/ns/" t)} (str t)]]))
+        [:p [:small "no tests require this namespace directly"]])]]
+      ;; what those tests SAY, where the section above says where they are.
+      ;; CONJ'd rather than left as a nil slot: the rail is a vector of
+      ;; SECTIONS and app-shell splices it as one. Absent from an older
+      ;; document rather than empty, so nothing renders then instead of a
+      ;; false "no test reaches this".
+      tests (conj (spec-list tests)))))
+
+(defn module-main
+  "One module from the inside: its namespaces, how they depend on each other,
+  and what crosses its boundary.
+
+  The rung the hierarchy was missing. `/store` drew the architecture at module
+  grain and a box led straight to a representative NAMESPACE, so the obvious
+  question a diagram provokes — *what is this thing made of* — had nowhere to
+  go and no data behind it either.
+
+  Rendered by [[module-graph]] unchanged: at this grain a box IS a namespace,
+  so the `targets` map that makes boxes links is the identity over the
+  namespaces drawn, and every box already points at `/store/ns/…`.
+
+  **The boundary is why this is not just a smaller diagram.** A descended view
+  that draws only the edges INSIDE the module cannot distinguish the namespace
+  everything outside comes through from one nothing outside has heard of — and
+  that distinction is most of what a reader wants at this level.
+
+  **Every count here is over something the response actually carries.** Three
+  false sentences shipped green before anyone opened the page: `0 forms` for an
+  index that carries no form counts, and `1 of them reached from outside` on
+  every module of every store — because until `GET /api/module/:m` exists the
+  boundary rows are MODULE-grain, so their near end is always this module and
+  counting distinct near ends always yields one. A number that cannot vary is
+  not a measurement. So the summary counts modules when the rows are
+  module-grain and namespaces when they are not, and an unknown total is
+  omitted rather than printed as zero.
+
+  Boundary rows lead with the module at their FAR end. The near end is the page
+  you are already on, and printing it once per row is the heading repeated."
+  [{:keys [module tier namespaces boundary picture cycles pending tests]}]
+  (let [forms   (keep :forms namespaces)
+        ;; at THIS grain a box is a namespace, so the /store/ns/ prefix belongs
+        ;; here — in the caller that knows what its boxes stand for, rather
+        ;; than in the component that draws them. That split is what lets the
+        ;; store view descend into a module from the same component.
+        targets (into {} (map (juxt :ns #(str "/store/ns/" (:ns %)))) namespaces)
+        ;; Count the FAR end by its OWN key, at whatever grain the rows have.
+        ;; While `:pending` the boundary is module-grain and `:from` equals
+        ;; `:from-module`; the real endpoint sends `:from` as an outside
+        ;; NAMESPACE. Reading `:from-module` while labelling it "namespace"
+        ;; was unfalsifiable against the fallback — the two keys held one
+        ;; string — and began lying the moment the endpoint answered.
+        far     (fn [rows k] (into #{} (map k) rows))
+        ins     (far (:in boundary) :from)
+        outs    (far (:out boundary) :to)
+        unit    (if pending "module" "namespace")
+        edge-list
+        ;; ONE ROW PER FAR MODULE, not per edge. `slopp.edit` has 32 inbound
+        ;; edges from 15 namespaces, and rendering them raw put `slopp.ops →`
+        ;; on screen nine times — an ungrouped list long enough that the thing
+        ;; a reader wants (WHICH modules depend on this, through what) is
+        ;; somewhere inside it rather than on it. Grouping by the far module is
+        ;; the documented fan-out remedy and it is the grain the question is
+        ;; asked at anyway.
+        ;;
+        ;; The far NAMESPACE is deliberately not shown. It was a parameter
+        ;; here until the grouping stopped reading it, and a parameter callers
+        ;; supply while the body ignores it is the same species of lie as a
+        ;; docstring describing code that moved.
+        (fn [heading rows far-module near-k empty-note]
+          [:section
+           [:h2 heading]
+           (if (seq rows)
+             (into [:ul]
+                   (for [[m es] (sort-by key (group-by far-module rows))
+                         :let [nears (distinct (sort (map near-k es)))]]
+                     [:li [:strong m]
+                      " " [:small (plural (count es) "edge")]
+                      (when-not pending
+                        ;; the arrow is DERIVED from which key names the NEAR side, so it
+                        ;; cannot disagree with the direction this row is about.
+                        ;; `:to` means our namespace is the target — they name
+                        ;; us, so the arrow points in. `:from` means ours is the
+                        ;; source — we name them, so it points out.
+                        ;;
+                        ;; It was hardcoded `→`: right for inbound, backwards
+                        ;; for outbound, so `depends on` claimed the far module
+                        ;; named us when we name it. Invisible because `:out`
+                        ;; was empty in the only fixture that drives this
+                        ;; screen, and it is non-empty on any real store.
+                        (into [:span (if (= near-k :to) " → " " ← ")]
+                              (interpose
+                               ", "
+                               (for [n nears]
+                                 [:a {:href (str "/store/ns/" n)}
+                                  (nsfilter/without-root module n)]))))]))
+             [:p [:small empty-note]])])]
+    [:div
+     [:nav [:a {:href "/store"} "code"] " / " module]
+     [:h1 module (tier-mark tier)]
+     [:p (str (plural (count namespaces) "namespace")
+              (when (seq forms) (str ", " (plural (reduce + 0 forms) "form")))
+              (when (seq ins) (str " — used by " (plural (count ins) unit)))
+              (when (seq outs) (str ", depends on " (plural (count outs) unit))))]
+     (when (seq cycles)
+       [:div {:class "finding cycles"}
+        [:h2 (str (plural (count cycles) "dependency cycle") " inside this module")]
+        (into [:ul]
+              (for [c cycles]
+                [:li (str/join " → " (concat c [(first c)]))]))])
+     (cond
+       picture (module-graph picture targets)
+       pending [:p {:class "src-gap"} [:small pending]]
+       :else   nil)
+     (when (seq namespaces)
+       [:section
+        [:h2 "namespaces"]
+        (into [:ul]
+              (for [n (sort-by :ns namespaces)]
+                [:li [:a {:href (str "/store/ns/" (:ns n))}
+                      (nsfilter/without-root module (:ns n))]
+                 (when (:forms n) [:small (str " · " (plural (:forms n) "form"))])]))])
+     ;; what the module's tests say it does — the part of this page that
+     ;; needs no code read at all. Absent from an older document, so absent here.
+     (when tests (spec-list tests :h2))
+     (edge-list "used by" (:in boundary) :from-module :to
+                "nothing outside this module names any of its namespaces")
+     (edge-list "depends on" (:out boundary) :to-module :from
+                "this module depends on nothing outside itself")]))
+
+(defn by-layer
+  "`modules` in ARCHITECTURE order: the top layer first — what everything else
+  is built toward — each layer's members by name, then any module that sits in
+  no layer, then the foundation band, which everything stands on, last.
+
+  `layers` is `/api/modules`' `:layers`, deepest first. A module in none of them
+  and not foundation (an instrument, kept out of the architecture view) keeps a
+  place between the two rather than vanishing from the rail. With no layering
+  the wire's order stands — a nav that invents an order is worse than one that
+  keeps the producer's.
+
+  The rail's caller sorts, so [[module-nav]] draws whatever order it is handed
+  and needs no knowledge of layers."
+  [modules layers]
+  (if-not (seq layers)
+    (vec modules)
+  (let [rank (into {} (comp (map-indexed (fn [i layer] (map #(vector % i) layer)))
+                            cat)
+                   layers)]
+    (vec (sort-by (fn [m]
+                    (let [r (get rank (:module m))]
+                      (cond
+                        (:foundation m) [2 0 (:module m)]
+                        r               [0 (- r) (:module m)]
+                        :else           [1 0 (:module m)])))
+                  modules)))))
+
+(defn story-main
+  "A namespace's or a module's STORY: the commit points that touched it,
+  newest first, each with the asks that shaped it — the recorded why, read as
+  history. A row with a range opens that change; work since the last commit
+  point sits on top as IN FLIGHT rather than being dropped; the asks a row's
+  cap held back are counted; older pages are one link away.
+
+  Total over a document of the wrong shape — the lens registry test hands it
+  a module's — because a screen that throws on an unexpected answer shows the
+  reader nothing at all."
+  [{:keys [grain subject rows working more page]}]
+  (let [base  (str (if (= "module" grain) "/store/module/" "/store/ns/") subject)
+        asked (fn [asks more-asks]
+                (into [:ul]
+                      (concat (for [a asks] [:li a])
+                              (when (pos? (or more-asks 0))
+                                [[:li [:small (str "and " more-asks " more asks")]]]))))]
+    [:div
+     [:nav [:a {:href "/store"} "code"] " / " [:a {:href base} (str subject)]]
+     [:h1 (str subject)]
+     [:p (str "what was asked of this " (if (= "module" grain) "module" "namespace")
+              ", by commit point — newest first")]
+     (when working
+       [:section
+        [:h2 "in flight"]
+        [:p [:small (str (plural (:forms working) "form") " moved since the last commit point")]]
+        (asked (:asks working) (:more-asks working))])
+     (if (empty? rows)
+       [:p [:small "no commit point has touched this yet"]]
+       (into [:ol]
+             (for [{:keys [description status at range asks more-asks forms]} rows]
+               [:li
+                (if range
+                  [:a {:href (str "/change/" range)} description]
+                  [:strong description])
+                " "
+                [:small (str/join " · " (remove nil? [at (plural forms "form")
+                                                       (when (= "red" status) "recorded red")]))]
+                (asked asks more-asks)])))
+     (when (pos? (or more 0))
+       [:p [:a {:href (str base "/story?page=" (inc (or page 0)))}
+            (str "older — " (plural more "more commit point"))]])]))
+
+(defn doors-panel
+  "Every way INTO the code, by kind — the process entry, HTTP routes, commands,
+  browser screens, forms marked `^:entry-point` — each linking to what happens
+  when it runs.
+
+  The first question about a system is what it can DO, and a list of files or
+  modules cannot answer it: this is the answer, derived from what the store
+  declares it exposes. A door with no form is still listed, unlinked, because
+  a door that vanishes for lacking an address reads as a door that does not
+  exist. nil when the store declares none."
+  [{:keys [kinds]}]
+  (when (seq kinds)
+    (into [:section {:class "doors"}
+           [:h2 "ways in"]
+           [:p [:small (str "every door the code declares — each opens what happens when it"
+                            " runs, in the order the calls are written")]]]
+          (for [{:keys [kind note entries]} kinds
+                :let [shown (take 40 entries)
+                      held  (- (count entries) (count shown))]]
+            [:div
+             [:h3 (str kind " · " (count entries))]
+             [:p [:small note]]
+             (into [:ul]
+                   (for [{:keys [label handler form-id]} shown]
+                     [:li (if form-id
+                            [:a {:href (str "/store/form/" form-id "/sequence")} label]
+                            label)
+                      " " [:small handler]]))
+             (when (pos? held)
+               [:p [:small (str "and " held " more")]])]))))
+
+(defn sequence-svg
+  "The sequence diagram as SVG hiccup over a [[slopp-server.ui.graph/sequence-layout]]:
+  a dashed lane per module under its name, an arrow per call labelled with
+  the callee, a loop for a call inside one module, and the rows that are not
+  a new call set as italic notes so they cannot be read as one."
+  [{:keys [lanes rows width height]}]
+  (into [:svg {:class "sequence" :role "img" :aria-label "call sequence"
+               :viewBox (str "0 0 " width " " height) :width width :height height}
+         [:defs [:marker {:id "seq-arrow" :viewBox "0 0 10 10" :refX 9 :refY 5
+                          :markerWidth 7 :markerHeight 7 :orient "auto-start-reverse"}
+                 [:path {:d "M0,0 L10,5 L0,10 z"}]]]]
+        (concat
+         (for [{:keys [module x]} lanes]
+           [:g {:class "seq-lane"}
+            [:line {:x1 x :y1 34 :x2 x :y2 (- height 8)}]
+            [:text {:x x :y 22 :text-anchor "middle"} module]])
+         (for [{:keys [y x1 x2 kind label via]} rows]
+           (case kind
+             :call [:g {:class (str "seq-msg via-" (or via "static"))}
+                    [:line {:x1 x1 :y1 y :x2 x2 :y2 y :marker-end "url(#seq-arrow)"}]
+                    [:text {:x (quot (+ x1 x2) 2) :y (- y 5) :text-anchor "middle"} label]]
+             :self [:g {:class "seq-msg seq-self"}
+                    [:path {:d (str "M" x1 "," (- y 8) " h26 v14 h-24")
+                            :marker-end "url(#seq-arrow)"}]
+                    [:text {:x (+ x1 32) :y (+ y 4)} label]]
+             [:g {:class (str "seq-note seq-" (name kind))}
+              [:text {:x (+ x1 8) :y (+ y 4)}
+               (case kind :back (str "↻ " label) :seen (str "↑ " label) label)]])))))
+
+(defn sequence-main
+  "What happens when a form runs — or the call path between two — twice over:
+  the diagram of lanes ([[sequence-svg]]) for the SHAPE, and an indented list
+  of steps for the WORDS, each callee linking to its own sequence so reading
+  on is one click. The document's note says what the trace is (static, the
+  order calls are written); where a bound cut it is said, never implied. A
+  path picker closes the page, starting from this form.
+
+  `picked` carries the picker's `:from`/`:to` on the flow screen. Total over a
+  document of the wrong shape, since the lens registry test hands it a form's."
+  ([doc] (sequence-main doc nil))
+  ([{:keys [root steps note truncated] :as doc} {:keys [from to]}]
+   (let [short (fn [q] (let [s (str q) i (str/last-index-of s "/")] (if i (subs s (inc i)) s)))
+         flow? (and (seq (str from)) (seq (str to)))]
+     [:div
+      (when (:form root)
+        [:nav [:a {:href "/store"} "code"]
+         " / " [:a {:href (str "/store/module/" (:module root))} (str (:module root))]
+         " / " (if (:form-id root)
+                 [:a {:href (str "/store/form/" (:form-id root))} (str (:form root))]
+                 (str (:form root)))])
+      [:h1 (cond flow?       (str (short from) " → " (short to))
+                 (:form root) (str "what happens when " (short (:form root)) " runs")
+                 :else        "trace a call path")]
+      (when note [:p [:small note]])
+      (when (seq steps) (sequence-svg (graph/sequence-layout doc)))
+      (when (seq steps)
+        (into [:ol {:class "seq-steps"}]
+              (for [{:keys [depth to to-form-id to-module via cycle? seen-at deeper? more]} steps]
+                [:li (apply str (repeat (dec (or depth 1)) "· "))
+                 (if more
+                   [:small (str "and " more " more calls")]
+                   [:span (if to-form-id
+                            [:a {:href (str "/store/form/" to-form-id "/sequence")} (short to)]
+                            (short to))
+                    " "
+                    [:small (str/join " · " (remove nil? [to-module
+                                                          (when (and via (not= "static" via)) via)
+                                                          (when cycle? "↻ already on this path")
+                                                          (when seen-at (str "↑ expanded at step " (inc seen-at)))
+                                                          (when deeper? "… calls further down")]))]])])))
+      (when (and (:form root) (empty? steps) (not flow?))
+        [:p [:small "it calls nothing else in this store"]])
+      (when (:depth truncated)
+        [:p [:small (str "cut at the depth bound — a step marked … has calls further down;"
+                         " open it to read on")]])
+      (when (:steps truncated)
+        [:p [:small "cut at the step bound — the trace is longer than this"]])
+      [:form {:action "/store/flow" :method "get" :class "flow-picker"}
+       [:p [:small "trace the call path between any two forms — ns/name or a form id at each end"]]
+       [:input {:type "text" :name "from" :value (str (or (not-empty (str from)) (:form root) ""))
+                :placeholder "from — ns/name" :aria-label "from"}]
+       [:input {:type "text" :name "to" :value (str (or to ""))
+                :placeholder "to — ns/name" :aria-label "to"}]
+       [:button {:type "submit"} "trace the path"]]])))
+
+(defn conformance-overlay
+  "The conformance lens as an OVERLAY on a [[module-graph]] picture —
+  `{:edge-classes {[from to] class} :extra [...] :node-classes {module class}}`.
+
+  Every drawn edge is classed by what the declaration says about it; an edge
+  the code does not use (declared and unused, or used only by tests) has no
+  routed geometry, so it is drawn straight between the two boxes it names;
+  each box carries its module's tier. Nothing here moves a box — an overlay
+  that reflowed the picture would make the two views impossible to compare,
+  which is the whole reason for having both."
+  [modules {:keys [edges]} {:keys [nodes] :as picture}]
+  (let [box   (into {} (map (juxt :module identity)) nodes)
+        drawn (into #{} (map (juxt :from :to)) (:edges picture))]
+    {:edge-classes (into {} (map (juxt (juxt :from :to) :class)) edges)
+     :extra        (vec (for [{:keys [from to class]} edges
+                              :let [a (box from) b (box to)]
+                              :when (and a b (not (drawn [from to])))]
+                          {:from from :to to :class class
+                           :x1 (+ (:x a) (quot (:w a) 2)) :y1 (+ (:y a) (:h a))
+                           :x2 (+ (:x b) (quot (:w b) 2)) :y2 (:y b)}))
+     :node-classes (into {} (map (juxt :module #(str "tier-" (:tier %)))) modules)}))
+
+(defn conformance-table
+  "The conformance lens's table twin: every module edge that is NOT both
+  declared and used, with what is wrong with it in words. A convergent edge is
+  the architecture working as declared, so it is not a finding and is not
+  listed; an empty table says the code is built as declared."
+  [edges]
+  (let [said  {"divergent" "used, never declared"
+               "absent"    "declared, never used"
+               "test-only" "declared, used only by tests"}
+        found (->> edges (remove #(= "convergent" (:class %))) (sort-by (juxt :class :from :to)))]
+    (if (empty? found)
+      [:p [:small "every module edge is declared and used — the code is built as declared"]]
+      (into [:table {:class "conformance-table"}
+             [:tr [:th "from"] [:th "to"] [:th "finding"]]]
+            (for [{:keys [from to class]} found]
+              [:tr {:class class}
+               [:td [:a {:href (str "/store/module/" from)} from]]
+               [:td [:a {:href (str "/store/module/" to)} to]]
+               [:td (said class)]])))))
+
+(defn dial-steps
+  "An overlay document's tint step, 0–4, for every row of `grain`
+  (`:modules` or `:namespaces`) — keyed by the row's name.
+
+  A SHARE is value over the row's own forms, so a step means the same thing on
+  any store: a quarter, a half, three quarters. A COUNT has no natural scale,
+  so it is RANKED among the non-zero rows of this document, and the darkest
+  step is the most in THIS store — which the dial's note says. Zero is always
+  step 0: nothing to see is not a rung."
+  [{:keys [kind] :as doc} grain]
+  (let [rows (get doc grain)
+        k    (if (= :modules grain) :module :ns)]
+    (if (= "share" kind)
+      (into {} (for [{:keys [value of] :as r} rows
+                     :let [s (if (pos? (or of 0)) (/ (double (or value 0)) of) 0.0)]]
+                 [(get r k) (cond (<= s 0) 0 (<= s 0.25) 1 (<= s 0.5) 2 (<= s 0.75) 3 :else 4)]))
+      (let [vals  (vec (sort (filter pos? (map #(or (:value %) 0) rows))))
+            n     (count vals)
+            below (fn [v] (count (take-while #(< % v) vals)))]
+        (into {} (for [r rows :let [v (or (:value r) 0)]]
+                   [(get r k) (if (pos? v)
+                                (max 1 (min 4 (long (Math/ceil (* 4 (/ (double (inc (below v))) n))))))
+                                0)]))))))
+
+(defn dial-bar
+  "The control for what the map is tinted BY — nothing, size, effects,
+  unwarranted, churn, risk — as plain links to `base?overlay=…`, so a tinted
+  map is a permalink. The dial in force is marked and is not a link to itself."
+  [base active]
+  (into [:nav {:class "dial-bar" :aria-label "tint the map by"} [:small "tint by: "]]
+        (interpose " · "
+                   (cons (if (nil? active) [:strong "nothing"] [:a {:href base} "nothing"])
+                         (for [[d label] [["size" "size"] ["effects" "effects"] ["warranty" "unwarranted"]
+                                          ["churn" "churn"] ["risk" "risk"]]]
+                           (if (= d active)
+                             [:strong label]
+                             [:a {:href (str base "?overlay=" d)} label]))))))
+
+(defn treemap-svg
+  "A [[slopp-server.ui.graph/treemap]] as SVG hiccup: each module an outlined
+  rectangle under its name, each namespace a cell inside it, linked to the
+  namespace and tinted by `steps` (namespace → 0–4) on the same ramp the map's
+  boxes use. A cell too small for its name draws none rather than a clipped one."
+  [{:keys [width height modules cells]} steps]
+  (let [r #(Math/round (double %))]
+    (into [:svg {:class "treemap" :role "img" :aria-label "the code by size"
+                 :viewBox (str "0 0 " width " " height)}]
+          (concat
+           (for [{:keys [key x y w h]} modules]
+             [:g {:class "tree-module"}
+              [:rect {:x (r x) :y (r y) :width (r w) :height (r h)}]
+              (when (> w 60) [:text {:x (r (+ x 5)) :y (r (+ y 13))} key])])
+           (for [{:keys [key module x y w h]} cells]
+             [:a {:href (str "/store/ns/" key)}
+              [:g {:class (str "module-node tree-cell gap-w" (get steps key 0)) :data-ns key}
+               [:rect {:x (r x) :y (r y) :width (r w) :height (r h)}]
+               (when (and (> w 48) (> h 16))
+                 [:text {:x (r (+ x 4)) :y (r (+ y 13))} (nsfilter/without-root module key)])]])))))
+
+(defn code-index-main
+  "The Code section's main pane: the architecture as a picture.
+
+  This pane used to be near-empty, on the reasoning that the namespace list
+  was already the left pane and repeating it would show one list twice. That
+  reasoning was right and the conclusion was wrong: what belongs here is not
+  a list but the SHAPE of the system, which a nav cannot show.
+
+  Cycles are called out ABOVE the diagram rather than left to be spotted in
+  it. On a tangled store 'these modules are mutually entangled' is the most
+  useful sentence on the screen, and geometry is a poor place to hide a
+  finding.
+
+  The link targets are computed HERE and handed down, because `modules` — the
+  wire shape — is what knows which namespaces a module holds, and the
+  `:picture` deliberately does not: it carries geometry and nothing else, so
+  that a different layout could be swapped in without teaching it about code.
+
+  Takes `GET /api/modules`'s shape PLUS a `:picture`, which does not come
+  over the wire: `client.app` derives it with `slopp-server.ui.graph/picture-of` on
+  arrival and adds it to the data. The API used to send placed boxes, and
+  that is the arrangement this project's existence argued against — a
+  producer that ships coordinates decides the diagram for every consumer it
+  will ever have.
+
+  **The `table` lens REPLACES the picture; the `gaps` lens tints it.** That is
+  the difference between an alternative view and an overlay, and it is why the
+  two are separate lenses rather than one busier screen: the picture is what
+  the table exists to be readable INSTEAD of, so leaving it above would make
+  the switch an addition rather than a choice."
+  [{:keys [modules picture cycles layers conformance overlay-doc sizes]} lens]
+  (let [nses    (reduce + 0 (map (comp count :namespaces) modules))
+        band    (filter :foundation modules)
+        ;; DESCEND. A box stands for a module, and since `/store/module/:m`
+          ;; exists that is where it goes — the rung between the diagram and a
+          ;; namespace. It used to jump PAST that page to a representative
+          ;; namespace, which was right before the page existed and left it
+          ;; almost unreachable after.
+          ;;
+          ;; Every module is a link, including one with no namespaces. The old
+          ;; rule declined those because no representative namespace existed; a
+          ;; module PAGE always does, so the box now goes somewhere real.
+        targets (into {} (map (juxt :module #(str "/store/module/" (:module %)))) modules)]
+    [:div
+     [:h1 "code"]
+     [:p (str (plural (count modules) "module") ", "
+              (plural nses "namespace")
+              (when (seq band)
+                ;; NOT `plural` — it pluralises a NOUN by adding an s, and "of them"
+                ;; is a phrase, so it rendered "5 of thems foundation" on the
+                ;; served page for as long as the sentence existed
+                (str " — " (count band) " of them foundation")))]
+     ;; Under the gaps lens the numbers go BESIDE the picture, because a colour
+     ;; is not a measurement — a reader can see that one box is darker and
+     ;; cannot see by how much or in what.
+     (when (= "gaps" lens)
+       (let [g   (keep :gaps modules)
+             sum (fn [k] (reduce + 0 (map #(or (k %) 0) g)))]
+         [:div {:class "gap-summary"}
+          [:h2 "where the record is thin"]
+          [:p (str (sum :no-doc) " of " (sum :forms)
+                   " forms carry no comment, and " (sum :no-why)
+                   " have no recorded ask — nothing says why they were written.")]
+          [:p [:small (str (sum :uncovered) " are uncovered. That one is measured "
+                           "against THIS SESSION's trace map, so a process that "
+                           "has run little reports much — which is why the tint "
+                           "above ignores it and reads only the two counts that "
+                           "mean the same thing in any process.")]]
+          (into [:ul {:class "gap-rows"}]
+                (for [m (->> modules
+                             (filter :gaps)
+                             (sort-by #(- (gap-step (:gaps %))))
+                             (take 8))
+                      :let [{:keys [forms no-doc no-why uncovered]} (:gaps m)]]
+                  [:li {:class (str "gap-w" (gap-step (:gaps m)))}
+                   [:a {:href (str "/store/module/" (:module m))} (:module m)]
+                   " " [:small (str no-doc " undocumented, " no-why " with no ask, "
+                                    uncovered " uncovered, of " forms)]]))]))
+     ;; the DIAL: what the map is tinted by, on the two views it tints
+     (when (contains? #{nil "treemap"} lens)
+       (dial-bar (if (= "treemap" lens) "/store/treemap" "/store") (:dial overlay-doc)))
+     (when (nil? lens)
+       [:p [:small "read it by what it carries: "]
+        [:a {:href "/store/data"} "the data dictionary"]
+        [:small " — the keys the code passes around, and who uses each"]])
+     (when overlay-doc
+       [:p {:class "dial-note"} [:small (str (:label overlay-doc) " — " (:note overlay-doc))]])
+     (when (= "conformance" lens)
+       (let [es (:edges conformance)
+             n  (fn [c] (count (filter #(= c (:class %)) es)))]
+         [:div {:class "conformance-summary"}
+          [:h2 "built as declared?"]
+          [:p (str (n "convergent") " declared and used · "
+                   (n "divergent") " used, never declared · "
+                   (n "absent") " declared, never used · "
+                   (n "test-only") " declared, used only by tests")]
+          [:p [:small (str "the module edges the store DECLARES against the calls the code"
+                           " makes. Red edges are calls no declaration permits; dashed ones"
+                           " are declarations nothing uses; each box carries its tier.")]]]))
+     (when (seq cycles)
+       [:div {:class "finding cycles"}
+        [:h2 (str (plural (count cycles) "dependency cycle"))]
+        (into [:ul]
+              (for [c cycles]
+                [:li (str/join " → " (concat c [(first c)]))]))])
+     (cond
+       (= "table" lens)
+       (module-table {:modules modules :layers layers})
+
+       (= "treemap" lens)
+       (treemap-svg (graph/treemap modules sizes {})
+                    (when overlay-doc (dial-steps overlay-doc :namespaces)))
+
+       :else
+       (module-graph (cond-> picture
+                       (and picture (= "conformance" lens))
+                       (assoc :overlay (conformance-overlay modules conformance picture)))
+                     targets
+                     (cond
+                       (= "gaps" lens) (into {} (map (juxt :module #(gap-step (:gaps %)))) modules)
+                       overlay-doc     (dial-steps overlay-doc :modules))))
+     (when (= "conformance" lens)
+       (conformance-table (:edges conformance)))]))
+
+(defn data-main
+  "The DATA DICTIONARY: the keys the code passes around, most widely used
+  first, as a table — each key linked to who uses it — and, when one is
+  chosen, a panel saying per module which forms NAME it and which DESTRUCTURE
+  it. A system's map keys are much of its architecture; this reads them
+  without opening a file. `picked` carries the screen's `:q` and `:bare`."
+  [{:keys [keys total shown key]} {:keys [q bare]}]
+  (let [said {"literal" "names it" "destructuring" "destructures it"}]
+    [:div
+     [:nav [:a {:href "/store"} "code"] " / data"]
+     [:h1 "data"]
+     [:p [:small (str "the keys the code passes around, ranked by how far each travels —"
+                      " modules, then namespaces, then forms. A form that destructures a"
+                      " key demonstrably reads it; one that only names it may write, read"
+                      " or look it up, and is not claimed to do any of them.")]]
+     (when key
+       (into [:section {:class "key-view"}
+              [:h2 (str ":" (:kw key))]]
+             (concat
+              (for [{:keys [module forms]} (:modules key)]
+                [:div
+                 [:h3 [:a {:href (str "/store/module/" module)} module]]
+                 (into [:ul]
+                       (for [{:keys [form form-id via]} forms]
+                         [:li [:a {:href (str "/store/form/" form-id)} form]
+                          " " [:small (str/join ", " (map #(get said % %) via))]]))])
+              [(when (pos? (or (:tests key) 0))
+                 [:p [:small (str "and " (plural (:tests key) "test namespace") " touch it")]])])))
+     [:form {:action "/store/data" :method "get" :class "store-search"}
+      [:input {:type "search" :name "q" :value (str (or q "")) :placeholder "filter keys…"
+               :aria-label "filter keys"}]
+      (when bare [:input {:type "hidden" :name "bare" :value "true"}])
+      [:button {:type "submit"} "filter"]]
+     [:p [:small (str (or shown 0) " of " (plural (or total 0) "key")
+                      (if bare " — plain keywords included" " — namespaced only") " · ")]
+      [:a {:href (if bare "/store/data" "/store/data?bare=true")}
+       (if bare "namespaced only" "include plain keywords")]]
+     (into [:table {:class "data-table"}
+            [:tr [:th "key"] [:th "modules"] [:th "namespaces"] [:th "forms"] [:th "destructured in"]]]
+           (for [{:keys [kw modules namespaces forms destructured]} keys]
+             [:tr
+              [:td [:a {:href (str "/store/data?key=" kw)} kw]]
+              [:td (str modules)] [:td (str namespaces)] [:td (str forms)] [:td (str destructured)]]))]))

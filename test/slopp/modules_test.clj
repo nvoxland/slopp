@@ -1995,8 +1995,9 @@
   ;; project breaks at THEIR require time, which is the whole reason the sibling
   ;; guards exist.
   ;;
-  ;; **`build.clj` is a file humans own, outside the store**, so this is a
-  ;; genuine cross-artifact claim with nothing else able to see both halves.
+  ;; **`build.clj` is a tracked FILE the store materializes beside this tier**,
+  ;; not a namespace, so this is a genuine cross-artifact claim with nothing
+  ;; else able to see both halves.
   ;;
   ;; The claim CHANGED shape, and the change is the fix. This used to assert
   ;; that build.clj's text contained the literal "slopp/lang.cljc" — which made
@@ -2213,8 +2214,8 @@
   ;; worth naming: an extension check written when one extension existed is a
   ;; proxy for "is this source", and it reports on the proxy.
   ;;
-  ;; Asserted textually because `build.clj` is a file humans own, outside the
-  ;; store, and its internals are private to it — the same shape as its
+  ;; Asserted textually because `build.clj` is a tracked file rather than a
+  ;; namespace, and its internals are private to it — the same shape as its
   ;; neighbour above, and for the same reason. The BEHAVIOURAL proof is the
   ;; webapp family's own `framework-deps.edn` entry, which cannot exist until
   ;; the shim does.
@@ -2257,8 +2258,8 @@
   ;; states itself as if it had enumerated them. `clojure.*` and `slopp.*` were
   ;; not a list of exemptions, they were the exemptions that existed.
   ;;
-  ;; Asserted textually because `build.clj` is a file humans own, outside the
-  ;; store — same shape as its two neighbours above, same reason. The
+  ;; Asserted textually because `build.clj` is a tracked file rather than a
+  ;; namespace — same shape as its two neighbours above, same reason. The
   ;; behavioural proof is the webapp family's own `framework-deps.edn`.
   (let [f (clojure.java.io/file "build.clj")]
     (is (.exists f) "build.clj is the file this test is about")

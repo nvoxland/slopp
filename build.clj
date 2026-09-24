@@ -13,10 +13,13 @@
     java -jar slopp.jar <dir> --live
     java -jar slopp.jar --main slopp.sync/-main push <dir> <url>
 
-  Local flow (fileless tree): materialize the store (`slopp build .` — no
-  server needed — or the `build` MCP tool, into target/jar-src) then
-  `clojure -T:build uber`. CI flow (checkout of the published repo):
-  `clojure -T:build uber :src src`."
+  Run by `slopp build . --jar`: the verb materializes the store into a tree
+  (this file rides along — it is tracked on the store's files manifest, and
+  there is no copy on main), then runs `build/uber {:src \"src\"}` THERE with
+  tools.build supplied inline (-Sdeps), the same call the release lane makes
+  on a checkout of the projection branch. No `:build` alias exists anywhere,
+  and the jar this writes under the tree's target/ is copied up to the
+  project's target/ by the verb."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -233,8 +236,11 @@
                     "  (apply (requiring-resolve '" slopp-main ") args))\n"))))
 
 (defn uber
-  "Build target/slopp.jar. :src = the source tree to bundle (default
-  target/jar-src/src, the local materialization; pass \"src\" on a checkout).
+  "Build target/slopp.jar. :src = the source tree to bundle — \"src\" when run
+  where this file lives (a materialized tree, a projection checkout), which
+  is how `slopp build . --jar` and the release lane call it; the default
+  target/jar-src/src is the old repo-root spelling, kept with its staleness
+  guard for whoever still runs it by hand from a project directory.
   Entry point comes from the tracked META-INF/MANIFEST.MF next to :src's
   parent; without one the jar falls back to clojure.main (-m slopp.boot).
 
@@ -253,9 +259,9 @@
     (let [srcd (io/file src)]
       ;; MISSING is unambiguous — refuse.
       (when-not (.exists srcd)
-        (throw (ex-info (str "no materialized source at " src " — materialize the"
-                             " store first: `slopp build .` (no server needed),"
-                             " or the `build` MCP tool into "
+        (throw (ex-info (str "no materialized source at " src " — `slopp build . --jar`"
+                             " materializes the store and runs this over it; by hand,"
+                             " `slopp build . --tree` writes "
                              (.getAbsolutePath (io/file "target/jar-src")))
                         {:src src})))
       ;; Compare the newest FILE under src — a directory's mtime does NOT move
@@ -313,9 +319,7 @@
                        "  .slopp/store.db changed at " (fmt (.lastModified db))
                        ", after it\n\n"
                        "Materialize, then jar — both steps, in this order:\n"
-                       "  slopp build .   (no server needed; or the build MCP tool, dir "
-                       (.getAbsolutePath (io/file "target/jar-src")) ")\n"
-                       "  clojure -T:build uber\n\n"
+                       "  slopp build . --jar   (materializes fresh, then runs this over it)\n\n"
                        "Or :stale true to jar THIS materialization deliberately"
                        " — reproducing an old artifact, or bisecting. A refusal"
                        " with no named way past it gets worked around rather"

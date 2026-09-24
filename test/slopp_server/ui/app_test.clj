@@ -511,9 +511,11 @@
                 module renders — demo.core is :pure and carries no mark, so
                 every assertion above is blind to this instance"
         (cljnx/visit! s (at "/store/ns/demo.web"))
-        (is (= "filter namespaces…\ndemo\nweb ⚡ 1 ns\nweb ⚡\ncore 2 ns\nutil 1 ns foundation\norders 🔁 1 ns\nbilling 🔁 1 ns"
+        (is (= "filter namespaces…\ndemo\nweb ⚡ 1 ns\nweb ⚡\nbilling 🔁 1 ns\ncore 2 ns\norders 🔁 1 ns\nutil 1 ns foundation"
                (cljnx/text s "nav/local" {:detail :prose}))
-            "the whole rail, because at eight short lines the pane IS the unit.
+            "the whole rail, in ARCHITECTURE order — web on top, the entangled
+             layer by name, the foundation band last — because at eight short
+             lines the pane IS the unit.
              It carries the band module, which the rail was already marking with
              nothing reading it — and now BOTH tier marks: 🔁 is `internal`, and
              it had never appeared on a driven screen at all, because until the
@@ -803,12 +805,27 @@
   ;; branch — `views-test` pins that combination on the producer's output.
   (let [s (cljnx/open! (cljnx/driver-for (page/page)))]
     (cljnx/visit! s (at "/store"))
-    (is (= (str "diagram table gaps\n"
+    (is (= (str "diagram table gaps conformance treemap\n"
                 "code\n"
                 "5 modules, 6 namespaces — 1 of them foundation\n"
+                ;; the DIAL, above the finding: what the map can be tinted by
+                "tint by: nothing · size · effects · unwarranted · churn · risk\n"
+                ;; the door to the DATA DICTIONARY, on the default view
+                "read it by what it carries: the data dictionary — the keys the code passes around, and who uses each\n"
                 "1 dependency cycle\n"
                 "demo.billing → demo.orders → demo.billing\n"
-                "svg module-graph")
+                "svg module-graph\n"
+                ;; the WAYS IN, under the picture: the doors panel, driven by
+                ;; the :entries fixture — one door with a form, one without
+                "ways in\n"
+                "every door the code declares — each opens what happens when it runs, in the order the calls are written\n"
+                "main · 1\n"
+                "the process entry — what runs when the app starts\n"
+                "app.main demo.web/-main\n"
+                "http · 2\n"
+                "HTTP routes — each request enters the code here\n"
+                "GET /quote demo.web/quote-handler\n"
+                "POST /orders demo.web/order-handler")
            (cljnx/text s "main" {:detail :prose})))
 
     ;; The diagram draws BOTH directions of the knot — three module-edges here
@@ -1145,7 +1162,10 @@
     (testing "the switcher reaches the table and back — a lens with no link is
               a url you have to already know"
       (cljnx/visit! s (at "/store"))
-      (is (not (re-find #"demo\.(core|util|web)" (cljnx/text s "main")))
+      ;; everything ABOVE the ways-in panel, which names the forms each door
+      ;; opens on — the picture is the claim here, not the doors under it
+      (is (not (re-find #"demo\.(core|util|web)"
+                        (first (str/split (cljnx/text s "main") #"ways in"))))
           "the PICTURE names no module: the contrast with the table, measured on
            the page rather than claimed in a docstring. It used to exclude
            `demo.` outright and could not survive a finding — the two names that
@@ -1175,7 +1195,7 @@
       ;; reader inferring entanglement from the stacking would convict
       ;; `demo.core` — `:cycles` is the only thing that discriminates, which is
       ;; why it rides alongside instead of marking the layer row.
-      (is (= (str "diagram table gaps\n"
+      (is (= (str "diagram table gaps conformance treemap\n"
                   "code\n"
                   "5 modules, 6 namespaces — 1 of them foundation\n"
                   "1 dependency cycle\n"
@@ -1383,8 +1403,9 @@
       ;; `/api/projects` rides along because the nav's project switcher asks for
       ;; it on the first screen that draws a shell. It was a declared session
       ;; load started at boot; it is an ordinary `ask!` now, made once.
-      (is (= ["/api/projects/demo/modules" "/api/projects"]
-             (go (fresh) "/p/demo/store"))))
+      (is (= ["/api/projects/demo/modules" "/api/projects/demo/entries" "/api/projects"]
+             (go (fresh) "/p/demo/store"))
+          "the Code landing asks for its modules and, separately, its ways in"))
 
     (testing "including path parameters and a query, which is where a prefix
               bug would otherwise hide behind a url that looks plausible"
@@ -1402,7 +1423,8 @@
       ;; tenant is invisible to the cache. See `views/at-project`.
       (let [app (fresh)]
         (go app "/p/demo/store")
-        (is (= ["/api/projects/other/modules"] (go app "/p/other/store")))))
+        (is (= ["/api/projects/other/modules" "/api/projects/other/entries"]
+               (go app "/p/other/store")))))
 
     (testing "and a lens address asks for its subject's url — three addresses,
               ONE load, which is the fact that made them one subject"
@@ -1829,3 +1851,104 @@
     (is (re-find #"only" (cljnx/text s "nav/switcher")) (cljnx/text s))
     (is (= "/p/only" (cljnx/url s))
         "the address bar shows the project, not the landing that sent the reader there")))
+
+(deftest a-namespace-reads-as-what-its-tests-say
+  ;; The behaviour list on all three Code screens, driven: the namespace rail,
+  ;; the module page, the form rail. Each is where a reader decides whether to
+  ;; open code at all, so each has to say what the code does.
+  (let [s (cljnx/open! (cljnx/driver-for (page/page)))]
+    (cljnx/visit! s (at "/store/ns/demo.core"))
+    (is (re-find #"rate rounds a boundary weight up"
+                 (cljnx/text s "nav/detail" {:detail :prose})))
+    (cljnx/visit! s (at "/store/module/demo.core"))
+    (is (re-find #"rate rounds a boundary weight up"
+                 (cljnx/text s "main" {:detail :prose})))
+    (cljnx/visit! s (at "/store/form/f1"))
+    (is (re-find #"rate rounds a boundary weight up"
+                 (cljnx/text s "nav/detail" {:detail :prose})))))
+
+(deftest a-namespace-and-a-module-tell-their-story
+  ;; The story lens, driven: one click from a namespace or a module, and a row
+  ;; opens the change it names.
+  (let [s (cljnx/open! (cljnx/driver-for (page/page)))]
+    (testing "one click from a namespace"
+      (cljnx/visit! s (at "/store/ns/demo.core"))
+      (cljnx/click! s "story")
+      (is (= "/store/ns/demo.core/story" (where s)))
+      (let [main (cljnx/text s "main" {:detail :prose})]
+        (is (re-find #"rate needs a zone" main))
+        (is (re-find #"in flight" main))))
+    (testing "and from a module"
+      (cljnx/visit! s (at "/store/module/demo.core"))
+      (cljnx/click! s "story")
+      (is (= "/store/module/demo.core/story" (where s))))
+    (testing "a row opens the change it names"
+      (cljnx/visit! s (at "/store/ns/demo.core/story"))
+      (cljnx/click! s (at "/change/d3300..d3457"))
+      (is (= "/change/d3300..d3457" (where s))))))
+
+(deftest what-happens-when-a-door-is-opened
+  ;; The behaviour axis, driven: the Code landing lists the ways in, a door
+  ;; opens what happens when it runs, a form's sequence is one lens away, and
+  ;; the picker traces the path between two names.
+  (let [s (cljnx/open! (cljnx/driver-for (page/page)))]
+    (testing "the Code landing lists the ways in, and a door opens its sequence"
+      (cljnx/visit! s (at "/store"))
+      (is (re-find #"ways in" (cljnx/text s "main" {:detail :prose})))
+      (cljnx/click! s (at "/store/form/f21/sequence"))
+      (is (= "/store/form/f21/sequence" (where s)))
+      (is (re-find #"band-for" (cljnx/text s "main" {:detail :prose}))))
+    (testing "a form's sequence is one lens away"
+      (cljnx/visit! s (at "/store/form/f1"))
+      (cljnx/click! s "sequence")
+      (is (= "/store/form/f1/sequence" (where s))))
+    (testing "the picker traces the call path between two names"
+      (cljnx/visit! s (at "/store/flow?from=demo.web/quote-handler&to=demo.util/round-up"))
+      (let [main (cljnx/text s "main" {:detail :prose})]
+        (is (re-find #"round-up" main))
+        (is (re-find #"shortest call path" main))))))
+
+(deftest the-conformance-lens-shows-where-the-code-departs-from-its-declaration
+  ;; Driven: from the Code landing, one click shows the declared architecture
+  ;; against the actual one — the edges no declaration permits and the
+  ;; declarations nothing uses, on the same picture and in a table beneath.
+  (let [s (cljnx/open! (cljnx/driver-for (page/page)))]
+    (cljnx/visit! s (at "/store"))
+    (cljnx/click! s "conformance")
+    (is (= "/store/conformance" (where s)))
+    (let [main (cljnx/text s "main" {:detail :prose})]
+      (is (re-find #"built as declared\?" main))
+      (is (re-find #"used, never declared" main))
+      (is (re-find #"demo\.billing" main)))
+    (is (re-find #"module-edge divergent" (cljnx/text s "main")))))
+
+(deftest the-map-can-be-tinted-by-a-dial-and-read-as-a-treemap
+  ;; Driven: a dial tints the SAME map and says what its tint means; the
+  ;; treemap lens shows the code by size, tinted the same way.
+  (let [s (cljnx/open! (cljnx/driver-for (page/page)))]
+    (testing "a dial tints the map and says what the tint means"
+      (cljnx/visit! s (at "/store"))
+      (cljnx/click! s "effects")
+      (is (re-find #"overlay=effects" (str (where s))))
+      (is (re-find #"imperative shell" (cljnx/text s "main" {:detail :prose})))
+      (is (re-find #"gap-w[1-4]" (cljnx/text s "main"))))
+    (testing "the treemap lens draws the code by size"
+      (cljnx/visit! s (at "/store"))
+      (cljnx/click! s "treemap")
+      (is (= "/store/treemap" (where s)))
+      (is (re-find #"treemap" (cljnx/text s "main"))))))
+
+(deftest the-data-screen-lists-keys-and-a-key-descends-to-its-users
+  ;; Driven: from the Code landing to the dictionary, from a key to its users,
+  ;; from a user to its form.
+  (let [s (cljnx/open! (cljnx/driver-for (page/page)))]
+    (cljnx/visit! s (at "/store"))
+    (cljnx/click! s (at "/store/data"))
+    (is (= "/store/data" (where s)))
+    (is (re-find #"order/total" (cljnx/text s "main" {:detail :prose})))
+    (cljnx/click! s (at "/store/data?key=order/total"))
+    (is (re-find #"destructures it" (cljnx/text s "main" {:detail :prose})))
+    (cljnx/click! s (at "/store/form/f1"))
+    (is (= "/store/form/f1" (where s)))
+    (is (re-find #"order/total" (cljnx/text s "main" {:detail :prose}))
+        "and the form page names the keys it touches")))

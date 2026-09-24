@@ -62,7 +62,7 @@
   that a new key on the read must be named here too; the contract check is
   what makes that a red test rather than a silently missing field."
   [req]
-  (if-let [{:keys [ns tier forms tested-by gaps]} (:outline (:http/reads req))]
+  (if-let [{:keys [ns tier forms tested-by tests gaps]} (:outline (:http/reads req))]
     {:status 200
      :body {:ns (str ns)
             :tier tier
@@ -78,6 +78,8 @@
                             :effectful? effectful? :exported? exported?})
                          forms)
             :tested-by (vec tested-by)
+            ;; already strings and vectors — the model makes them JSON-shaped
+            :tests (vec tests)
             :gaps gaps}}
     {:status 404 :body {:error "no such namespace"}}))
 
@@ -414,3 +416,78 @@
   reaching this store. Rendering it as zero would state that the work was free."
   [req]
   {:status 200 :body (:cost (:http/reads req))})
+
+(defn ^{:http/method :get :rest/path "/api/projects/:slug/story/:grain/:subject" :http/auth :public
+        :rest/request contracts/story-request
+        :rest/response contracts/story
+        :http/reads {:story [:ui/story []]}
+        :http/resolve {:session [:project/reader [:path-params :slug]]}}
+  story
+  "GET /api/projects/:slug/story/:grain/:subject — a namespace's or a module's
+  commit points newest first, each with the asks that shaped it. A grain that
+  is neither is a 404."
+  [req]
+  (if-let [v (:story (:http/reads req))]
+    {:status 200 :body v}
+    {:status 404 :body {:error "a story is told of an ns or a module"}}))
+
+(defn ^{:http/method :get :rest/path "/api/projects/:slug/entries" :http/auth :public
+        :rest/request contracts/entries-request
+        :rest/response contracts/entries
+        :http/reads {:entries [:ui/entries []]}
+        :http/resolve {:session [:project/reader [:path-params :slug]]}}
+  entries
+  "GET /api/projects/:slug/entries — every door into the store, by kind, each
+  naming the form it opens on."
+  [req]
+  {:status 200 :body (:entries (:http/reads req))})
+
+(defn ^{:http/method :get :rest/path "/api/projects/:slug/form/:id/sequence" :http/auth :public
+        :rest/request contracts/sequence-request
+        :rest/response contracts/call-sequence
+        :http/reads {:sequence [:ui/sequence []]}
+        :http/resolve {:session [:project/reader [:path-params :slug]]}}
+  form-sequence
+  "GET /api/projects/:slug/form/:id/sequence — what happens when one form runs,
+  as the code writes it. An unknown form is a 404."
+  [req]
+  (if-let [v (:sequence (:http/reads req))]
+    {:status 200 :body v}
+    {:status 404 :body {:error "no such form"}}))
+
+(defn ^{:http/method :get :rest/path "/api/projects/:slug/flow" :http/auth :public
+        :rest/request contracts/flow-request
+        :rest/response contracts/call-sequence
+        :http/reads {:flow [:ui/flow []]}
+        :http/resolve {:session [:project/reader [:path-params :slug]]}}
+  flow
+  "GET /api/projects/:slug/flow?from=&to= — the call path between two forms.
+  No path is a 200 with no steps and a note; an end that names no form is a 404."
+  [req]
+  (if-let [v (:flow (:http/reads req))]
+    {:status 200 :body v}
+    {:status 404 :body {:error "from and to must each name a form — an id or ns/name"}}))
+
+(defn ^{:http/method :get :rest/path "/api/projects/:slug/overlay/:dial" :http/auth :public
+        :rest/request contracts/overlay-request
+        :rest/response contracts/overlay
+        :http/reads {:overlay [:ui/overlay []]}
+        :http/resolve {:session [:project/reader [:path-params :slug]]}}
+  overlay
+  "GET /api/projects/:slug/overlay/:dial — what one dial tints the Code map
+  by. An unknown dial is a 404."
+  [req]
+  (if-let [v (:overlay (:http/reads req))]
+    {:status 200 :body v}
+    {:status 404 :body {:error "no such dial — size, effects, warranty, churn or risk"}}))
+
+(defn ^{:http/method :get :rest/path "/api/projects/:slug/data" :http/auth :public
+        :rest/request contracts/data-request
+        :rest/response contracts/data-dictionary
+        :http/reads {:data [:browse/data []]}
+        :http/resolve {:session [:project/reader [:path-params :slug]]}}
+  data
+  "GET /api/projects/:slug/data — the data dictionary, and with ?key= one
+  key's users."
+  [req]
+  {:status 200 :body (:data (:http/reads req))})

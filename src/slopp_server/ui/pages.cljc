@@ -105,7 +105,7 @@
         base   (when (seq (str slug)) (str "/p/" slug))
         here   (or (when base (webapp/strip-base base (or path "/")))
                    path "/")
-        code?  (#{:code :module :ns :source :search} subject)
+        code?  (#{:code :module :ns :source :search :flow :data} subject)
         api?   (#{:rest-paths :rest-path} subject)
         pages? (#{:http-paths :http-path} subject)
         ;; the Webapp section's rail, on the same terms as the other two —
@@ -118,9 +118,12 @@
                  ;; four states and a freshness token that the plain key it
                  ;; first lived in — written by a `:cljs` fetch, guarded by
                  ;; `(nil? …)` — did not have.
-                 code? (views/module-nav
-                        (or (:modules (:value (webapp/ask! page (views/at-project params api/modules) {}))) [])
-                        (:ns params) filter-text)
+                 code? (let [idx (:value (webapp/ask! page (views/at-project params api/modules) {}))]
+                         ;; ARCHITECTURE order: the layering rides the same
+                         ;; answer, so the rail stacks modules as the system is
+                         ;; built — top layer first, foundation last
+                         (views/module-nav (views/by-layer (or (:modules idx) []) (:layers idx))
+                                           (:ns params) filter-text))
                  ;; from the page's own answer, not from a cache: the document
                  ;; IS this section's data on BOTH its screens, so unlike the
                  ;; module index there is nothing here that survives a
@@ -145,8 +148,12 @@
                    ;; what you SET while reading a namespace, where the form
                    ;; rail is what you consult. It grows; the listing's display
                    ;; toggles are what is in it today.
-                   :form (views/form-rail value)
-                   :ns   (views/ns-rail value show)
+                   ;; only over a FORM's answer — the sequence lens shares
+                   ;; the subject and answers a different document
+                   :form (when (contains? value :callers) (views/form-rail value))
+                   ;; only over an OUTLINE: the story lens shares the
+                   ;; subject and answers a different document
+                   :ns   (when (contains? value :forms) (views/ns-rail value show))
                    nil))]
     (if (= :projects subject)
       ;; the LANDING is in no SECTION and belongs to no project. `project-picker`
@@ -274,27 +281,6 @@
   (let [answer (webapp/ask! page (views/at-project params api/timeline) {})]
     (chrome page :timeline answer
             (answered answer #(views/timeline-main (:value answer))))))
-
-(defn ^{:webapp/path "/p/:slug/store" :unused-ok "runtime-resolved entry — see landing-page"} code-page
-  "The Code index — the module diagram and the store's shape.
-
-  **The diagram is laid out HERE rather than in the view.** It was a route
-  row's `:derive`, applied by the framework inside the freshness guard so an
-  answer nobody was waiting on was never laid out. `ask!` takes no `:derive`,
-  so the page applies it — which does mean laying out per render rather than
-  per answer. See [[slopp-server.ui.views/with-store-picture]], including what the
-  split already cost.
-
-  `(:lens state)` is a TEST seam: the lens pages are routes of their own and
-  nothing in the app writes `:lens`, but
-  `every-declared-lens-actually-renders-something-different` renders this page
-  under each lens to prove the dedicated page and the table agree."
-  [{:keys [params state] :as page}]
-  (let [answer (webapp/ask! page (views/at-project params api/modules) {})]
-    (chrome page :code answer
-            (answered answer #(views/code-index-main
-                               (some-> (:value answer) views/with-store-picture)
-                               (:lens state))))))
 
 (defn ^{:webapp/path "/p/:slug/store/table" :unused-ok "runtime-resolved entry — see landing-page"} code-table-page
   "The Code index at `/store/table` — the same data as rows.
@@ -426,58 +412,6 @@
                             (select-keys params [:range]))]
     (chrome page :change answer
             (answered answer #(views/change-main (:value answer))))))
-
-(defn ^{:webapp/path "/p/:slug/store/ns/:ns" :unused-ok "runtime-resolved entry — see landing-page"} ns-page
-  "One namespace's outline — its forms, in source order.
-
-  `:show` is the doc-expansion state, which is SESSION-scoped and survives
-  navigation deliberately: it is what you SET while reading, not part of the
-  address. It is absent from `:webapp/address-keys` for that reason."
-  [{:keys [params state] :as page}]
-  (let [answer (webapp/ask! page (views/at-project params api/ns-outline)
-                            (select-keys params [:ns]))]
-    (chrome page :ns answer
-            (answered answer #(views/ns-outline-main (:value answer) (:show state))))))
-
-(defn ^{:webapp/path "/p/:slug/store/module/:module" :unused-ok "runtime-resolved entry — see landing-page"} module-page
-  "One module — its internal diagram, its boundary, what it depends on.
-
-  **The one page that DECIDES rather than unpacks, and Move A is what makes it
-  honest.** When `/api/module/:m` has not answered, the screen is assembled
-  from the module INDEX instead — the ordinary path is the module endpoint, and
-  this is resilience for when it could not be reached. Under the old model that
-  fallback read `(:modules state)`, a session load somebody else had declared
-  and started; the page depended on a fetch it did not ask for and could not
-  see. Here it asks for both, and `ask!` being start-if-absent means the index
-  is the same single load [[chrome]] is already using for the rail.
-
-  This is the case that answers slopp's question about asking from inside a
-  render: it is the only page in this app that wanted two loads, and under a
-  declared one-request-per-row it had to reach around the load machinery to get
-  the second."
-  [{:keys [params] :as page}]
-  (let [answer (webapp/ask! page (views/at-project params api/module)
-                            {:m (:module params)})
-        index  (webapp/ask! page (views/at-project params api/modules) {})]
-    (chrome page :module answer
-            (answered answer
-                      #(views/module-main
-                        (or (some-> (:value answer) views/with-module-picture)
-                            (views/module-from-index
-                             {:modules (or (:modules (:value index)) [])}
-                             (:module params))))))))
-
-(defn ^{:webapp/path "/p/:slug/store/form/:id" :unused-ok "runtime-resolved entry — see landing-page"} form-page
-  "One form — what it is, what it calls, and its source behind a lens.
-
-  `:depth 2` is this app's choice rather than the endpoint's default: the page
-  draws the form's immediate neighbourhood, and one hop would not fill it.
-  `(:lens state)` is the test seam [[code-page]] describes."
-  [{:keys [params state] :as page}]
-  (let [answer (webapp/ask! page (views/at-project params api/form)
-                            {:id (:id params) :depth 2})]
-    (chrome page :form answer
-            (answered answer #(views/form-main (:value answer) (:lens state) nil)))))
 
 (defn ^{:webapp/path "/p/:slug/store/form/:id/through/:through" :unused-ok "runtime-resolved entry — see landing-page"} form-through-page
   "One form with a second form beside it — the same page as [[form-page]], seen
@@ -633,3 +567,195 @@
                                                     :timeline   (:value timeline)
                                                     :cost       (:value cost)
                                                     :effort     (:value effort)})))))
+
+(defn story-screen
+  "The STORY lens for one subject — `grain` \"ns\" or \"module\", `id` its name —
+  under `subject`'s chrome. Shared by the two lens pages and by the bare pages'
+  `(:lens state)` seam, so the lens renders one way wherever it is reached."
+  [{:keys [params] :as page} subject grain id]
+  (let [answer (webapp/ask! page (views/at-project params api/story)
+                            {:grain grain :subject id})]
+    (chrome page subject answer
+            (answered answer #(views/story-main (:value answer))))))
+
+(defn ^{:webapp/path "/p/:slug/store/ns/:ns" :unused-ok "runtime-resolved entry — see landing-page"} ns-page
+  "One namespace's outline — its forms, in source order.
+
+  `:show` is the doc-expansion state, which is SESSION-scoped and survives
+  navigation deliberately: it is what you SET while reading, not part of the
+  address. It is absent from `:webapp/address-keys` for that reason."
+  [{:keys [params state] :as page}]
+  ;; `(:lens state)` is the test seam [[code-page]] describes
+  (if (= "story" (:lens state))
+    (story-screen page :ns "ns" (:ns params))
+    (let [answer (webapp/ask! page (views/at-project params api/ns-outline)
+                              (select-keys params [:ns]))]
+      (chrome page :ns answer
+              (answered answer #(views/ns-outline-main (:value answer) (:show state)))))))
+
+(defn ^{:webapp/path "/p/:slug/store/module/:module" :unused-ok "runtime-resolved entry — see landing-page"} module-page
+  "One module — its internal diagram, its boundary, what it depends on.
+
+  **The one page that DECIDES rather than unpacks, and Move A is what makes it
+  honest.** When `/api/module/:m` has not answered, the screen is assembled
+  from the module INDEX instead — the ordinary path is the module endpoint, and
+  this is resilience for when it could not be reached. Under the old model that
+  fallback read `(:modules state)`, a session load somebody else had declared
+  and started; the page depended on a fetch it did not ask for and could not
+  see. Here it asks for both, and `ask!` being start-if-absent means the index
+  is the same single load [[chrome]] is already using for the rail.
+
+  This is the case that answers slopp's question about asking from inside a
+  render: it is the only page in this app that wanted two loads, and under a
+  declared one-request-per-row it had to reach around the load machinery to get
+  the second."
+  [{:keys [params state] :as page}]
+  ;; `(:lens state)` is the test seam [[code-page]] describes: the story lens
+  ;; is a page of its own, and this proves the two render alike
+  (if (= "story" (:lens state))
+    (story-screen page :module "module" (:module params))
+    (let [answer (webapp/ask! page (views/at-project params api/module)
+                              {:m (:module params)})
+          index  (webapp/ask! page (views/at-project params api/modules) {})]
+      (chrome page :module answer
+              (answered answer
+                        #(views/module-main
+                          (or (some-> (:value answer) views/with-module-picture)
+                              (views/module-from-index
+                               {:modules (or (:modules (:value index)) [])}
+                               (:module params)))))))))
+
+(defn ^{:webapp/path "/p/:slug/store/ns/:ns/story" :unused-ok "runtime-resolved entry — see landing-page"} ns-story-page
+  "One namespace's STORY at `/store/ns/:ns/story` — the commit points that
+  touched it, with the asks that shaped them."
+  [{:keys [params] :as page}]
+  (story-screen page :ns "ns" (:ns params)))
+
+(defn ^{:webapp/path "/p/:slug/store/module/:module/story" :unused-ok "runtime-resolved entry — see landing-page"} module-story-page
+  "One module's STORY at `/store/module/:module/story` — the commit points
+  that touched its production namespaces, with the asks that shaped them."
+  [{:keys [params] :as page}]
+  (story-screen page :module "module" (:module params)))
+
+(defn sequence-screen
+  "The SEQUENCE lens for form `id` — what happens when it runs — under the form's
+  chrome. Shared by the lens page and the bare form page's `(:lens state)` seam,
+  so the lens renders one way wherever it is reached."
+  [{:keys [params] :as page} id]
+  (let [answer (webapp/ask! page (views/at-project params api/form-sequence) {:id id})]
+    (chrome page :form answer
+            (answered answer #(views/sequence-main (:value answer))))))
+
+(defn ^{:webapp/path "/p/:slug/store/form/:id" :unused-ok "runtime-resolved entry — see landing-page"} form-page
+  "One form — what it is, what it calls, and its source behind a lens.
+
+  `:depth 2` is this app's choice rather than the endpoint's default: the page
+  draws the form's immediate neighbourhood, and one hop would not fill it.
+  `(:lens state)` is the test seam [[code-page]] describes."
+  [{:keys [params state] :as page}]
+  ;; the sequence lens through the registry seam, like `source`
+  (if (= "sequence" (:lens state))
+    (sequence-screen page (:id params))
+  (let [answer (webapp/ask! page (views/at-project params api/form)
+                            {:id (:id params) :depth 2})]
+    (chrome page :form answer
+            (answered answer #(views/form-main (:value answer) (:lens state) nil))))))
+
+(defn ^{:webapp/path "/p/:slug/store/form/:id/sequence" :unused-ok "runtime-resolved entry — see landing-page"} form-sequence-page
+  "One form's SEQUENCE at `/store/form/:id/sequence` — what happens when it
+  runs, as the code writes it: a lane per module, a step per call."
+  [{:keys [params] :as page}]
+  (sequence-screen page (:id params)))
+
+(defn ^{:webapp/path "/p/:slug/store/flow" :unused-ok "runtime-resolved entry — see landing-page"} flow-page
+  "The PATH PICKER at `/store/flow?from=&to=` — the call path between any two
+  forms, drawn as a sequence, with the picker beneath it. With no ends picked
+  the answer is an empty trace saying what to do."
+  [{:keys [params] :as page}]
+  ;; it ALWAYS asks: with no ends the endpoint answers an empty trace and a
+  ;; note, so there is one path through this page rather than two
+  (let [{:keys [from to]} params
+        picked            {:from from :to to}
+        answer            (webapp/ask! page (views/at-project params api/flow)
+                                       {:from (str (or from "")) :to (str (or to ""))})]
+    (chrome page :flow answer
+            (answered answer #(views/sequence-main (:value answer) picked)))))
+
+(defn ^{:webapp/path "/p/:slug/store/conformance" :unused-ok "runtime-resolved entry — see landing-page"} code-conformance-page
+  "The Code index at `/store/conformance` — the same diagram with every module
+  edge classed against the declared architecture, and the findings as a table
+  beneath. A lens BINDING; see [[code-table-page]]."
+  [{:keys [params] :as page}]
+  (let [answer (webapp/ask! page (views/at-project params api/modules) {})]
+    (chrome page :code answer
+            (answered answer #(views/code-index-main
+                               (some-> (:value answer) views/with-store-picture)
+                               "conformance")))))
+
+(defn code-screen
+  "The Code index under `lens` — the one body the landing and the lens pages
+  share, so a lens renders one way wherever it is reached.
+
+  Each view asks only for what it draws: the WAYS IN on the default view
+  alone (a lens is another way of seeing the modules, and the doors are not
+  about the modules); namespace sizes for the treemap; and a dial's overlay
+  when one is chosen — `?overlay=` on the default view, `effects` unless
+  chosen on the treemap, which is tinted by something always. Each is its own
+  ask, so a slow one never holds the map back."
+  [{:keys [params] :as page} lens]
+  (let [answer (webapp/ask! page (views/at-project params api/modules) {})
+        doors  (when-not lens (webapp/ask! page (views/at-project params api/entries) {}))
+        sizes  (when (= "treemap" lens) (webapp/ask! page (views/at-project params api/namespaces) {}))
+        dial   (not-empty (str (:overlay params)))
+        over   (cond
+                 (= "treemap" lens)   (webapp/ask! page (views/at-project params api/overlay)
+                                                   {:dial (or dial "effects")})
+                 (and dial (nil? lens)) (webapp/ask! page (views/at-project params api/overlay)
+                                                     {:dial dial}))
+        ready  (fn [a] (when (= :ready (:status a)) (:value a)))]
+    (chrome page :code answer
+            (answered answer #(vector :div
+                                      (views/code-index-main
+                                       (cond-> (or (some-> (:value answer) views/with-store-picture) {})
+                                         (ready sizes) (assoc :sizes (ready sizes))
+                                         (ready over)  (assoc :overlay-doc (ready over)))
+                                       lens)
+                                      (when (ready doors)
+                                        (views/doors-panel (ready doors))))))))
+
+(defn ^{:webapp/path "/p/:slug/store" :unused-ok "runtime-resolved entry — see landing-page"} code-page
+  "The Code index — the module diagram and the store's shape.
+
+  **The diagram is laid out HERE rather than in the view.** It was a route
+  row's `:derive`, applied by the framework inside the freshness guard so an
+  answer nobody was waiting on was never laid out. `ask!` takes no `:derive`,
+  so the page applies it — which does mean laying out per render rather than
+  per answer. See [[slopp-server.ui.views/with-store-picture]], including what the
+  split already cost.
+
+  `(:lens state)` is a TEST seam: the lens pages are routes of their own and
+  nothing in the app writes `:lens`, but
+  `every-declared-lens-actually-renders-something-different` renders this page
+  under each lens to prove the dedicated page and the table agree."
+  [{:keys [state] :as page}]
+  (code-screen page (:lens state)))
+
+(defn ^{:webapp/path "/p/:slug/store/treemap" :unused-ok "runtime-resolved entry — see landing-page"} code-treemap-page
+  "The Code index at `/store/treemap` — the code by size, a cell per namespace
+  inside its module, tinted by a dial. A lens BINDING; see [[code-table-page]]."
+  [page]
+  (code-screen page "treemap"))
+
+(defn ^{:webapp/path "/p/:slug/store/data" :unused-ok "runtime-resolved entry — see landing-page"} data-page
+  "The DATA DICTIONARY at `/store/data?q=&bare=&key=` — the keys the code
+  passes around, and with a key, who uses it. One ask whichever it shows."
+  [{:keys [params] :as page}]
+  (let [{:keys [q bare key]} params
+        answer (webapp/ask! page (views/at-project params api/data)
+                            (cond-> {}
+                              (seq (str q))    (assoc :q (str q))
+                              (seq (str bare)) (assoc :bare (str bare))
+                              (seq (str key))  (assoc :key (str key))))]
+    (chrome page :data answer
+            (answered answer #(views/data-main (:value answer)
+                                               {:q q :bare (boolean (seq (str bare)))})))))

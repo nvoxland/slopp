@@ -351,7 +351,7 @@
               (:modules after))
     (store/modules-cycle (production-manifest after))))
 
-(defn overstated-edges
+(defn ^:export overstated-edges
   "Declared PRODUCTION edges that only `-test` namespaces cross — the manifest
   asserting a dependency the production code does not have.
 

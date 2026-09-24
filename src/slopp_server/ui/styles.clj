@@ -676,6 +676,55 @@
                 [:.cadence-bar {:fill "#5c9"}]
                 [:.growth-line {:stroke "#5c9"}])))
 
+(def sequence-styles
+  "Appearance of the call-sequence screen: lanes quiet, calls legible, and the
+  rows that are NOT a call — a cycle, a callee already drawn, the calls a cap
+  held back — in italics so they cannot be mistaken for one. Text takes
+  `currentColor` so the diagram reads in either colour scheme without a
+  second set of rules."
+  [[:svg.sequence {:display "block" :margin "1.5rem 0" :max-width "100%" :height "auto"
+                   :font-family "ui-monospace, monospace" :font-size "12px"}]
+   [:.seq-lane [:line {:stroke "#bbb" :stroke-dasharray "4 4"}]]
+   [:.seq-lane [:text {:fill "currentColor" :font-weight "600"}]]
+   [:.seq-msg [:line {:stroke "#888" :stroke-width "1.3"}]]
+   [:.seq-msg [:path {:fill "none" :stroke "#888" :stroke-width "1.3"}]]
+   [:.seq-msg [:text {:fill "currentColor"}]]
+   [:.seq-note [:text {:fill "#999" :font-style "italic"}]]
+   [:svg.sequence [:marker [:path {:fill "#888"}]]]
+   [:.seq-steps {:font-family "ui-monospace, monospace" :font-size "0.9rem"
+                 :list-style "none" :padding-left "0"}]
+   [:.flow-picker {:margin-top "2rem"}]
+   [:.flow-picker [:input {:margin-right "0.5rem" :min-width "16rem"}]]
+   [:.doors {:margin-top "2rem"}]
+   [:.doors [:h3 {:margin-bottom "0"}]]])
+
+(def conformance-styles
+  "Appearance of the conformance lens: an edge the code uses without a
+  declaration is loud, a declaration nothing uses is dashed and quiet, and one
+  only tests use is dashed and amber — three findings, three marks, and the
+  convergent edge left exactly as the plain diagram draws it. Tiers mark the
+  box's border, so they read without competing with the gap tint's fill."
+  [[:.module-edge.divergent {:stroke "#c62" :stroke-width "2.2"}]
+   [:.module-edge.absent {:stroke "#aaa" :stroke-dasharray "6 5"}]
+   [:.module-edge.test-only {:stroke "#a80" :stroke-dasharray "2 4"}]
+   [:.module-node.tier-pure [:rect {:stroke "#2a6" :stroke-width "2"}]]
+   [:.module-node.tier-internal [:rect {:stroke "#68c" :stroke-width "2"}]]
+   [:.conformance-table [:tr.divergent [:td {:color "#c62"}]]]])
+
+(def tree-styles
+  "Appearance of the treemap lens and the dial: modules outlined and named,
+  namespace cells borrowing the map boxes' tint ramp (so a dial reads the
+  same on either view, dark mode included) with a smaller face, and the dial
+  bar and its note set as quiet controls."
+  [[:svg.treemap {:display "block" :width "100%" :height "auto" :max-width "60rem"
+                  :margin "1.5rem 0" :font-family "ui-monospace, monospace" :font-size "11px"}]
+   [:.tree-module [:rect {:fill "none" :stroke "#999" :stroke-width "1.5"}]]
+   [:.tree-module [:text {:fill "currentColor" :font-weight "600"}]]
+   [:.tree-cell [:rect {:stroke "#ddd" :stroke-width "1"}]]
+   [:.tree-cell [:text {:font-size "11px"}]]
+   [:.dial-bar {:margin "0.5rem 0"}]
+   [:.dial-note {:margin "0.25rem 0 0"}]])
+
 (def ^{:http/method :get :http/path "/css/style.css" :http/auth :public
        :http/media-type "text/css"}
   stylesheet
@@ -878,6 +927,9 @@
 search-styles
         config-styles
     dashboard-styles
+    sequence-styles
+    conformance-styles
+    tree-styles
 
     (gs/at-media {:prefers-color-scheme :dark}
                  [:body {:background "#111" :color "#ddd"}]

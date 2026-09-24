@@ -167,7 +167,7 @@
   tree, so a slopp push never deletes them).
 
   The layout matching build! is load-bearing rather than tidy: build.clj's CI
-  flow is `clojure -T:build uber :src src` against a CHECKOUT of the published
+  flow is `build/uber {:src \"src\"} (what `slopp build --jar` and the release lane run)` against a CHECKOUT of the published
   repo, so a projection that roots a namespace differently produces a different
   jar from the same store.
 

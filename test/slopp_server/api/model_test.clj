@@ -644,3 +644,270 @@
 
     (testing "a query nothing matches is the same shape, not nil"
       (is (= 0 (:total (model/search st "zzznope" 50)))))))
+
+(deftest tests-of-names-the-deftests-that-reach-a-namespace
+  ;; `tests-covering` names which test NAMESPACES to open. This names the
+  ;; deftests inside them, because this store writes test names as sentences:
+  ;; the tests that reach a namespace say what it does.
+  (let [many (apply str (for [i (range 10)] (str "(deftest t" i " (is (c/hello)))\n\n")))
+        st   (-> (store/empty-store)
+                 (store/ingest 'demo.a.core "(ns demo.a.core)\n\n(defn hello [] 1)\n\n(defn other [] 2)\n")
+                 (store/ingest 'demo.a.core-test
+                               (str "(ns demo.a.core-test (:require [clojure.test :refer [deftest is]] [demo.a.core :as c]))\n\n"
+                                    "(deftest hello-says-one (is (= 1 (c/hello))))\n\n"
+                                    "(deftest other-says-two (is (= 2 (c/other))))\n\n"
+                                    "(deftest touches-nothing (is true))\n"))
+                 (store/ingest 'demo.b.util
+                               (str "(ns demo.b.util (:require [demo.a.core :as c]))\n\n"
+                                    "(defn helper [] (c/hello))\n"))
+                 (store/ingest 'demo.many-test
+                               (str "(ns demo.many-test (:require [clojure.test :refer [deftest is]] [demo.a.core :as c]))\n\n"
+                                    many)))
+        tmap {'demo.far-test/seen-at-runtime #{'demo.a.core/hello}}
+        got  (model/tests-of st tmap ['demo.a.core])]
+    (testing "each test namespace, with the deftests in it that reach the subject"
+      (is (= [{:ns "demo.a.core-test" :count 2 :names ["hello-says-one" "other-says-two"] :more 0}
+              {:ns "demo.far-test" :count 1 :names ["seen-at-runtime"] :more 0}
+              {:ns "demo.many-test" :count 10 :names ["t0" "t1" "t2" "t3" "t4" "t5" "t6" "t7"] :more 2}]
+             got)
+          "a deftest that references nothing here is absent; an OBSERVED one is present with no static edge; past the cap it says how many more"))
+    (testing "production callers are not tests"
+      (is (not-any? #(= "demo.b.util" (:ns %)) got)))
+    (testing "nothing reaching it is an empty list, not an absent key"
+      (is (= [] (model/tests-of st {} ['demo.b.util]))))
+    (testing "it crosses a wire like every model here"
+      (is (json-shaped? got)))))
+
+(deftest form-view-names-the-tests-that-reach-it
+  ;; The warranty was a COUNT. The names are what a reader can use: they say
+  ;; what the form is promised to do, and `:via` says how each is known — an
+  ;; observed run and a static reference are different evidence.
+  (let [st   (-> (store/empty-store)
+                 (store/ingest 'demo.a.core "(ns demo.a.core)\n\n(defn hello [] 1)\n")
+                 (store/ingest 'demo.a.core-test
+                               (str "(ns demo.a.core-test (:require [clojure.test :refer [deftest is]] [demo.a.core :as c]))\n\n"
+                                    "(deftest hello-says-one (is (= 1 (c/hello))))\n")))
+        sess (atom {:store st :test-map {'demo.a.core-test/hello-says-one #{'demo.a.core/hello}}})
+        v    (model/form-view sess (:id (store/form-named st 'demo.a.core 'hello)))]
+    (is (= {:count 1
+            :shown [{:test "demo.a.core-test/hello-says-one" :via ["observed" "static"] :hops 1}]}
+           (:tests v)))
+    (is (json-shaped? v))))
+
+(deftest story-tells-a-namespace-or-a-module-by-commit-point
+  ;; The paging and the two grains over the fold. Twenty-five commit points,
+  ;; each carrying one ask, so a page boundary and the remainder are both real.
+  (let [ds (vec (concat
+                 [{:id "d0" :op :add :ns 'demo.a.core-test :form-id "t1" :prompt "a test ask"}]
+                 (mapcat (fn [i] [{:id (str "a" i) :op :add :ns 'demo.a.core
+                                   :form-id (str "f" i) :prompt (str "ask " i)}
+                                  {:id (str "c" i) :op :commit :description (str "cp " i) :status :green}])
+                         (range 25))))
+        st (assoc (store/empty-store) :deltas ds)
+        p0 (model/story st "ns" "demo.a.core" 0)
+        p1 (model/story st "ns" "demo.a.core" 1)
+        m1 (model/story st "module" "demo.a" 1)]
+    (testing "twenty to a page, newest first, and the rest COUNTED rather than dropped"
+      (is (= 20 (count (:rows p0))))
+      (is (= "c24" (:commit (first (:rows p0)))))
+      (is (= 5 (:more p0)))
+      (is (= [5 0 "c0"] [(count (:rows p1)) (:more p1) (:commit (last (:rows p1)))])))
+    (testing "a module's story is its production namespaces' — a test namespace folds into
+              its module for the rail, but what was asked of a TEST is not the module's story"
+      (is (= (mapv :commit (:rows p1)) (mapv :commit (:rows m1))))
+      (is (= ["ask 0"] (:asks (last (:rows m1))))))
+    (testing "a grain that is neither is nil, so the endpoint can 404"
+      (is (nil? (model/story st "form" "demo.a.core" 0))))
+    (testing "it crosses a wire like every model here"
+      (is (json-shaped? p0)))))
+
+(deftest entry-points-name-every-door-with-its-form
+  ;; The first question about a system is what it can DO — its doors — and a
+  ;; file tree cannot answer it. Each door carries the form it opens on, so a
+  ;; reader goes from "what can this do" to "what happens then" in one click.
+  (let [st   (-> (store/empty-store)
+                 (store/ingest 'ep.core (str "(ns ep.core)\n\n"
+                                             "(defn run [x] x)\n\n"
+                                             "(defn -main [& args] (run args))\n\n"
+                                             "(defn ^:entry-point observe [x] x)\n")))
+        sess (atom {:store st})
+        doc  (model/entry-points sess 'ep.core/-main)
+        kind (into {} (map (juxt :kind identity)) (:kinds doc))]
+    (testing "the process entry comes first, named and addressed"
+      (is (= "main" (:kind (first (:kinds doc)))))
+      (is (= {:kind "main" :label "app.main" :handler "ep.core/-main" :module "ep.core"
+              :form-id (:id (store/form-named st 'ep.core '-main))}
+             (first (:entries (kind "main"))))))
+    (testing "a form marked ^:entry-point is a door too — it is called from outside, by name"
+      (is (some #{"ep.core/observe"} (map :handler (:entries (kind "entry-point"))))))
+    (testing "every door here opens on a form"
+      (is (every? :form-id (mapcat :entries (:kinds doc)))))
+    (testing "a kind with no doors is absent, and a store with none says so with an empty list"
+      (is (not-any? #(empty? (:entries %)) (:kinds doc)))
+      (is (= [] (:kinds (model/entry-points (atom {:store (store/empty-store)}) nil)))))
+    (testing "it crosses a wire like every model here"
+      (is (json-shaped? doc)))))
+
+(deftest sequence-view-reads-a-trace-as-lanes-and-steps
+  ;; What happens when `rate` runs, as a document a screen can draw: one lane
+  ;; per MODULE in first-appearance order, one step per call in body order,
+  ;; each callee addressed by its form id.
+  (let [st   (-> (store/empty-store)
+                 (store/ingest 'sq.util "(ns sq.util)\n\n(defn round-up [x] x)\n")
+                 (store/ingest 'sq.core (str "(ns sq.core (:require [sq.util :as u]))\n\n"
+                                             "(defn band [x] (u/round-up x))\n\n"
+                                             "(defn rate [x] (band x) (u/round-up x))\n")))
+        sess (atom {:store st})
+        fid  (fn [n s] (:id (store/form-named st n s)))
+        doc  (model/sequence-view sess (fid 'sq.core 'rate))]
+    (is (= {:form "sq.core/rate" :form-id (fid 'sq.core 'rate) :module "sq.core"} (:root doc)))
+    (is (= ["sq.core" "sq.util"] (:lifelines doc)))
+    (is (= [[1 "sq.core/band" "sq.core"] [2 "sq.util/round-up" "sq.util"] [1 "sq.util/round-up" "sq.util"]]
+           (mapv (juxt :depth :to :to-module) (:steps doc))))
+    (is (= 1 (:seen-at (last (:steps doc)))) "a callee already drawn points back at its step")
+    (is (= (fid 'sq.util 'round-up) (:to-form-id (second (:steps doc)))))
+    (is (= "static" (:via (first (:steps doc)))))
+    (is (= {:depth false :steps false} (:truncated doc)))
+    (is (string? (:note doc)) "static, and it says so")
+    (is (nil? (model/sequence-view sess "f-nope")) "an unknown form is nil, so the endpoint can 404")
+    (is (json-shaped? doc))))
+
+(deftest path-view-is-the-call-path-as-a-sequence
+  ;; Pick a start and an end: the shortest call path between them, drawn the
+  ;; same way as a trace. Either end may be a form id or a qualified name —
+  ;; a reader knows names, a link carries ids.
+  (let [st   (-> (store/empty-store)
+                 (store/ingest 'sq.util "(ns sq.util)\n\n(defn round-up [x] x)\n")
+                 (store/ingest 'sq.core (str "(ns sq.core (:require [sq.util :as u]))\n\n"
+                                             "(defn band [x] (u/round-up x))\n\n"
+                                             "(defn rate [x] (band x) (u/round-up x))\n")))
+        sess (atom {:store st})
+        fid  (fn [n s] (:id (store/form-named st n s)))
+        doc  (model/path-view sess "sq.core/rate" (fid 'sq.util 'round-up))]
+    (is (= [["sq.core/rate" "sq.util/round-up" "static"]] (mapv (juxt :from :to :via) (:steps doc)))
+        "each hop carries the reference graph's own :via")
+    (is (= ["sq.core" "sq.util"] (:lifelines doc)))
+    (testing "no path is an answer, not an error"
+      (let [none (model/path-view sess "sq.core/band" "sq.core/rate")]
+        (is (= [] (:steps none)))
+        (is (re-find #"no call path" (:note none)))))
+    (is (nil? (model/path-view sess "sq.core/nope" "sq.core/rate")) "an unknown end is nil")
+    (is (json-shaped? doc))))
+
+(deftest module-index-classifies-every-module-edge-against-its-declaration
+  ;; A reflexion model: the module edges the store DECLARES against the calls
+  ;; the code actually makes. Four answers, and each is a different finding —
+  ;; the one a reader cannot get from a picture of either graph alone.
+  (let [st  (-> (store/empty-store)
+                (store/ingest 'cf.util "(ns cf.util)\n\n(defn u [x] x)\n")
+                (store/ingest 'cf.lib "(ns cf.lib)\n\n(defn l [x] x)\n")
+                (store/ingest 'cf.core "(ns cf.core)\n\n(defn c [x] x)\n")
+                (store/ingest 'cf.core.util-test
+                              (str "(ns cf.core.util-test (:require [cf.core :as c] [cf.util :as u]))\n\n"
+                                   "(defn t [] (c/c (u/u 1)))\n"))
+                (store/ingest 'cf.web (str "(ns cf.web (:require [cf.core :as c] [cf.lib :as l]))\n\n"
+                                           "(defn h [x] (l/l (c/c x)))\n"))
+                (assoc :modules {"cf.web" #{"cf.core" "cf.util"} "cf.core" #{"cf.util"}}))
+        idx (model/module-index (atom {:store st}))
+        row (into {} (map (juxt :module identity)) (:modules idx))]
+    (is (= #{["cf.web" "cf.core" "convergent"]
+             ["cf.web" "cf.lib" "divergent"]
+             ["cf.web" "cf.util" "absent"]
+             ["cf.core" "cf.util" "test-only"]}
+           (set (map (juxt :from :to :class) (:edges (:conformance idx)))))
+        "declared and used · used, never declared · declared, never used · declared, used only by tests")
+    (is (= ["cf.core" "cf.util"] (:declared (row "cf.web")))
+        "each row carries what it DECLARES beside what it uses")))
+
+(deftest an-overlay-rolls-a-dial-up-from-namespaces-to-modules
+  ;; One document per DIAL — what to tint the map by — carrying a numerator
+  ;; and a denominator per namespace and per module, so a consumer can read a
+  ;; share or a count without a second request, and test code is never counted.
+  (let [st  (-> (store/empty-store)
+                (store/ingest 'ov.a "(ns ov.a)\n\n(defn x [] 1)\n\n(defn y [] 2)\n")
+                (store/ingest 'ov.a.b "(ns ov.a.b)\n\n(defn z [] 3)\n")
+                (store/ingest 'ov.c "(ns ov.c)\n\n(defn w [] 4)\n")
+                (store/ingest 'ov.a-test "(ns ov.a-test)\n\n(defn t [] 5)\n"))
+        doc (model/overlay-doc st "effects" {'ov.a 1 'ov.a.b 1})]
+    (is (= "effects" (:dial doc)))
+    (is (= "share" (:kind doc)))
+    (is (string? (:note doc)) "what the tint means, in words — a colour with no sentence is a guess")
+    (is (= [{:module "ov.a" :value 2 :of 5} {:module "ov.c" :value 0 :of 2}] (:modules doc))
+        "a module is the sum of its namespaces; forms count the ns form too, as everywhere here")
+    (is (= [{:ns "ov.a" :module "ov.a" :value 1 :of 3} {:ns "ov.a.b" :module "ov.a" :value 1 :of 2}
+            {:ns "ov.c" :module "ov.c" :value 0 :of 2}]
+           (:namespaces doc))
+        "no -test namespace — a test is not the code being measured")
+    (is (nil? (model/overlay-doc st "nonsense" {})) "an unknown dial is nil, so the endpoint can 404")
+    (is (json-shaped? doc))))
+
+(deftest the-dial-facts-are-counted-per-namespace
+  ;; The numerators behind three dials, each counted where it is cheap and
+  ;; honest: size as node count, effects as effectful forms, churn as distinct
+  ;; forms changed since the Nth-last commit point.
+  (let [st (-> (store/empty-store)
+               (store/ingest 'df.a (str "(ns df.a)\n\n(defn pure [x] (inc x))\n\n"
+                                        "(defn writes! [x] (spit \"/tmp/x\" x))\n")))]
+    (is (= 1 (get (model/effects-by-ns st) 'df.a)) "one effectful form")
+    (is (pos? (get (model/size-by-ns st) 'df.a)))
+    (let [ds [{:id "d1" :op :add :ns 'df.a :form-id "f1"}
+              {:id "c1" :op :commit}
+              {:id "d2" :op :replace :ns 'df.a :form-id "f1"}
+              {:id "d3" :op :replace :ns 'df.a :form-id "f2"}
+              {:id "d4" :op :replace :ns 'df.b :form-id "f9"}
+              {:id "c2" :op :commit}
+              {:id "d5" :op :replace :ns 'df.a :form-id "f2"}]
+          hs (assoc st :deltas ds)]
+      (is (= {'df.a 1} (model/churn-by-ns hs 1))
+          "since the last commit point: one form moved")
+      (is (= {'df.a 2 'df.b 1} (model/churn-by-ns hs 2))
+          "since the one before: distinct forms, not writes — f1 and f2 each count once")
+      (is (= {'df.a 2 'df.b 1} (model/churn-by-ns hs 5))
+          "fewer commit points than asked for counts the whole history"))))
+
+(deftest data-index-ranks-keys-by-spread
+  ;; A Clojure system's architecture is largely its map keys. The dictionary
+  ;; ranks them by how far each TRAVELS — modules, then namespaces, then forms
+  ;; — and counts a destructuring apart from a mere mention, because only the
+  ;; first says a form READS the key.
+  (let [st  (-> (store/empty-store)
+                (store/ingest 'dd.a (str "(ns dd.a)\n\n"
+                                         "(defn make [x] {:order/total x :order/id 1 :plain 2})\n"))
+                (store/ingest 'dd.b (str "(ns dd.b)\n\n"
+                                         "(defn price [{:order/keys [total]}] total)\n\n"
+                                         "(defn tag [m] (:order/total m))\n"))
+                (store/ingest 'de.c "(ns de.c)\n\n(defn show [m] (:order/total m))\n")
+                (store/ingest 'dd.a-test "(ns dd.a-test)\n\n(defn t [] {:order/total 1 :order/tested 2})\n"))
+        idx (model/data-index st {})]
+    (is (= [{:kw "order/total" :modules 3 :namespaces 3 :forms 4 :destructured 1}
+            {:kw "order/id" :modules 1 :namespaces 1 :forms 1 :destructured 0}]
+           (:keys idx))
+        "namespaced keys only by default; a test namespace is not the code, so :order/tested is absent")
+    (is (= [2 2] [(:total idx) (:shown idx)]))
+    (testing "plain keywords on request, and a filter over the name"
+      (is (some #(= "plain" (:kw %)) (:keys (model/data-index st {:bare? true}))))
+      (is (= ["order/id"] (mapv :kw (:keys (model/data-index st {:prefix "id"}))))))
+    (testing "a limit caps what is shown and says what the total was"
+      (is (= [1 2] ((juxt :shown :total) (model/data-index st {:limit 1})))))
+    (is (json-shaped? idx))))
+
+(deftest key-view-groups-a-key-s-users-by-module-and-how-they-use-it
+  ;; One key, every form that touches it, grouped by module and saying HOW:
+  ;; naming it and destructuring it are different evidence.
+  (let [st (-> (store/empty-store)
+                (store/ingest 'dd.a (str "(ns dd.a)\n\n"
+                                         "(defn make [x] {:order/total x :order/id 1 :plain 2})\n"))
+                (store/ingest 'dd.b (str "(ns dd.b)\n\n"
+                                         "(defn price [{:order/keys [total]}] total)\n\n"
+                                         "(defn tag [m] (:order/total m))\n"))
+                (store/ingest 'de.c "(ns de.c)\n\n(defn show [m] (:order/total m))\n")
+                (store/ingest 'dd.a-test "(ns dd.a-test)\n\n(defn t [] {:order/total 1 :order/tested 2})\n"))
+        v  (model/key-view st "order/total")]
+    (is (= "order/total" (:kw v)))
+    (is (= ["dd.a" "dd.b" "de.c"] (mapv :module (:modules v))))
+    (is (= [["dd.b/price" ["destructuring"]] ["dd.b/tag" ["literal"]]]
+           (mapv (juxt :form :via) (:forms (second (:modules v))))))
+    (is (every? :form-id (mapcat :forms (:modules v))) "each user links to its form")
+    (is (= 1 (:tests v)) "test namespaces are counted, not listed")
+    (is (nil? (model/key-view st "no/such")) "an unknown key is nil")
+    (is (json-shaped? v))))

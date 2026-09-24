@@ -365,7 +365,7 @@
     :description "Close the turn (usually automatic)."
     :inputSchema {:type "object"
                   :properties {:note {:type "string"}}}}
-   {:name "full_check"
+   {:name "full_check" :read-only true
     :description "The WHOLE-STORE check: lint, dead surface, both layering graphs, the rule sweep, and every test in every tier (in-image, ^:integration, ^:external). Nothing forces it, and a close already carries the whole-store verdict when the store is small — reach for this on a big store after a broad change, after deleting a caller, or before a commit you stand behind. A verdict that still STANDS returns in a millisecond (:standing true); force=true re-runs. affected=true narrows the ^:external tier (nearly all the cost) to what changes since the last commit-point reach; :external :cost reads the tier as its slowest shard and :narrowing-ceiling-ms as the most narrowing can return."
     :inputSchema {:type "object" :properties {:affected {:type "boolean"}
                                               :force {:type "boolean"}
@@ -382,7 +382,7 @@
                                :force {:type "boolean"}
                                :target {:type "string"}}
                   :required ["label"]}}
-   {:name "test_run"
+   {:name "test_run" :read-only true
     :description "SPOT-CHECK specific tests: {ns \"x.y-test\"} or {only [\"x.y-test/some-t\"]}. Targets run in their OWN tier: in-image members in-image, named ^:external members in one serial external JVM — the red/green fast lane for an external test needs no {external true} detour. You do NOT need this before done or commit_point — done runs the affected tests in every tier (impacted ^:external included) and the commit-point runs the whole external suite itself. Whole in-image suite: {all true} (rarely needed). Explicit full external run: {external true} — fresh JVM, auto-shards (:parallel N overrides), {affected true} narrows to test nses reaching changes since the last commit-point. Red external runs return :failing + :all-failing {file [tests]} + :themes."
     :inputSchema {:type "object"
                   :properties {:ns {:type "string"}
@@ -392,7 +392,7 @@
                                :affected {:type "boolean"}
                                :fresh {:type "boolean"}
                                :parallel {:type "integer"}}}}
-   {:name "draft_test"
+   {:name "draft_test" :read-only true
     :description "A ready-to-edit deftest DRAFT for an :untested form. With :code (a driver expression) it observes real calls and turns each into an assertion; without, a signature skeleton with TODO holes. Nothing is written — adopt via edit_add_form, red-first."
     :inputSchema {:type "object"
                   :properties {:ns {:type "string"} :name {:type "string"}
@@ -536,7 +536,7 @@
     :description "Reclaim what settled lines left behind and VACUUM the file: every elements row belonging to a landed or abandoned line is deleted, then SQLite gives the space back. Returns {:rows-dropped :bytes-before :bytes-after :reclaimed}. Deliberate, not automatic: land-thread! now drops a landed thread's view as it lands, but 663 landings before that fix left 3.4 GB (64% of one file) behind, and a fix does not un-write what it wrote. store_health's :elements :by-status shows what this would reclaim — run it when the 'landed' rows are not zero. Read its :source-bytes as a FLOOR, not an estimate: it is LENGTH() over the source text, and the file also carries row overhead, indexes and free pages for those rows (measured 1.37× on one store, 269 MB back against 197 MB of text). VACUUM holds the file lock for as long as the copy takes, so run it when no other writer is mid-land."
     :inputSchema {:type "object" :properties {}}}
    
-{:name "screen"
+{:name "screen" :read-only true
     :description "LOOK AT a screen of this app, driven headlessly — no browser, no rendering engine, no test written. Hand it a `url` the way you would type one into a browser: it opens the zero-arg fn you marked ^:app/entry (a slopp.http ctx, or {:state :view}), goes there, runs any ordered `steps` script through the app's OWN handlers, and returns the screen as text with a WHITELISTED tag channel. The provenance rule reads it for you: plain text is the page's words, HTML-escaped, so it can never be mistaken for markup; an UNPREFIXED tag or attr was really on the page and survives only where it carries something you can act on (<a href>, <button>, <input>, <select>/<option>, <textarea>, <form>, <label>, headings, <table>/<tr>, <pre>, <img alt>, an <svg> censused by CLASS); anything slopp: -prefixed the reader DERIVED — <slopp:region name=\"main\"> wrapping each :data-region pane, <ul slopp:count=\"5\"> with a machine-visible <slopp:elided count=\"2\"/> where the tool's 3-row cap bit, and slopp:on=\"click :action arg\" naming what a control does (a closure handler shows as \"click (fn)\"; scalar action args travel because they are what tell twin buttons apart). Besides the page you get what a browser would also tell you: `url` — the ADDRESS BAR, which after a redirect is not what you asked for — `status` as a NUMBER to compare rather than a sentence to search the page for, and `redirects` when the app sent you somewhere. Each is absent when there is nothing to say. `steps`: [{visit \"/x\"} {click \"Add\"} {fill \"Filter\" value \"web\"}] — click matches visible text, an href, or an aria-label and BUBBLES to the nearest handled ancestor like a browser (a disabled control refuses); fill matches placeholder/name/id/aria-label, a <select> refuses a value it has no option for, a checkbox takes its checked boolean; every miss refuses listing what IS clickable/fillable rather than shrugging. `region` scopes to one pane and throws if absent; `detail` is \"structured\" (default) or \"prose\" (sentences only, UNESCAPED, for `does it say X` at a fraction of the tokens); `trace` returns the screen after EVERY step of one run. There is deliberately NO session between calls: a url plus a script is the whole interaction, so the screen you looked at is one you can pin with the same call in a test (slopp.cljnx/open! + drive! — which elides nothing by default; the cap is this tool's). Runs in the VERIFICATION image, so it shows the code the store holds — not the served app, which may be behind. NOT a screenshot: wrapping and colour contrast still need eyes."
     :inputSchema {:type "object"
                   :properties {:url {:type "string"
@@ -817,7 +817,15 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
   `query_eval` and `query_observe` qualify because the observe gate blocks
   redefinition — the code they run cannot change the codebase (observation
   captures are a metadata cache). That is a judgement, which is why the fact is
-  DECLARED on the tool rather than inferred from the dispatch."
+  DECLARED on the tool rather than inferred from the dispatch.
+
+  `test_run`, `full_check`, `draft_test`, `review_scan` and `screen` qualify on
+  the same judgement: a verification reads the code and appends a `:verify`
+  VERDICT delta — a journal record about the code, like an observation
+  capture — and never code. `restart` does not: it rebuilds the image and
+  with `app true` re-serves the project, which is why it lives in the `build`
+  family and `verify` can carry the readOnlyHint as a whole — the annotation
+  a plan-mode client needs to let an agent LOOK at a screen without asking."
   (into #{} (comp (filter :read-only) (map :name)) classified))
 
 (def registry
@@ -908,8 +916,8 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
    {:name "edit" :blurb "Verified writes: a whole unit of work — or any slice of one — as ONE change call; bookkeeping ops beside it." :ops ["change" "edit_comment" "edit_revert" "undo" "episode_revert"]}
    {:name "refactor" :blurb "Transformations the tool derives from ONE intent: renames with their callers, extraction, signatures, moves." :ops ["rename_sweep" "edit_rename" "edit_extract" "edit_requalify" "change_signature" "edit_move_forms" "module_extract" "ns_rename" "ns_realias" "cleanup"]}
    {:name "declare" :blurb "Namespaces, requires, module edges and dials, dependencies." :ops ["ns_create" "ns_delete" "ns_add_require" "ns_remove_require" "module_dep" "module_purity" "module_role" "module_platform" "deps_add" "deps_remove" "deps_list" "deps_pure" "js_dep"]}
-   {:name "verify" :blurb "A bigger question than one write answers: chosen tests, the whole store, a fresh image, a review, a drafted test, a rendered screen." :ops ["test_run" "full_check" "restart" "review_scan" "draft_test" "screen"]}
-   {:name "build" :blurb "Artifacts: the jar's sources, the browser bundle, a generated client, the dev server." :ops ["build" "compile_client" "generate_client"]}
+   {:name "verify" :blurb "A bigger question than one write answers, and none of them writes: chosen tests, the whole store, a review, a drafted test, a rendered screen." :ops ["test_run" "full_check" "review_scan" "draft_test" "screen"]}
+   {:name "build" :blurb "Artifacts, and the image they come from: the jar's sources, the browser bundle, a generated client, the dev server, a rebuilt image." :ops ["build" "compile_client" "generate_client" "restart"]}
    {:name "store" :blurb "The store itself: health, doctor, compaction, config, and what it declares (capabilities, rules, vocabulary, surface, telemetry, cost)." :ops ["store_health" "store_doctor" "store_compact" "config" "config_file" "query_capabilities" "query_rules" "query_vocabulary" "query_surface" "query_rule_telemetry" "query_cost"]}
    {:name "slopp" :blurb "The remainder, named as such: git, branches, threads, files, turns, help." :ops ["git_push" "git_clone" "git_pull" "git_conflicts" "git_resolve" "import_dir" "branch_create" "branch_switch" "branch_merge" "branch_delete" "thread_list" "thread_drop" "thread_open" "merge_from" "file_put" "file_get" "file_list" "file_remove" "turn_begin" "turn_end" "help"]}
    {:name "done" :ops ["done"]}

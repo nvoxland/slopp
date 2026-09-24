@@ -49,23 +49,21 @@
 
 (defn report-lines
   "What a finished build prints, one line each: the artifact first — the
-  binary, or where the jar recipe ran — then where the tree landed; the
-  native recipe's script when the tree was the goal (the compile is then
-  the reader's next step); and everything `build!` raised, because a tree
-  that is a superset of the store, or is missing an artifact, is a fact the
-  shell has to hear or nobody does. `r` is [[build!]]'s result map, read by
-  key: it is that fn's contract, not a boundary of this one."
+  binary or the jar — then where the tree landed; the native recipe's
+  script when the tree was the goal (the compile is then the reader's next
+  step); and everything `build!` raised, because a tree that is a superset
+  of the store, or is missing an artifact, is a fact the shell has to hear
+  or nobody does. `r` is [[build!]]'s result map, read by key: it is that
+  fn's contract, not a boundary of this one."
   [r]
-  (let [native (:native r)]
+  (let [native   (:native r)
+        artifact (or (:binary r) (:jar r))]
     (cond-> []
-      (:binary r)
-      (conj (str "slopp build: " (:binary r)))
-
-      (:jar-recipe r)
-      (conj (str "slopp build: jar recipe ran in " (:jar-recipe r) " — its output above names the jar"))
+      artifact
+      (conj (str "slopp build: " artifact))
 
       true
-      (conj (str (if (or (:binary r) (:jar-recipe r)) "  tree: " "slopp build: ") (:built r)))
+      (conj (str (if artifact "  tree: " "slopp build: ") (:built r)))
 
       (and native (not (:binary r)))
       (conj (str "  native recipe: " (:built r) "/" (:script native)
@@ -108,6 +106,13 @@
               (.start))]
     {:exit (.waitFor p)}))
 
+(def jar-recipe-deps
+  "The -Sdeps a jar recipe runs under: tools.build, supplied INLINE so no
+  deps.edn alias has to exist anywhere — the generated deps.edn in a tree has
+  none, and main carries no deps.edn at all. The same map the release lane
+  passes on a projection checkout, so the two builds cannot disagree."
+  "{:deps {io.github.clojure/tools.build {:mvn/version \"0.10.5\"}} :paths [\".\"]}")
+
 (defn artifact!
   "Cut the artifact `mode` names from a materialized tree — `r` is
   `slopp.ops.external/build!`'s result, read by key — and answer it with the
@@ -115,11 +120,13 @@
 
   `:native` runs the `build-native.sh` slopp emitted into the tree, in the
   tree, and adds `:binary`; a store that declares no entry has no recipe and
-  is told what would work. `:jar` runs a jar recipe — the project's own
-  `build.clj` (slopp's case: it writes target/slopp.jar and takes `:src`, so
-  it runs in the project over the tree's src), else one the tree carries
-  (run there over `src`), else a refusal naming the gap — and adds
-  `:jar-recipe`, the directory it ran in. `:tree` answers `r` untouched.
+  is told what would work. `:jar` runs the `build.clj` the tree carries (a
+  file tracked on the store's files manifest, so `build!` wrote it there),
+  in the tree, with tools.build supplied inline ([[jar-recipe-deps]]) and
+  `build/uber {:src \"src\"}` called directly — the release lane's own call
+  — then copies the newest jar under the tree's `target/` up to the
+  project's `target/` and adds `:jar`, its path; a tree with no recipe is a
+  refusal naming the files manifest. `:tree` answers `r` untouched.
 
   Tools are checked by name first (`:which`, a fn of a tool name; the PATH
   by default): a script that fails four minutes in, after a JVM boot, on a
@@ -151,31 +158,38 @@
             (assoc r :binary (str tree "/" (:binary native)))))
 
       :jar
-      (let [own  (when proj (io/file (str proj) "build.clj"))
-            tree-recipe (io/file (str tree) "build.clj")]
+      (let [recipe (io/file (str tree) "build.clj")
+            cmd    ["clojure" "-Sdeps" jar-recipe-deps "-M" "-e"
+                    "((requiring-resolve (quote build/uber)) {:src \"src\"})"]
+            newest-jar (fn []
+                         (->> (.listFiles (io/file (str tree) "target"))
+                              (filter (fn [^java.io.File f]
+                                        (and (.isFile f) (str/ends-with? (.getName f) ".jar"))))
+                              (sort-by (fn [^java.io.File f] (.lastModified f)))
+                              last))]
         (or (need "clojure" "a jar recipe runs under the clojure CLI (clojure.org/guides/install_clojure)")
-            (cond
-              (and own (.exists own))
-              (or (run ["clojure" "-T:build" "uber" ":src" (pr-str (str tree "/src"))] (str proj) "clojure -T:build uber")
-                  (assoc r :jar-recipe (str proj)))
-
-              (.exists tree-recipe)
-              (or (run ["clojure" "-T:build" "uber" ":src" (pr-str "src")] (str tree) "clojure -T:build uber")
-                  (assoc r :jar-recipe (str tree)))
-
-              :else
-              {:error (str "no jar recipe: neither " (when proj (str proj "/build.clj nor "))
-                           tree "/build.clj exists. A build.clj with an `uber` fn (tools.build)"
-                           " is what a jar is cut with; the native recipe (--native) slopp"
-                           " generates, a jar recipe it does not yet.")}))))))
+            (when-not (.exists recipe)
+              {:error (str "no jar recipe: " tree "/build.clj does not exist. A jar is cut by a"
+                           " build.clj with an `uber` fn (tools.build) tracked on the store's"
+                           " files manifest (file_put {path \"build.clj\" …}), which build!"
+                           " materializes into the tree; slopp generates the native recipe"
+                           " (--native), a jar recipe it does not yet.")})
+            (run cmd (str tree) "build/uber")
+            (if-let [^java.io.File jar (newest-jar)]
+              (let [dest (io/file (str (or proj tree)) "target" (.getName jar))]
+                (io/make-parents dest)
+                (io/copy jar dest)
+                (assoc r :jar (.getPath dest)))
+              {:error (str "build/uber ran in " tree " and wrote no .jar under " tree
+                           "/target — its output above says what it did instead")}))))))
 
 (defn build!
   "Build the project at `dir`: materialize its store into `out` —
-  `<dir>/target/jar-src` by default, where `clojure -T:build uber` reads; a
-  relative `out` resolves against the project — then cut the artifact `mode`
-  names from it ([[artifact!]]; `:native` by default). Answers `build!`'s
-  own map (`:built`, `:native` when the store declares an entry, every
-  warning it raises) with `:binary` or `:jar-recipe` added, or `{:error}`.
+  `<dir>/target/jar-src` by default; a relative `out` resolves against the
+  project — then cut the artifact `mode` names from it ([[artifact!]];
+  `:native` by default). Answers `build!`'s own map (`:built`, `:native`
+  when the store declares an entry, every warning it raises) with `:binary`
+  or `:jar` added, or `{:error}`.
 
   The store is opened read-only and lazily: no image boots, no thread is
   adopted, nothing is written. The tree is what the BRANCH holds — a

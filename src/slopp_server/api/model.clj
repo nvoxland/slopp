@@ -21,7 +21,7 @@
   (:require [slopp.store :as store]
             [slopp.read.query :as query]
             [slopp.read.history :as history] [slopp.edit.modules :as edit.modules] [slopp.index.refs :as refs] [slopp.read.orient :as orient] [rewrite-clj.node :as n] [clojure.string :as str]
-            [slopp.read.modules :as read.modules] [slopp.edit.tiers :as tiers] [slopp.store.render :as store.render]))
+            [slopp.read.modules :as read.modules] [slopp.edit.tiers :as tiers] [slopp.store.render :as store.render] [slopp.read.graph :as graph]))
 
 (defn ^:export change-view
   "What changed between two commit-points, grouped module → namespace → form
@@ -519,6 +519,28 @@
                          :tokens  (tokens-of (:node e))
                          :callers callers
                          :callees callees
+                         ;; the tests that reach it BY NAME, observed runs
+                         ;; first — the names say what it is promised to do,
+                         ;; and `:via` says how each is known. Capped like
+                         ;; every list on a form page; `:count` keeps the rest
+                         ;; honest.
+                         ;; the DATA it touches: its namespaced keys, linked to
+                         ;; the dictionary, and a count of the plain ones
+                         :keys    (->> (refs/keyword-refs st)
+                                       (filter #(and (= form-id (:from-form %)) (namespace (:kw %))))
+                                       (map (fn [r] {:kw (subs (str (:kw r)) 1) :via (name (:via r))}))
+                                       distinct (sort-by (juxt :kw :via)) (take 30) vec)
+                         :tests   (let [cov (refs/covered-by st (:test-map @session) qsym)]
+                                    {:count (count cov)
+                                     :shown (->> cov
+                                                 (sort-by (fn [{:keys [via hops test]}]
+                                                            [(if (contains? via :observed) 0 1)
+                                                             (or hops 0) (str test)]))
+                                                 (take 8)
+                                                 (mapv (fn [{:keys [test via hops]}]
+                                                         (cond-> {:test (str test)
+                                                                  :via  (vec (sort (map name via)))}
+                                                           hops (assoc :hops hops)))))})
                          :note    (str "edges come from a syntactic reader over the store, so this"
                                        " is a floor, not a census — a call reached through a"
                                        " binding or built at runtime is not here")}
@@ -626,7 +648,23 @@
         ;; every module above it a rung further from what it actually needs.
         reduced    (into {} (for [[m ds] manifest :when (not (band m))]
                               [m (vec (remove band ds))]))
-        {:keys [layers cycles]} (store/module-layers reduced)]
+        {:keys [layers cycles]} (store/module-layers reduced)
+        ;; the DECLARED architecture beside the actual one — a reflexion model.
+        ;; `manifest` is what production code uses; `declared` is what the store
+        ;; says it may; an edge only tests use is the fourth, separate answer
+        declared   (edit.modules/modules-manifest st)
+        tests-only (set (read.modules/overstated-edges st))
+        mods       (set (keys by-module))
+        conform    (vec (for [m (sort mods)
+                              d (sort (into (set (get manifest m)) (get declared m)))
+                              :when (and (not= m d) (mods d))
+                              :let [used? (contains? (get manifest m #{}) d)
+                                    decl? (contains? (get declared m #{}) d)]]
+                          {:from m :to d
+                           :class (cond (and used? decl?)      "convergent"
+                                        used?                  "divergent"
+                                        (tests-only [m d])     "test-only"
+                                        :else                  "absent")}))]
     {:modules (mapv (fn [m]
                       {:module     m
                        :namespaces (mapv str (sort (get by-module m)))
@@ -634,73 +672,12 @@
                        :tier       (name (get tiers m :external))
                        :foundation (contains? band m)
                        :deps       (vec (sort (get reduced m)))
-                       :gaps       (roll (get by-module m))})
+                       :gaps       (roll (get by-module m))
+                       :declared   (vec (sort (get declared m #{})))})
                     (sort (keys by-module)))
      :layers  (mapv vec layers)
-     :cycles  (mapv vec cycles)}))
-
-(defn module-detail
-  "One module from the INSIDE: its production namespaces, the ns→ns edges
-  among them, the layering those edges imply, and the edges crossing its
-  boundary. nil for a module with no production namespaces, so a page can 404
-  rather than render an empty frame.
-
-  The level below `module-index`, and it makes the same split one rung down —
-  `:layers` is analysis only the store can do, placement is the consumer's.
-
-  Edges come from `module-usage-rows`, THE reference graph, which is the same
-  producer `production-manifest` reads. That is the point: the descended view
-  and the module view cannot disagree about what an edge is, and a second
-  derivation here would be free to drift (the `:sig`-had-three-producers bug,
-  one system over).
-
-  An internal edge lands in a namespace's `:deps` and nowhere else. Repeating
-  it under `:boundary` would draw every internal arrow twice, and `:boundary`
-  answers a different question: which namespaces face OUT, and which of them
-  anything outside actually reaches. A module whose `:in` names one namespace
-  has a front door; one where `:in` names six does not, and that is a finding
-  a reader should be able to see without opening anything."
-  [session module]
-  (let [st      (:store @session)
-gaps    (gaps-by-ns st (:test-map @session))
-        module  (str module)
-        test?   #(str/ends-with? (str %) "-test")
-        member? #(and (not (test? %)) (= module (edit.modules/module-of %)))
-        members (into (sorted-set) (filter member?) (keys (:namespaces st)))]
-    (when (seq members)
-      (let [edges  (into #{} (comp (remove #(test? (:from-ns %)))
-                                   (map (juxt :from-ns :to))
-                                   (remove (fn [[f t]] (= f t))))
-                         (edit.modules/module-usage-rows st))
-            inside (filter (fn [[f t]] (and (members f) (members t))) edges)
-            out    (sort-by (juxt :from :to)
-                            (for [[f t] edges :when (and (members f) (not (members t)))]
-                              {:from (str f) :to (str t)
-                               :to-module (edit.modules/module-of t)}))
-            in     (sort-by (juxt :from :to)
-                            (for [[f t] edges :when (and (not (members f)) (members t))]
-                              {:from (str f) :from-module (edit.modules/module-of f)
-                               :to (str t)}))
-            by-ns  (reduce (fn [m [f t]] (update m f (fnil conj #{}) t))
-                           (into {} (map (juxt identity (constantly #{}))) members)
-                           inside)
-            {:keys [layers cycles]}
-            (store/module-layers
-             (into {} (map (fn [[k v]] [(str k) (into #{} (map str) v)])) by-ns))]
-        {:module     module
-         :tier       (name (tiers/tier-for st (symbol module)))
-         :namespaces (vec (for [n members]
-                            {:ns    (str n)
-                             :forms (count (store/forms st n))
-                             :tier  (name (tiers/tier-for st n))
-                             :deps  (vec (sort (map str (get by-ns n))))
-                             ;; so the descend can tint a namespace without an
-                             ;; /api/ns/:ns per box — the N+1 this level exists
-                             ;; to avoid at module grain, avoided here too
-                             :gaps  (get gaps n)}))
-         :boundary   {:out (vec out) :in (vec in)}
-         :layers     (mapv vec layers)
-         :cycles     (mapv vec cycles)}))))
+     :cycles  (mapv vec cycles)
+     :conformance {:edges conform}}))
 
 (def ^:export search-limits
   "`GET /api/search`'s row budget: the `:default` when a caller sends no
@@ -834,3 +811,407 @@ gaps    (gaps-by-ns st (:test-map @session))
                     :namespaces (get f "namespace" 0)
                     :forms      (get f "form" 0)})
          :hits   (vec (take n sorted))}))))
+
+(defn tests-of
+  "The deftests that reach namespaces `nses`, grouped by test namespace —
+  `[{:ns :count :names :more}]`, sorted, `:names` capped at eight with `:more`
+  saying how many were held back.
+
+  The NAMES are the point. This store writes test names as sentences, so the
+  tests reaching a namespace state what it does without opening any code.
+  [[tests-covering]] says which namespace to open; this says what is in it.
+
+  ONE hop, from two producers: a static reference written in the deftest's
+  body, and the trace map's OBSERVED runs, which reach through intermediaries
+  a syntactic reader cannot see. Two static hops is `refs/covered-by`'s
+  default and the right reach for ONE form; at namespace grain it takes in
+  most of a suite and so distinguishes nothing.
+
+  Always a vector, empty rather than nil when nothing reaches the subject: an
+  untested namespace is a finding, and an absent key would render as though
+  nobody had asked."
+  [store tmap nses]
+  (let [cap     8
+        targets (into #{} (map str) nses)
+        test?   #(str/ends-with? (str %) "-test")
+        hits    (into #{}
+                      (comp (filter #(and (:from-var %)
+                                          (test? (:from-ns %))
+                                          (targets (str (:to-ns %)))))
+                            (map (juxt (comp str :from-ns) (comp str :from-var))))
+                      (concat (refs/refs store) (refs/observed-refs tmap)))]
+    (->> (group-by first hits)
+         (sort-by key)
+         (mapv (fn [[tns rows]]
+                 (let [names (vec (sort (map second rows)))]
+                   {:ns    tns
+                    :count (count names)
+                    :names (vec (take cap names))
+                    :more  (max 0 (- (count names) cap))}))))))
+
+(defn module-detail
+  "One module from the INSIDE: its production namespaces, the ns→ns edges
+  among them, the layering those edges imply, and the edges crossing its
+  boundary. nil for a module with no production namespaces, so a page can 404
+  rather than render an empty frame.
+
+  The level below `module-index`, and it makes the same split one rung down —
+  `:layers` is analysis only the store can do, placement is the consumer's.
+
+  Edges come from `module-usage-rows`, THE reference graph, which is the same
+  producer `production-manifest` reads. That is the point: the descended view
+  and the module view cannot disagree about what an edge is, and a second
+  derivation here would be free to drift (the `:sig`-had-three-producers bug,
+  one system over).
+
+  An internal edge lands in a namespace's `:deps` and nowhere else. Repeating
+  it under `:boundary` would draw every internal arrow twice, and `:boundary`
+  answers a different question: which namespaces face OUT, and which of them
+  anything outside actually reaches. A module whose `:in` names one namespace
+  has a front door; one where `:in` names six does not, and that is a finding
+  a reader should be able to see without opening anything."
+  [session module]
+  (let [st      (:store @session)
+gaps    (gaps-by-ns st (:test-map @session))
+        module  (str module)
+        test?   #(str/ends-with? (str %) "-test")
+        member? #(and (not (test? %)) (= module (edit.modules/module-of %)))
+        members (into (sorted-set) (filter member?) (keys (:namespaces st)))]
+    (when (seq members)
+      (let [edges  (into #{} (comp (remove #(test? (:from-ns %)))
+                                   (map (juxt :from-ns :to))
+                                   (remove (fn [[f t]] (= f t))))
+                         (edit.modules/module-usage-rows st))
+            inside (filter (fn [[f t]] (and (members f) (members t))) edges)
+            out    (sort-by (juxt :from :to)
+                            (for [[f t] edges :when (and (members f) (not (members t)))]
+                              {:from (str f) :to (str t)
+                               :to-module (edit.modules/module-of t)}))
+            in     (sort-by (juxt :from :to)
+                            (for [[f t] edges :when (and (not (members f)) (members t))]
+                              {:from (str f) :from-module (edit.modules/module-of f)
+                               :to (str t)}))
+            by-ns  (reduce (fn [m [f t]] (update m f (fnil conj #{}) t))
+                           (into {} (map (juxt identity (constantly #{}))) members)
+                           inside)
+            {:keys [layers cycles]}
+            (store/module-layers
+             (into {} (map (fn [[k v]] [(str k) (into #{} (map str) v)])) by-ns))]
+        {:module     module
+         :tier       (name (tiers/tier-for st (symbol module)))
+         :namespaces (vec (for [n members]
+                            {:ns    (str n)
+                             :forms (count (store/forms st n))
+                             :tier  (name (tiers/tier-for st n))
+                             :deps  (vec (sort (map str (get by-ns n))))
+                             ;; so the descend can tint a namespace without an
+                             ;; /api/ns/:ns per box — the N+1 this level exists
+                             ;; to avoid at module grain, avoided here too
+                             :gaps  (get gaps n)}))
+         :boundary   {:out (vec out) :in (vec in)}
+         ;; what the module's tests SAY it does, over every member at once —
+         ;; the one view of a module that needs no code read at all
+         :tests      (tests-of st (:test-map @session) members)
+         :layers     (mapv vec layers)
+         :cycles     (mapv vec cycles)}))))
+
+(defn story
+  "A namespace's or a module's STORY: its commit points newest first, each
+  with the asks that shaped it — [[slopp.read.history/story-rows]] over the
+  store's log, paged twenty at a time with `:more` counting the rest, plus
+  `:working` for what touched it since the last commit point.
+
+  `store` must carry its history (`slopp.ops/with-history` hydrates it; this
+  namespace is pure and does not). `grain` is \"ns\" or \"module\"; anything
+  else is nil so the endpoint can 404. A module's story is its PRODUCTION
+  namespaces': a test folds into its module for navigation, but what was
+  asked of a test is not the module's story."
+  [store grain subject page]
+  (let [subject (str subject)
+        pred    (case (str grain)
+                  "ns"     #(= subject (str %))
+                  "module" #(and (some? %)
+                                 (not (str/ends-with? (str %) "-test"))
+                                 (= subject (edit.modules/module-of (symbol (str %)))))
+                  nil)]
+    (when pred
+      (let [size 20
+            page (max 0 (or page 0))
+            {:keys [rows working]} (history/story-rows (store/deltas store) pred)]
+        (cond-> {:grain   (str grain)
+                 :subject subject
+                 :page    page
+                 :rows    (vec (take size (drop (* page size) rows)))
+                 :more    (max 0 (- (count rows) (* (inc page) size)))}
+          working (assoc :working working))))))
+
+(defn entry-points
+  "Every DOOR into the store, grouped by kind — what the code can be asked to
+  do, which is the first question about a system and the one a file tree
+  cannot answer. `{:kinds [{:kind :note :entries [{:kind :label :handler
+  :module :form-id}]}] :unreadable}`.
+
+  Kinds, in door order: `main` (the process entry, `main` as the caller read
+  it from the `app.main` capability), `http` (every declared route — the typed
+  REST contracts when no HTTP section is enabled), `cli` (commands), `webapp`
+  (browser screens) and `entry-point` (forms marked `^:entry-point`: called
+  from outside the code, by name). A kind with no doors is absent. Each entry
+  carries the form it opens on, so a reader goes from what the system can do
+  to what happens then in one step.
+
+  Derived from `query-surface`, the store's own declaration of what it
+  exposes, so a declaration that cannot be read is listed under
+  `:unreadable` rather than passed over as though it did not exist."
+  [session main]
+  (let [st      (:store @session)
+        surf    (query/query-surface session)
+        form-of (fn [q] (store/form-named st (symbol (namespace q)) (symbol (name q))))
+        door    (fn [kind label handler]
+                  (let [h (some-> handler str symbol)]
+                    (when (and h (namespace h))
+                      (cond-> {:kind    kind
+                               :label   (str label)
+                               :handler (str h)
+                               :module  (edit.modules/module-of (symbol (namespace h)))}
+                        (form-of h) (assoc :form-id (:id (form-of h)))))))
+        kinds   [["main" "the process entry — what runs when the app starts"
+                  (when main [(door "main" "app.main" main)])]
+                 ["http" "HTTP routes — each request enters the code here"
+                  (for [r (or (:http surf) (:rest surf)) :when (:handler r)]
+                    (door "http" (str (str/upper-case (name (or (:method r) :get))) " " (:path r))
+                          (:handler r)))]
+                 ["cli" "commands"
+                  (for [r (:cli surf) :when (:handler r)]
+                    (door "cli" (:command r) (:handler r)))]
+                 ["webapp" "browser screens — each address renders here"
+                  (for [r (:webapp surf) :when (:screen r)]
+                    (door "webapp" (:path r) (:screen r)))]
+                 ["entry-point" "marked ^:entry-point — called from outside the code, by name"
+                  (for [r (refs/refs st)
+                        :when (and (= :declared (:via r)) (= :entry-point (:marker r)))]
+                    (door "entry-point" (str (:to-ns r) "/" (:to-name r))
+                          (symbol (str (:to-ns r)) (str (:to-name r)))))]]]
+    {:kinds      (vec (for [[k note es] kinds
+                            :let [es (vec (sort-by :label (distinct (remove nil? es))))]
+                            :when (seq es)]
+                        {:kind k :note note :entries es}))
+     :unreadable (mapv str (:unreadable surf))}))
+
+(defn- sequence-doc
+  "A call trace as a document a screen can draw: the root, one LANE per module
+  in first-appearance order, and the steps with every symbol made text and
+  every callee addressed by its form id. Shared by the trace and the path so
+  the two draw the same way."
+  [st root trace truncated note]
+  (let [form-id (fn [q] (:id (store/form-named st (symbol (namespace q)) (symbol (name q)))))
+        mod     (fn [q] (edit.modules/module-of (symbol (namespace q))))
+        steps   (mapv (fn [{:keys [i depth from to via cycle? seen-at deeper? more]}]
+                        (cond-> {:i i :depth depth :from (str from) :from-module (mod from)}
+                          to                (assoc :to (str to) :to-module (mod to))
+                          (and to (form-id to)) (assoc :to-form-id (form-id to))
+                          via               (assoc :via (name via))
+                          cycle?            (assoc :cycle? true)
+                          seen-at           (assoc :seen-at seen-at)
+                          deeper?           (assoc :deeper? true)
+                          more              (assoc :more more)))
+                      trace)]
+    {:root      (cond-> {:form (str root) :module (mod root)}
+                  (form-id root) (assoc :form-id (form-id root)))
+     :lifelines (vec (distinct (cons (mod root) (keep :to-module steps))))
+     :steps     steps
+     :truncated truncated
+     :note      note}))
+
+(defn sequence-view
+  "What happens when the form `form-id` runs, as far as the code SAYS — its
+  calls in the order they are written, depth first
+  ([[slopp.read.graph/call-sequence]]), as a document one lane per module.
+  `depth` (1–8, default 4) and `steps` (1–500, default 200) bound it, and
+  `:truncated` says which bound was reached. nil for an unknown form."
+  ([session form-id] (sequence-view session form-id {}))
+  ([session form-id {:keys [depth steps]}]
+   (let [st (:store @session)
+         e  (store/form-by-id st (str form-id))]
+     (when (and e (:name e))
+       (let [root (symbol (str (store/ns-of-form-id st (str form-id))) (str (:name e)))
+             {trace :steps :keys [truncated]}
+             (graph/call-sequence st root
+                                  :depth (min 8 (max 1 (or depth 4)))
+                                  :steps (min 500 (max 1 (or steps 200))))]
+         (sequence-doc st root trace truncated
+                       (str "the calls in the order they are WRITTEN, depth first — a static"
+                            " reading of the code, not a recording of a run: a branch not"
+                            " taken reads the same as one taken")))))))
+
+(defn path-view
+  "The shortest CALL PATH from `from` to `to`, drawn as a sequence document —
+  each end a form id or a qualified `ns/name`, since a reader knows names and a
+  link carries ids. Each hop carries the reference graph's own `:via` for that
+  edge. No path is an answer — empty steps and a note saying so — and an
+  unknown end is nil."
+  [session from to]
+  (let [st      (:store @session)
+        named   (fn [x]
+                  (let [x (str x)]
+                    (if-let [e (store/form-by-id st x)]
+                      (when (:name e)
+                        (symbol (str (store/ns-of-form-id st x)) (str (:name e))))
+                      (when (str/includes? x "/")
+                        (let [q (symbol x)]
+                          (when (store/form-named st (symbol (namespace q)) (symbol (name q)))
+                            q))))))
+        a       (named from)
+        b       (named to)]
+    (when (and a b)
+      (let [path  (:path (graph/call-path st a b))
+            via   (fn [x y]
+                    (or (some #(when (and (= (namespace x) (str (:from-ns %)))
+                                          (= (name x) (str (:from-var %))))
+                                 (:via %))
+                              (refs/refs-to st y))
+                        :static))
+            trace (vec (map-indexed (fn [i [x y]] {:i i :depth (inc i) :from x :to y :via (via x y)})
+                                    (partition 2 1 path)))]
+        (sequence-doc st a trace {:depth false :steps false}
+                      (if path
+                        (str "the shortest call path between the two, each hop as the code"
+                             " writes it — static, like every edge here")
+                        (str "no call path — " b " is not reachable from " a
+                             " through calls the code writes")))))))
+
+(defn size-by-ns
+  "Namespace → how much code it holds, as the node count of its forms' sexprs —
+  the same measure a form row's `:mass` is, summed. Nodes rather than lines,
+  so a long docstring does not outweigh the body it describes."
+  [store]
+  (into {}
+        (for [n (keys (:namespaces store))]
+          [n (reduce + 0 (for [e (store/forms store n)
+                               :let [s (store/form-sexpr (:node e))]
+                               :when (some? s)]
+                           (count (tree-seq coll? seq s))))])))
+
+(defn effects-by-ns
+  "Namespace → how many of its forms perform effects, as the effect analysis
+  derives them — what the code DOES, where a tier says what it may."
+  [store]
+  (into {} (for [n (keys (:namespaces store))]
+             [n (count (query/ns-effectful-vars store n))])))
+
+(defn churn-by-ns
+  "Namespace → how many DISTINCT forms changed since the `n`th-last commit
+  point — where the work has been lately. Distinct forms rather than writes,
+  so a form rewritten ten times counts once. `store` must carry its history;
+  with fewer than `n` commit points the whole history counts."
+  [store n]
+  (let [ds      (vec (store/deltas store))
+        commits (keep-indexed (fn [i d] (when (= :commit (:op d)) i)) ds)
+        from    (if (>= (count commits) n) (inc (nth (reverse commits) (dec n))) 0)]
+    (->> (subvec ds from)
+         (filter #(and (history/content-ops (:op %)) (:ns %)))
+         (mapcat (fn [d] (for [f (remove nil? (cons (:form-id d) (:form-ids d)))]
+                           [(symbol (str (:ns d))) f])))
+         distinct
+         (map first)
+         frequencies)))
+
+(def dials
+  "The OVERLAY dials — what the Code map can be tinted by — each with the kind
+  of number it is and the sentence that says what the tint means. A share is
+  read as value over forms, a count is ranked within the store; the note says
+  which, because a colour with no sentence behind it is a guess."
+  {"size"     {:kind "count" :label "size"
+               :note (str "how much code, as the node count of its forms — ranked within"
+                          " this store, so the darkest is the largest HERE, not large in general")}
+   "effects"  {:kind "share" :label "effects"
+               :note (str "the share of forms that perform effects — the imperative shell"
+                          " reads dark and a pure core reads pale")}
+   "warranty" {:kind "share" :label "unwarranted"
+               :note (str "the share of forms no test has been OBSERVED running — measured"
+                          " against this session's trace, so a process that has run little"
+                          " reads dark everywhere")}
+   "churn"    {:kind "count" :label "churn"
+               :note (str "distinct forms changed across the last five commit points — where"
+                          " the work has been; ranked within this store")}
+   "risk"     {:kind "share" :label "risk"
+               :note (str "the share of forms the review scan flags — untested, unused, high"
+                          " blast radius, large, lint, undocumented or effectful")}})
+
+(defn overlay-doc
+  "One DIAL's tint facts for the Code map: `numerators` (namespace → n) over
+  each namespace's named forms, per namespace and rolled up per module —
+  `{:dial :kind :label :note :namespaces [{:ns :module :value :of}] :modules
+  [{:module :value :of}]}`. Test namespaces are left out: a test is not the
+  code being measured. nil for a dial [[dials]] does not name."
+  [store dial numerators]
+  (when-let [{:keys [kind label note]} (get dials (str dial))]
+    (let [test? #(str/ends-with? (str %) "-test")
+          rows  (vec (for [n (sort (remove test? (keys (:namespaces store))))]
+                       {:ns     (str n)
+                        :module (edit.modules/module-of n)
+                        :value  (get numerators n 0)
+                        :of     (count (filter :name (store/forms store n)))}))]
+      {:dial       (str dial)
+       :kind       kind
+       :label      label
+       :note       note
+       :namespaces rows
+       :modules    (vec (for [[m rs] (sort-by key (group-by :module rows))]
+                          {:module m
+                           :value  (reduce + 0 (map :value rs))
+                           :of     (reduce + 0 (map :of rs))}))})))
+
+(defn data-index
+  "The DATA DICTIONARY: the keys the code passes around, ranked by how far each
+  travels — modules, then namespaces, then forms — `{:keys [{:kw :modules
+  :namespaces :forms :destructured}] :total :shown}`.
+
+  A Clojure system's architecture is largely its map keys, and no file tree
+  shows them. Namespaced keys only unless `bare?`: plain ones are dominated by
+  schema and option vocabulary (`:map`, `:doc`) that says nothing about the
+  domain. `prefix` filters by substring of the name; `limit` (1–500, 100)
+  caps what is shown and `:total` says what was held back. `:destructured`
+  counts the forms that destructure the key — the ones that demonstrably READ
+  it; a mention (`:via :literal`) is a token, which may be a write, a read or
+  a lookup key, and is not claimed to be any of them. Test namespaces are left
+  out: a test is not the code being described."
+  [store {:keys [prefix bare? limit]}]
+  (let [limit (min 500 (max 1 (or limit 100)))
+        test? #(str/ends-with? (str %) "-test")
+        rows  (->> (refs/keyword-refs store)
+                   (remove #(test? (:from-ns %)))
+                   (filter #(or bare? (namespace (:kw %)))))
+        all   (for [[kw rs] (group-by :kw rows)
+                    :let [s (subs (str kw) 1)]
+                    :when (or (str/blank? prefix) (str/includes? s prefix))]
+                {:kw           s
+                 :modules      (count (distinct (map #(edit.modules/module-of (:from-ns %)) rs)))
+                 :namespaces   (count (distinct (map :from-ns rs)))
+                 :forms        (count (distinct (map :from-form rs)))
+                 :destructured (count (distinct (map :from-form (filter #(= :destructuring (:via %)) rs))))})
+        ranked (sort-by (juxt (comp - :modules) (comp - :namespaces) (comp - :forms) :kw) all)]
+    {:keys  (vec (take limit ranked))
+     :total (count ranked)
+     :shown (min limit (count ranked))}))
+
+(defn key-view
+  "One KEY and every production form that touches it, by module, each saying
+  HOW — naming it (`literal`) or destructuring it — `{:kw :modules [{:module
+  :forms [{:form :form-id :via}]}] :tests}`. Test namespaces are counted in
+  `:tests` rather than listed. `kw` is the key's name without its colon;
+  nil when no form touches it."
+  [store kw]
+  (let [k     (keyword (str/replace (str kw) #"^:" ""))
+        test? #(str/ends-with? (str %) "-test")
+        rs    (filter #(= k (:kw %)) (refs/keyword-refs store))
+        prod  (remove #(test? (:from-ns %)) rs)]
+    (when (seq rs)
+      {:kw      (subs (str k) 1)
+       :modules (vec (for [[m ms] (sort-by key (group-by #(edit.modules/module-of (:from-ns %)) prod))]
+                       {:module m
+                        :forms  (vec (for [[[fid fns fvar] us] (sort-by (fn [[[_ n v] _]] (str n "/" v))
+                                                                       (group-by (juxt :from-form :from-ns :from-var) ms))]
+                                       {:form    (str fns "/" fvar)
+                                        :form-id fid
+                                        :via     (vec (sort (distinct (map (comp name :via) us))))}))}))
+       :tests   (count (distinct (map :from-ns (filter #(test? (:from-ns %)) rs))))})))

@@ -594,7 +594,8 @@
              "/api/projects/:slug/search" "/api/projects/:slug/bundle"
              "/api/projects/:slug/cost" "/api/projects/:slug/rest/paths"
              "/api/projects/:slug/http/paths" "/api/projects/:slug/webapp/paths"
-             "/api/projects/:slug/config"
+             "/api/projects/:slug/config" "/api/projects/:slug/entries" "/api/projects/:slug/form/:id/sequence"
+             "/api/projects/:slug/flow" "/api/projects/:slug/overlay/:dial" "/api/projects/:slug/data" "/api/projects/:slug/story/:grain/:subject"
              "/**" "/css/style.css"}
            (set (map :path declared)))
         (pr-str (map (juxt :method :path) declared)))

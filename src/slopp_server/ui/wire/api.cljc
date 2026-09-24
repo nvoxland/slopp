@@ -190,3 +190,49 @@
    :http/params   #{:agent :arguments :slug :token :tool}
    :rest/request  slopp-server.ui.wire.contracts/call-endpoint-request
    :rest/response slopp-server.ui.wire.contracts/call-endpoint-response})
+
+(def ^{:http/external-path "a route on the slopp server, published in its contract; hand-owned since 2026-09-23, see the ns doc"} ^:export story
+  "GET /api/story/:grain/:subject — a namespace's or a module's history, told by commit point."
+  {:http/method   :get
+   :http/path     "/api/story/:grain/:subject"
+   :http/params   #{:grain :subject :page}
+   :rest/request  slopp-server.ui.wire.contracts/story-request
+   :rest/response slopp-server.ui.wire.contracts/story-response})
+
+(def ^{:http/external-path "a route on the slopp server, published in its contract; hand-owned since 2026-09-23, see the ns doc"} ^:export entries
+  "GET /api/entries — every door into the store, by kind."
+  {:http/method   :get
+   :http/path     "/api/entries"
+   :rest/response slopp-server.ui.wire.contracts/entries-response})
+
+(def ^{:http/external-path "a route on the slopp server, published in its contract; hand-owned since 2026-09-23, see the ns doc"} ^:export form-sequence
+  "GET /api/form/:id/sequence — what happens when one form runs, as the code writes it."
+  {:http/method   :get
+   :http/path     "/api/form/:id/sequence"
+   :http/params   #{:id :depth :steps}
+   :rest/request  slopp-server.ui.wire.contracts/sequence-request
+   :rest/response slopp-server.ui.wire.contracts/sequence-response})
+
+(def ^{:http/external-path "a route on the slopp server, published in its contract; hand-owned since 2026-09-23, see the ns doc"} ^:export flow
+  "GET /api/flow — the call path between two forms, drawn as a sequence."
+  {:http/method   :get
+   :http/path     "/api/flow"
+   :http/params   #{:from :to}
+   :rest/request  slopp-server.ui.wire.contracts/flow-request
+   :rest/response slopp-server.ui.wire.contracts/sequence-response})
+
+(def ^{:http/external-path "a route on the slopp server, published in its contract; hand-owned since 2026-09-23, see the ns doc"} ^:export overlay
+  "GET /api/overlay/:dial — what one dial tints the Code map by."
+  {:http/method   :get
+   :http/path     "/api/overlay/:dial"
+   :http/params   #{:dial}
+   :rest/request  slopp-server.ui.wire.contracts/overlay-request
+   :rest/response slopp-server.ui.wire.contracts/overlay-response})
+
+(def ^{:http/external-path "a route on the slopp server, published in its contract; hand-owned since 2026-09-23, see the ns doc"} ^:export data
+  "GET /api/data — the data dictionary, and with ?key= one key's users."
+  {:http/method   :get
+   :http/path     "/api/data"
+   :http/params   #{:q :bare :key :limit}
+   :rest/request  slopp-server.ui.wire.contracts/data-request
+   :rest/response slopp-server.ui.wire.contracts/data-response})
