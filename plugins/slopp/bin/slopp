@@ -7,6 +7,7 @@
 #   slopp --doctor                             self-check the plugin wiring end-to-end
 #   slopp server [port] | stop | status        ONE slopp for the machine: MCP over HTTP for every project
 #   slopp dev [dir]                            a project's DEV INSTANCE alone, re-served at every landing
+#   slopp build [dir] [--out DIR]              materialize a project's store into a runnable tree, no server needed
 # `slopp server` is yours to start and stop; nothing else here starts one.
 # It fetches and caches the versioned jar on first run; java 21+ required.
 set -euo pipefail
@@ -103,6 +104,42 @@ case "${1:-}" in
     fi
     mkdir -p "$HOME/.slopp"
     set -- "$HOME/.slopp" --main slopp-server.dev/-main "$PROJ"
+    ;;
+  build)
+    # `slopp build [dir] [--out DIR] [--main ns/fn] [--name NAME]`: materialize
+    # the project's store into a runnable tree — target/jar-src by default,
+    # where `clojure -T:build uber` reads — with NO slopp server. The one verb
+    # that must work without one, because the server is often the thing being
+    # rebuilt. Booted from the neutral dir like `dev`: the jar's own code is
+    # the builder and the project's store is what it builds; the entry opens
+    # it read-only, so nothing is stranded on a thread.
+    #
+    # `slopp build '{"dir":…}'` — a JSON (or @file) argument — is still the
+    # routed tool call it always was: the SESSION's view, built through the
+    # running server. A directory is not JSON, so the two spellings cannot
+    # collide.
+    if [ "${2:-}" != "${2#[{@]}" ]; then
+      TOOL="build"; RAW="$2"; ARGSFILE="$(mktemp)"
+      if [ "${RAW#@}" != "$RAW" ]; then cat "${RAW#@}" > "$ARGSFILE"; else printf '%s' "$RAW" > "$ARGSFILE"; fi
+    else
+    shift
+    PROJ="."
+    if [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; then PROJ="$1"; shift; fi
+    if [ ! -d "$PROJ" ]; then echo "slopp build: $PROJ is not a directory" >&2; exit 2; fi
+    PROJ="$(cd "$PROJ" && pwd)"
+    if [ ! -f "$PROJ/.slopp/store.db" ]; then
+      echo "slopp build: no .slopp/store.db in $PROJ — a build materializes a project's store" >&2; exit 2
+    fi
+    # a relative --out means relative to where the user typed it, not to the
+    # neutral dir the JVM starts in
+    ARGS=(); while [ $# -gt 0 ]; do
+      if [ "$1" = "--out" ] && [ $# -gt 1 ] && [ "${2#/}" = "$2" ]; then ARGS+=("--out" "$PWD/$2"); shift 2
+      else ARGS+=("$1"); shift; fi
+    done
+    mkdir -p "$HOME/.slopp"
+    # ${ARGS[@]+…}: an empty array is "unbound" to bash 3.2 under set -u
+    set -- "$HOME/.slopp" --main slopp-server.build/-main "$PROJ" ${ARGS[@]+"${ARGS[@]}"}
+    fi
     ;;
   --call)
     TOOL="${2:-}"; RAW="${3-}"; [ -z "$RAW" ] && RAW="{}"

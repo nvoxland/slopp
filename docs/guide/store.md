@@ -66,7 +66,8 @@ that a write failed to land.
 ## Getting real files out
 
 ```sh
-slopp --call build '{"dir":"/tmp/proj-out"}'
+slopp build . --out /tmp/proj-out      # from a shell, no server needed
+slopp --call build '{"dir":"/tmp/proj-out"}'   # or routed through the running server
 ```
 
 `build` materializes the store as ordinary files -- source, a generated

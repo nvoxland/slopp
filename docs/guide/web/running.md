@@ -182,7 +182,7 @@ config_file {path "capabilities" key "app.version" value "1.0.0"}
 ```
 
 ```sh
-slopp --call build '{"dir":"/tmp/shop-out"}'
+slopp build . --out /tmp/shop-out
 ```
 
 `build` materializes the store as ordinary files with a generated `deps.edn`,

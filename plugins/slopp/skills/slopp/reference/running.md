@@ -189,6 +189,16 @@ stop it: a human asked for it, so it does not follow the agents' lifecycle
 the way a managed child does. A slopp server that is also up must not serve
 the same instance; it will report the taken port.
 
+**A build needs no server either: `slopp build [dir] [--out DIR] [--main
+ns/fn] [--name NAME]`.** It is the `build` op from a shell: the entry opens
+the project's store itself, read-only, and materializes what has LANDED on
+the branch into `target/jar-src` by default (where a `clojure -T:build uber`
+reads), printing where the tree landed and, when the store declares an entry,
+the native recipe's script. Nothing is stranded on a thread because nothing
+is written. A routed `slopp --call build '{"dir":…}'` still builds the
+session's own view through a running server; the verb exists because the
+server is often the thing being rebuilt.
+
 **Working ON slopp is working through the in-progress slopp.** slopp's own
 checkout is a project like any other, and its dev config declares the
 in-progress version as a dev instance: `app.main = slopp-server.process/-main`
