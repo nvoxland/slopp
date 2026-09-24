@@ -3416,255 +3416,6 @@
             (history/commit-point-rows st))
       (mapv join (history/commit-point-rows st :titles-only true)))))
 
-^:reads (defn session-brief
-  "THE one-call orientation, task-shaped (knowledge-differential stance):
-  breadth stays CHEAP — namespace FAMILIES (≥5 same-prefix siblings) roll
-  up to one row, form names ride only for solo nses on small stores — and
-  depth arrives WHERE THE ASK POINTS: the session's :last-intent (the
-  user's verbatim words, via the prompt hook or turn_begin) seeds the same
-  walk `orient` makes over the reference graph, and the top rows ride as
-  interface CARDS under :relevant, each with its :via. The agent starts
-  working instead of orienting. :host is the serving process's code-currency
-  record (orient/host-brief over the kernel's boot-info, reached through the
-  late-ref carrier — absent when this process didn't boot from a store):
-  which code the host actually runs, and what a restart would change.
-  :module-cycles rides only when the manifest has one — impossible to create
-  under the gate, so it was inherited at import, and this is the only place
-  outside the web UI that says so."
-  [session]
-  (let [st       (:store @session)
-        nss      (sort (keys (:namespaces st)))
-        names    (into {} (map (fn [n] [n (vec (remove #{n} (keep :name (store/forms st n))))])) nss)
-        total    (reduce + 0 (map (comp count val) names))
-        fams     (group-by #(first (str/split (str %) #"\.")) nss)
-        project  (vec (mapcat (fn [[seg members]]
-                                (if (<= 5 (count members))
-                                  [{:family (str seg ".*") :nses (count members)
-                                    :forms (reduce + 0 (map (comp count names) members))}]
-                                  (for [n members]
-                                    (if (< 200 total)
-                                      {:ns n :forms (count (names n))}
-                                      {:ns n :forms (names n)}))))
-                              (sort-by key fams)))
-        ms       (->> (query-commits session)
-                      (take 2)
-                      (mapv #(-> (select-keys % [:commit :description :at :status])
-                                 (update :description orient/snip 110))))
-        last-done (when-let [conn (:db @session)]
-                    ;; guarded on the connection like the thread and host
-                    ;; clauses: a session on a dir with no store yet — the
-                    ;; server's first on a fresh project — has nothing to ask
-                    (let [d (db/last-marker conn (engine/session-line session) :done)]
-                      (when (and d (or (= :red (get-in d [:findings :test-status]))
-                                       (pos? (get-in d [:findings :lint-errors] 0))))
-                        (-> (select-keys d [:label :at :findings])
-                            (assoc :note (str "the last done-point left problems —"
-                                              " address them or tell the user why not"))))))
-        ;; the kernel ns exists only in a process that booted from a store
-        ;; (the dev server, a jar launch) — reach it through the carrier and
-        ;; treat any failure as absence, never an error
-        host     (when-let [info (try ((store/late-ref 'slopp.kernel.boot/current-boot-info))
-                                      (catch Throwable _ nil))]
-                   (orient/host-brief
-                    ;; :jar-head is the ARTIFACT's identity; placing it against
-                    ;; THIS store is the caller's job, because the store a jar
-                    ;; runs against is often not the one it was built from.
-                    (cond-> info
-                      (:jar-head info)
-                      (assoc :jar (jar-currency session (:jar-head info))))
-                    ;; ONE spelling of the code-delta count. This was a second
-                    ;; copy of code-deltas-since — identical today, and the
-                    ;; docstring one namespace over already called itself "the
-                    ;; ONLY spelling of it" while this stood beside it. Three
-                    ;; artifacts now report staleness with it.
-                    (db/code-deltas-after (:db @session) (engine/session-line session)
-                                          {:at (:booted-at info 0)})
-                    (boolean (when-let [b (:branch @session)]
-                               (not= "main" (str b))))
-                    ;; MEASURED, not inferred: without this the
-                    ;; brief repeats whatever the reload counter
-                    ;; believes, which is how it once announced
-                    ;; five stale namespaces to a process that
-                    ;; held every one of them current.
-                    (rules.currency/drift (:image @session) st)))
-        ;; DERIVED, never remembered. A cycle is standing debt rather than an
-        ;; event, so reading the manifest each time means it survives a
-        ;; restart, covers import as well as adoption, and cannot disagree
-        ;; with the module graph — one `module-layers`, one answer.
-        cycles   (vec (:cycles (store/module-layers (:modules st))))
-        ;; one store-wide scan, not two — the cond-> below tests and reports the
-        ;; same value
-        unread   (orient/unread-declarations st)
-        ;; a projected config rendering held as a FILE with nothing behind it —
-        ;; what an import before the clone path learned to restore config left.
-        ;; Every capability reads nil while the projection shows the declaration
-        ;; plainly, which is why it has to be said HERE, beside the app line.
-        blobbed  (not-empty (store/blobbed-config-paths st))
-        ;; under the server the app server is the PROJECT's, held by its owner
-        ;; session; this session mirrors it only after a refresh it ran itself.
-        ;; Read the owner's when it is already open — never force it: an
-        ;; orientation must not be the thing that opens a reader.
-        app      (or (:app-server @session)
-                     (when-let [o (:app-owner @session)]
-                       (when (or (not (delay? o)) (realized? o))
-                         (:app-server @(force o)))))
-        declared (cond
-                   (capabilities/effective st "app.main")
-                   (str "app.main = " (capabilities/effective st "app.main"))
-                   (capabilities/effective st "http.enabled")
-                   "http.enabled")
-        ;; the line this session WRITES to, when it is a private one. Read from
-        ;; the session rather than resolved, deliberately: resolving ADOPTS,
-        ;; and orientation must not be the thing that creates a workspace.
-        ;; The count is measured from the thread's own base, which is the one
-        ;; delta guaranteed to be in its log however far the branch has moved.
-        thread   (when-let [conn (:db @session)]
-                   (when-let [row (and (:line @session)
-                                       (first (filter #(= (:line @session) (:id %))
-                                                      (db/lines conn))))]
-                     (when (= "thread" (:kind row))
-                       ;; ONE producer for this number, shared with thread_list and
-                       ;; the write hint. It used to be re-derived here by counting
-                       ;; the store's deltas past the base, which was a second
-                       ;; derivation of the same question AND the same defect: it
-                       ;; counted verification records, so a check with nothing
-                       ;; written left it non-zero.
-                       (let [n (db/unlanded-count conn (:id row) history/content-ops)]
-                         (cond-> {:on (:branch @session) :unlanded n}
-                           (pos? n)
-                           (assoc :note
-                                  (str n " change(s) are private to this thread. A green"
-                                       " done lands them on " (:branch @session)
-                                       "; nothing outside this session — the running"
-                                       " host included — can see them until it does.")))))))
-        intent   (:last-intent @session)
-        ;; the ask's MAP, at a small budget: the same walk `orient` makes over
-        ;; the reference graph and the coverage edges, so the brief's
-        ;; :relevant is the first six rows of what `orient {ask}` would say
-        ;; — seeds first, then what they pull in, each with its :via
-        relevant (when (seq (str/trim (str intent)))
-                   (->> (:rows (orient/orient-map session :ask intent :tokens 700))
-                        (take 6)
-                        vec
-                        not-empty))]
-    ;; no :loop line: it was 472 chars byte-identical in every session of a
-    ;; lifetime, re-teaching what the skill said. The brief carries what
-    ;; CHANGED and what needs the agent, nothing that is true every time.
-    (cond-> {:project project
-             ;; what the code means by each lib — the ns-form question, answered once
-             :aliases (read.modules/project-aliases (:store @session))}
-      (seq ms)   (assoc :commit-points ms)
-      last-done  (assoc :last-done last-done)
-      ;; A tangle can only have been INHERITED — `module_dep` cycle-checks
-      ;; every add, so nothing a store does under the gate can create one.
-      ;; That makes this the rarest thing in the brief and the one nobody
-      ;; else will mention: adoption reports it once at open and the report
-      ;; is discarded, leaving the web UI's module page as the only surface.
-      (seq cycles)
-      (assoc :module-cycles cycles
-             :module-cycles-note
-             (str "inherited at import — nothing loads in a circle and the code"
-                  " is not broken. A module is the first two segments, so this"
-                  " is a cross-module call in each direction. Nothing can add"
-                  " to it (an edge that closes a cycle is refused), so it is"
-                  " one-time debt: move what crosses, then module_dep"
-                  " {from … to … remove true}."))
-      host       (assoc :host host)
-      thread     (assoc :thread thread)
-      ;; what this store DECLARES that this slopp no longer reads. The brief is
-      ;; where it belongs because the moment it becomes true is a RESTART onto
-      ;; a different artifact — no write happened, so no write-time gate could
-      ;; have said it, and the store did not change.
-      ;;
-      ;; It is the JOIN rather than the finding: `unknown-marker` reports the
-      ;; per-form half at done grain, and nobody adds ten of those up. A
-      ;; consuming store hit exactly this — every route declaring a retired
-      ;; spelling, so nothing registered and everything 404d — and diagnosed
-      ;; drift in a since-retired check-in protocol instead, because the fact
-      ;; it needed was not here to read.
-      unread     (assoc :unread-declarations unread)
-      ;; this project's READ API on the server — `/api/projects/<slug>`, the
-      ;; `/api/<resource>` of its contract mounted there: JSON, plus the
-      ;; surface documents under it. The address to hand a PROGRAM (a client
-      ;; generator, a script). A HUMAN gets :pages — the server's own pages
-      ;; for this project, `/p/<slug>`, which read that same API. Both set by
-      ;; the server at attach; a session attached with nothing bound (a test
-      ;; on the registry alone) has no line here to hand out.
-      (:api-url @session) (merge {:api (:api-url @session)}
-                                 (when-let [p (:pages-url @session)] {:pages p}))
-      ;; the APP slopp is running for this project, when it is running one.
-      ;; Its only other announcement is a line on the server's stderr, which
-      ;; most clients never show anyone — so an agent asked "what is going
-      ;; on" is where a human finds out the app has an address at all.
-            (:url app) (assoc :app (:url app))
-      ;; and what the image cost to come up. It rides HERE rather than only on
-      ;; the banner because the comment two lines up is the whole reason: an
-      ;; agent asked "what is going on" is where a human finds out. The first
-      ;; app to want this number had to watch for the child process and diff
-      ;; its bind against its start time — hand-measuring a figure slopp had
-      ;; already computed, because the only place it was written was stderr.
-            (:boot-ms app)
-      (assoc :app-boot-ms (:boot-ms app))
-      ;; and whether that image is built from what you just wrote. `full_check`
-      ;; has carried this for a while and the BRIEF is where a reader looks —
-      ;; a consumer read this brief through a twenty-minute window in which
-      ;; their app served old code, and it said nothing, because the counter
-      ;; lived in a different call. Two docstrings meanwhile claimed it was
-      ;; here.
-      ;;
-      ;; 0 is REPORTED, not silenced: the question is "is the page I am about
-      ;; to look at built from what I just wrote", and silence on yes puts the
-      ;; reader back to hand-checking something slopp knows. Silence is for
-      ;; nothing-is-serving, which `behind` answers nil for.
-            (some? (app-behind session app))
-      (assoc :app-behind (app-behind session app))
-      ;; and a managed app server that FAILED is not the same as one nobody
-      ;; asked for. Silence on both is how "the dev server is broken" reads
-      ;; as "this project has no dev server", which sends the reader nowhere.
-            (and app (not (:serving? app)))
-      (assoc :app-note (str "slopp is running this project's app server and it"
-                            " is DOWN: " (:reason app)))
-      ;; and NO app at all is said in both directions. Silence here was
-      ;; deliberate once — most stores are not web projects — and it hid a
-      ;; LOST declaration for an hour: the brief said nothing, the registry
-      ;; said app null, and the reader concluded the project had no dev
-      ;; server rather than that its declaration had been blobbed.
-      ;; unless this process IS that app: a managed child never boots a child
-      ;; of itself, so "none is running" would describe the process answering
-      (and (nil? app) declared (:dev-instance-of @session))
-      (assoc :app-note (str "this process IS this store's dev instance (" declared "),"
-                            " booted by the machine server and refreshed at each done"
-                            " there; it serves you and manages no app of its own"))
-      (and (nil? app) declared (not (:dev-instance-of @session)))
-      (assoc :app-note (str "this store declares an app (" declared ") but none is"
-                            " running in this session's view: the server"
-                            " starts it on the project's first attach and"
-                            " re-serves it at each done. If it stays absent, the"
-                            " server's stderr carries the boot verdict"
-                            (when blobbed
-                              (str " — and see :config-blobbed: " (str/join ", " blobbed)
-                                   " exist only as tracked files"))))
-      (and (nil? app) (nil? declared))
-      (assoc :app-note (str "no app server: this store declares neither app.main"
-                            " nor http.enabled — config_file {path \"capabilities\""
-                            " key \"http.enabled\" value \"true\"} opts it into web,"
-                            " or key \"app.main\" value \"my.ns/-main\" declares"
-                            " an entry to run"
-                            (when blobbed
-                              (str ". BUT " (str/join ", " blobbed)
-                                   " exist as tracked FILES with no structured"
-                                   " config behind them — an import blobbed the"
-                                   " declaration; see :config-blobbed"))))
-      blobbed
-      (assoc :config-blobbed blobbed
-             :config-blobbed-note
-             (str "projected config held as opaque files, not declarations —"
-                  " every reader of those keys sees nil. An import before the"
-                  " clone path restored config did this. Repair each: file_get"
-                  " {path P}, config_file {path P key K value V} per line, then"
-                  " file_remove {path P}."))
-      relevant   (assoc :relevant relevant))))
-
 (defn ^:export journal
   "`session`'s line's whole delta log, oldest first, read now — the list the
   value no longer carries. A session with no journal answers its value's own
@@ -5398,6 +5149,282 @@
                    (sort-by key values)))
          [])
         {:path (str path) :keys (count values)})))
+
+(defn- app-booting-since
+  "When the boot of this project's app server that is IN FLIGHT began, or nil.
+  The server starts the app in the background on a project's first open and
+  lends each session `:app-booting-since`, a fn over the project's record; a
+  session with no server behind it has none. Nil once an app is held, whatever
+  the record says."
+  [session app]
+  (when (nil? app)
+    (when-let [f (:app-booting-since @session)]
+      (try (f) (catch Throwable _ nil)))))
+
+^:reads (defn session-brief
+  "THE one-call orientation, task-shaped (knowledge-differential stance):
+  breadth stays CHEAP — namespace FAMILIES (≥5 same-prefix siblings) roll
+  up to one row, form names ride only for solo nses on small stores — and
+  depth arrives WHERE THE ASK POINTS: the session's :last-intent (the
+  user's verbatim words, via the prompt hook or turn_begin) seeds the same
+  walk `orient` makes over the reference graph, and the top rows ride as
+  interface CARDS under :relevant, each with its :via. The agent starts
+  working instead of orienting. :host is the serving process's code-currency
+  record (orient/host-brief over the kernel's boot-info, reached through the
+  late-ref carrier — absent when this process didn't boot from a store):
+  which code the host actually runs, and what a restart would change.
+  :module-cycles rides only when the manifest has one — impossible to create
+  under the gate, so it was inherited at import, and this is the only place
+  outside the web UI that says so."
+  [session]
+  (let [st       (:store @session)
+        nss      (sort (keys (:namespaces st)))
+        names    (into {} (map (fn [n] [n (vec (remove #{n} (keep :name (store/forms st n))))])) nss)
+        total    (reduce + 0 (map (comp count val) names))
+        fams     (group-by #(first (str/split (str %) #"\.")) nss)
+        project  (vec (mapcat (fn [[seg members]]
+                                (if (<= 5 (count members))
+                                  [{:family (str seg ".*") :nses (count members)
+                                    :forms (reduce + 0 (map (comp count names) members))}]
+                                  (for [n members]
+                                    (if (< 200 total)
+                                      {:ns n :forms (count (names n))}
+                                      {:ns n :forms (names n)}))))
+                              (sort-by key fams)))
+        ms       (->> (query-commits session)
+                      (take 2)
+                      (mapv #(-> (select-keys % [:commit :description :at :status])
+                                 (update :description orient/snip 110))))
+        last-done (when-let [conn (:db @session)]
+                    ;; guarded on the connection like the thread and host
+                    ;; clauses: a session on a dir with no store yet — the
+                    ;; server's first on a fresh project — has nothing to ask
+                    (let [d (db/last-marker conn (engine/session-line session) :done)]
+                      (when (and d (or (= :red (get-in d [:findings :test-status]))
+                                       (pos? (get-in d [:findings :lint-errors] 0))))
+                        (-> (select-keys d [:label :at :findings])
+                            (assoc :note (str "the last done-point left problems —"
+                                              " address them or tell the user why not"))))))
+        ;; the kernel ns exists only in a process that booted from a store
+        ;; (the dev server, a jar launch) — reach it through the carrier and
+        ;; treat any failure as absence, never an error
+        host     (when-let [info (try ((store/late-ref 'slopp.kernel.boot/current-boot-info))
+                                      (catch Throwable _ nil))]
+                   (orient/host-brief
+                    ;; :jar-head is the ARTIFACT's identity; placing it against
+                    ;; THIS store is the caller's job, because the store a jar
+                    ;; runs against is often not the one it was built from.
+                    (cond-> info
+                      (:jar-head info)
+                      (assoc :jar (jar-currency session (:jar-head info))))
+                    ;; ONE spelling of the code-delta count. This was a second
+                    ;; copy of code-deltas-since — identical today, and the
+                    ;; docstring one namespace over already called itself "the
+                    ;; ONLY spelling of it" while this stood beside it. Three
+                    ;; artifacts now report staleness with it.
+                    (db/code-deltas-after (:db @session) (engine/session-line session)
+                                          {:at (:booted-at info 0)})
+                    (boolean (when-let [b (:branch @session)]
+                               (not= "main" (str b))))
+                    ;; MEASURED, not inferred: without this the
+                    ;; brief repeats whatever the reload counter
+                    ;; believes, which is how it once announced
+                    ;; five stale namespaces to a process that
+                    ;; held every one of them current.
+                    (rules.currency/drift (:image @session) st)))
+        ;; DERIVED, never remembered. A cycle is standing debt rather than an
+        ;; event, so reading the manifest each time means it survives a
+        ;; restart, covers import as well as adoption, and cannot disagree
+        ;; with the module graph — one `module-layers`, one answer.
+        cycles   (vec (:cycles (store/module-layers (:modules st))))
+        ;; one store-wide scan, not two — the cond-> below tests and reports the
+        ;; same value
+        unread   (orient/unread-declarations st)
+        ;; a projected config rendering held as a FILE with nothing behind it —
+        ;; what an import before the clone path learned to restore config left.
+        ;; Every capability reads nil while the projection shows the declaration
+        ;; plainly, which is why it has to be said HERE, beside the app line.
+        blobbed  (not-empty (store/blobbed-config-paths st))
+        ;; under the server the app server is the PROJECT's, held by its owner
+        ;; session; this session mirrors it only after a refresh it ran itself.
+        ;; Read the owner's when it is already open — never force it: an
+        ;; orientation must not be the thing that opens a reader.
+        app      (or (:app-server @session)
+                     (when-let [o (:app-owner @session)]
+                       (when (or (not (delay? o)) (realized? o))
+                         (:app-server @(force o)))))
+        declared (cond
+                   (capabilities/effective st "app.main")
+                   (str "app.main = " (capabilities/effective st "app.main"))
+                   (capabilities/effective st "http.enabled")
+                   "http.enabled")
+        ;; the line this session WRITES to, when it is a private one. Read from
+        ;; the session rather than resolved, deliberately: resolving ADOPTS,
+        ;; and orientation must not be the thing that creates a workspace.
+        ;; The count is measured from the thread's own base, which is the one
+        ;; delta guaranteed to be in its log however far the branch has moved.
+        thread   (when-let [conn (:db @session)]
+                   (when-let [row (and (:line @session)
+                                       (first (filter #(= (:line @session) (:id %))
+                                                      (db/lines conn))))]
+                     (when (= "thread" (:kind row))
+                       ;; ONE producer for this number, shared with thread_list and
+                       ;; the write hint. It used to be re-derived here by counting
+                       ;; the store's deltas past the base, which was a second
+                       ;; derivation of the same question AND the same defect: it
+                       ;; counted verification records, so a check with nothing
+                       ;; written left it non-zero.
+                       (let [n (db/unlanded-count conn (:id row) history/content-ops)]
+                         (cond-> {:on (:branch @session) :unlanded n}
+                           (pos? n)
+                           (assoc :note
+                                  (str n " change(s) are private to this thread. A green"
+                                       " done lands them on " (:branch @session)
+                                       "; nothing outside this session — the running"
+                                       " host included — can see them until it does.")))))))
+        intent   (:last-intent @session)
+        ;; the ask's MAP, at a small budget: the same walk `orient` makes over
+        ;; the reference graph and the coverage edges, so the brief's
+        ;; :relevant is the first six rows of what `orient {ask}` would say
+        ;; — seeds first, then what they pull in, each with its :via
+        relevant (when (seq (str/trim (str intent)))
+                   (->> (:rows (orient/orient-map session :ask intent :tokens 700))
+                        (take 6)
+                        vec
+                        not-empty))]
+    ;; no :loop line: it was 472 chars byte-identical in every session of a
+    ;; lifetime, re-teaching what the skill said. The brief carries what
+    ;; CHANGED and what needs the agent, nothing that is true every time.
+    (cond-> {:project project
+             ;; what the code means by each lib — the ns-form question, answered once
+             :aliases (read.modules/project-aliases (:store @session))}
+      (seq ms)   (assoc :commit-points ms)
+      last-done  (assoc :last-done last-done)
+      ;; A tangle can only have been INHERITED — `module_dep` cycle-checks
+      ;; every add, so nothing a store does under the gate can create one.
+      ;; That makes this the rarest thing in the brief and the one nobody
+      ;; else will mention: adoption reports it once at open and the report
+      ;; is discarded, leaving the web UI's module page as the only surface.
+      (seq cycles)
+      (assoc :module-cycles cycles
+             :module-cycles-note
+             (str "inherited at import — nothing loads in a circle and the code"
+                  " is not broken. A module is the first two segments, so this"
+                  " is a cross-module call in each direction. Nothing can add"
+                  " to it (an edge that closes a cycle is refused), so it is"
+                  " one-time debt: move what crosses, then module_dep"
+                  " {from … to … remove true}."))
+      host       (assoc :host host)
+      thread     (assoc :thread thread)
+      ;; what this store DECLARES that this slopp no longer reads. The brief is
+      ;; where it belongs because the moment it becomes true is a RESTART onto
+      ;; a different artifact — no write happened, so no write-time gate could
+      ;; have said it, and the store did not change.
+      ;;
+      ;; It is the JOIN rather than the finding: `unknown-marker` reports the
+      ;; per-form half at done grain, and nobody adds ten of those up. A
+      ;; consuming store hit exactly this — every route declaring a retired
+      ;; spelling, so nothing registered and everything 404d — and diagnosed
+      ;; drift in a since-retired check-in protocol instead, because the fact
+      ;; it needed was not here to read.
+      unread     (assoc :unread-declarations unread)
+      ;; this project's READ API on the server — `/api/projects/<slug>`, the
+      ;; `/api/<resource>` of its contract mounted there: JSON, plus the
+      ;; surface documents under it. The address to hand a PROGRAM (a client
+      ;; generator, a script). A HUMAN gets :pages — the server's own pages
+      ;; for this project, `/p/<slug>`, which read that same API. Both set by
+      ;; the server at attach; a session attached with nothing bound (a test
+      ;; on the registry alone) has no line here to hand out.
+      (:api-url @session) (merge {:api (:api-url @session)}
+                                 (when-let [p (:pages-url @session)] {:pages p}))
+      ;; the APP slopp is running for this project, when it is running one.
+      ;; Its only other announcement is a line on the server's stderr, which
+      ;; most clients never show anyone — so an agent asked "what is going
+      ;; on" is where a human finds out the app has an address at all.
+            (:url app) (assoc :app (:url app))
+      ;; and what the image cost to come up. It rides HERE rather than only on
+      ;; the banner because the comment two lines up is the whole reason: an
+      ;; agent asked "what is going on" is where a human finds out. The first
+      ;; app to want this number had to watch for the child process and diff
+      ;; its bind against its start time — hand-measuring a figure slopp had
+      ;; already computed, because the only place it was written was stderr.
+            (:boot-ms app)
+      (assoc :app-boot-ms (:boot-ms app))
+      ;; and whether that image is built from what you just wrote. `full_check`
+      ;; has carried this for a while and the BRIEF is where a reader looks —
+      ;; a consumer read this brief through a twenty-minute window in which
+      ;; their app served old code, and it said nothing, because the counter
+      ;; lived in a different call. Two docstrings meanwhile claimed it was
+      ;; here.
+      ;;
+      ;; 0 is REPORTED, not silenced: the question is "is the page I am about
+      ;; to look at built from what I just wrote", and silence on yes puts the
+      ;; reader back to hand-checking something slopp knows. Silence is for
+      ;; nothing-is-serving, which `behind` answers nil for.
+            (some? (app-behind session app))
+      (assoc :app-behind (app-behind session app))
+      ;; and a managed app server that FAILED is not the same as one nobody
+      ;; asked for. Silence on both is how "the dev server is broken" reads
+      ;; as "this project has no dev server", which sends the reader nowhere.
+            (and app (not (:serving? app)))
+      (assoc :app-note (str "slopp is running this project's app server and it"
+                            " is DOWN: " (:reason app)))
+      ;; and NO app at all is said in both directions. Silence here was
+      ;; deliberate once — most stores are not web projects — and it hid a
+      ;; LOST declaration for an hour: the brief said nothing, the registry
+      ;; said app null, and the reader concluded the project had no dev
+      ;; server rather than that its declaration had been blobbed.
+      ;; unless this process IS that app: a managed child never boots a child
+      ;; of itself, so "none is running" would describe the process answering
+      (and (nil? app) declared (:dev-instance-of @session)
+           (not (app-booting-since session app)))
+      (assoc :app-note (str "this process IS this store's dev instance (" declared "),"
+                            " booted by the machine server and refreshed at each done"
+                            " there; it serves you and manages no app of its own"))
+      (and (nil? app) declared (not (:dev-instance-of @session))
+           (not (app-booting-since session app)))
+      (assoc :app-note (str "this store declares an app (" declared ") but none is"
+                            " running in this session's view: the server"
+                            " starts it on the project's first attach and"
+                            " re-serves it at each done. If it stays absent, the"
+                            " server's stderr carries the boot verdict"
+                            (when blobbed
+                              (str " — and see :config-blobbed: " (str/join ", " blobbed)
+                                   " exist only as tracked files"))))
+      (and (nil? app) (nil? declared) (not (app-booting-since session app)))
+      (assoc :app-note (str "no app server: this store declares neither app.main"
+                            " nor http.enabled — config_file {path \"capabilities\""
+                            " key \"http.enabled\" value \"true\"} opts it into web,"
+                            " or key \"app.main\" value \"my.ns/-main\" declares"
+                            " an entry to run"
+                            (when blobbed
+                              (str ". BUT " (str/join ", " blobbed)
+                                   " exist as tracked FILES with no structured"
+                                   " config behind them — an import blobbed the"
+                                   " declaration; see :config-blobbed"))))
+      blobbed
+      (assoc :config-blobbed blobbed
+             :config-blobbed-note
+             (str "projected config held as opaque files, not declarations —"
+                  " every reader of those keys sees nil. An import before the"
+                  " clone path restored config did this. Repair each: file_get"
+                  " {path P}, config_file {path P key K value V} per line, then"
+                  " file_remove {path P}."))
+      relevant   (assoc :relevant relevant)
+      ;; a boot IN FLIGHT, last so it is the note that stands: the first open
+      ;; starts the app in the background, and "none is running" in these
+      ;; seconds read exactly like a boot that failed or never happened
+      (app-booting-since session app)
+      (assoc :app-note (str "slopp is starting this project's app server"
+                            (when declared (str " (" declared ")"))
+                            " — booting for "
+                            (quot (max 0 (- (System/currentTimeMillis)
+                                            (app-booting-since session app)))
+                                  1000)
+                            "s, begun when the project opened. The image takes"
+                            " seconds to come up; ask again and :app carries its"
+                            " url. If it never appears, the server's stderr"
+                            " carries the boot verdict")))))
 
 (defn create-ns!
   "F4: bring a brand-new namespace into being — two modes:

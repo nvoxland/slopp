@@ -898,3 +898,21 @@
   child is the newer copy, not the staler one."
   [dir]
   (= (str dir) (System/getProperty "slopp.managed-for")))
+
+(defn ^:export reserve-decision
+  "What the app-refresh poll does for one served project, given the
+  data-version and main head it was LAST served at and the pair read now.
+  Pure — the effectful poll injects the two current values.
+
+  - `:none` — nothing has committed since (data-version unchanged): skip, the
+    cheap common case, and the poll does not even read the head.
+  - `:touch` — something committed but MAIN did not move (a thread /
+    mini-journal write, a git pin, the trace map): record the new version, do
+    NOT re-serve.
+  - `:reserve` — main advanced (a landing, by any writer on the shared
+    store): re-serve the app and record both."
+  [served-version served-head version head]
+  (cond
+    (= version served-version)          :none
+    (and head (not= head served-head))  :reserve
+    :else                               :touch))

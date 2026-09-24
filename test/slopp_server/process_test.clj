@@ -5,7 +5,7 @@
   (:require [cheshire.core :as json]
             [clojure.test :refer [deftest is testing]]
             [slopp-server.process :as process]
-            [slopp.http :as slopp.http] [slopp.ops.external :as external] [slopp.ops :as ops] [slopp.cache :as cache] [slopp-server.mcp :as mcp] [slopp.http.routes :as routes] [clojure.string :as str] [slopp.sync :as sync] [slopp.store :as store] [clojure.java.shell :as sh] [clojure.java.io :as io] [slopp.store.db :as db] [slopp.ops.engine :as engine]))
+            [slopp.http :as slopp.http] [slopp.ops.external :as external] [slopp.ops :as ops] [slopp.cache :as cache] [slopp-server.mcp :as mcp] [slopp.http.routes :as routes] [clojure.string :as str] [slopp.sync :as sync] [slopp.store :as store] [clojure.java.shell :as sh] [clojure.java.io :as io] [slopp.store.db :as db] [slopp.ops.engine :as engine] [slopp.webdev.live :as live]))
 
 (defn- tmp-dir!
   "A fresh empty directory: a project nobody has written to yet. Canonical,
@@ -993,16 +993,16 @@
 
 (deftest the-app-poll-re-serves-only-on-a-main-advance
   (testing "data-version unchanged: nothing committed since — skip, do not even read the head"
-    (is (= :none (process/reserve-decision 5 "h1" 5 "h1")))
-    (is (= :none (process/reserve-decision 5 "h1" 5 "h2")) "version is the gate; head is not read when it is unchanged"))
+    (is (= :none (live/reserve-decision 5 "h1" 5 "h1")))
+    (is (= :none (live/reserve-decision 5 "h1" 5 "h2")) "version is the gate; head is not read when it is unchanged"))
   (testing "a commit that MOVED main — a landing by any writer — re-serves"
-    (is (= :reserve (process/reserve-decision 5 "h1" 6 "h2"))))
+    (is (= :reserve (live/reserve-decision 5 "h1" 6 "h2"))))
   (testing "a commit that did NOT move main — a thread write, a git pin — only records the version"
-    (is (= :touch (process/reserve-decision 5 "h1" 6 "h1"))))
+    (is (= :touch (live/reserve-decision 5 "h1" 6 "h1"))))
   (testing "a commit with no readable head does not re-serve"
-    (is (= :touch (process/reserve-decision 5 "h1" 6 nil))))
+    (is (= :touch (live/reserve-decision 5 "h1" 6 nil))))
   (testing "first sight (nothing served yet): a head present is an advance"
-    (is (= :reserve (process/reserve-decision nil nil 1 "h1")))))
+    (is (= :reserve (live/reserve-decision nil nil 1 "h1")))))
 
 (deftest ^:external a-project-first-opened-by-the-cli-door-boots-its-app-like-an-attach
   ;; `attach!` boots the project's app server on the FIRST open, and
@@ -1169,3 +1169,25 @@
       (finally
         (slopp.http/stop! child)
         (process/reset-all!)))))
+
+(deftest ^:external a-session-can-tell-its-projects-app-is-still-booting
+  ;; The first open boots the app server in a future, so for its first seconds
+  ;; a project has no app and no failure either. The server records the boot
+  ;; on the PROJECT — every session on it lends the same answer, not only the
+  ;; one whose attach started it — and clears it when the boot returns. The
+  ;; boot is pretended: the window is the fact.
+  (let [d (tmp-dir!)]
+    (try
+      (with-redefs [mcp/app-managed? (constantly true)
+                    mcp/start-app!   (fn [owner]
+                                       (Thread/sleep 800)
+                                       (swap! owner assoc :app-server {:image :pretend})
+                                       {:serving? true})
+                    mcp/stop-app!    (fn [owner] (swap! owner dissoc :app-server) {:stopped true})]
+        (let [{a :session} (process/attach! d "p")
+              {b :session} (process/attach! d "p")]
+          (is (number? ((:app-booting-since @a))) "the opener sees its boot in flight")
+          (is (number? ((:app-booting-since @b))) "and so does a session that attached during it")
+          (Thread/sleep 1500)
+          (is (nil? ((:app-booting-since @a))) "cleared once the boot returned")))
+      (finally (process/reset-all!)))))

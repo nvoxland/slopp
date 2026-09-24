@@ -686,24 +686,6 @@
      [:prompt {:optional true :doc "the verbatim ask, on UserPromptSubmit"} :string]
      [:tool_input {:optional true :doc "the tool's input, on PreToolUse/PostToolUse; `command` for Bash"} [:map [:command {:optional true :doc "the shell command the Bash tool ran or is about to run"} :string]]]]]])
 
-(defn reserve-decision
-  "What the app-refresh poll does for one served project, given the
-  data-version and main head it was LAST served at and the pair read now.
-  Pure — the effectful poll injects the two current values.
-
-  - `:none` — nothing has committed since (data-version unchanged): skip, the
-    cheap common case, and the poll does not even read the head.
-  - `:touch` — something committed but MAIN did not move (a thread /
-    mini-journal write, a git pin, the trace map): record the new version, do
-    NOT re-serve.
-  - `:reserve` — main advanced (a landing, by any writer on the shared
-    store): re-serve the app and record both."
-  [served-version served-head version head]
-  (cond
-    (= version served-version)          :none
-    (and head (not= head served-head))  :reserve
-    :else                               :touch))
-
 ^:unsafe (defn ^:export refresh-served-apps!
   "Re-serve every managed dev instance whose MAIN line has advanced since it
   was last served — regardless of WHO landed the done: a co-tenant session, a
@@ -725,7 +707,7 @@
             dv   (db/data-version conn)]
         (when (not= dv (:served-version p))
           (let [head (db/line-head conn (engine/session-line reader))]
-            (case (reserve-decision (:served-version p) (:served-head p) dv head)
+            (case (live/reserve-decision (:served-version p) (:served-head p) dv head)
               :reserve (do (mcp/reserve-owner! reader)
                            (swap! state update-in [:projects dir] assoc
                                   :served-head head :served-version dv))
@@ -825,8 +807,15 @@
   Nothing else will ever stop this child."
   [dir session owner first?]
   (when (and first? (mcp/app-managed? session))
+    ;; ON THE PROJECT, so every session on it answers the same: a brief
+    ;; taken in these seconds says booting rather than absent
+    (swap! state assoc-in [:projects dir :app-booting-since] (System/currentTimeMillis))
     (future
-      (mcp/start-app! @owner)
+      (try (mcp/start-app! @owner)
+           (finally
+             (swap! state (fn [s] (if (get-in s [:projects dir])
+                                    (update-in s [:projects dir] dissoc :app-booting-since)
+                                    s)))))
       (when-not (get-in @state [:projects dir])
         (mcp/stop-app! @owner)))))
 
@@ -877,7 +866,8 @@
              :pages-url (pages-url proj)
              :check-queue (:check-queue proj)
              :image-permit image-permit
-             :on-landed (fn [land] (announce-landing! dir sid land)))
+             :on-landed (fn [land] (announce-landing! dir sid land))
+             :app-booting-since (fn [] (get-in @state [:projects dir :app-booting-since])))
       (swap! state #(-> %
                         (update-in [:projects dir :sessions] (fnil conj #{}) sid)
                         (assoc-in [:sessions sid] {:dir dir :session session
@@ -917,7 +907,8 @@
                  :pages-url (pages-url proj)
                  :check-queue (:check-queue proj)
                  :image-permit image-permit
-                 :on-landed (fn [land] (announce-landing! dir :cli land)))
+                 :on-landed (fn [land] (announce-landing! dir :cli land))
+                 :app-booting-since (fn [] (get-in @state [:projects dir :app-booting-since])))
           (swap! state assoc-in [:projects dir :cli] {:session session :last-seen now})
           ;; the write door is a first open as often as an MCP attach is — the
           ;; prompt hook reaches the project before the plugin's pipe does

@@ -2823,3 +2823,26 @@
         (is (re-find #"IS this store's dev instance" (str (:app-note b))) (pr-str (:app-note b)))
         (is (not (re-find #"none is running" (str (:app-note b))))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-brief-taken-while-the-app-boots-says-it-is-booting
+  ;; The server starts a project's app in the BACKGROUND on its first open, and
+  ;; the image takes seconds to come up. A brief taken in those seconds said
+  ;; "declares an app … but none is running" — the same words as a boot that
+  ;; failed or never happened — and sent the reader looking for a fault. The
+  ;; server lends the session `:app-booting-since`, a fn answering when the
+  ;; boot in flight began (nil when none is).
+  (let [sess (external/open!)]
+    (try
+      (ops/config-file! sess "capabilities" :key "app.main" :value "x.core/-main"
+                        :prompt "an entry")
+      (testing "a boot in flight is named as one, with how long it has run"
+        (swap! sess assoc :app-booting-since (constantly (- (System/currentTimeMillis) 3000)))
+        (let [b (ops/session-brief sess)]
+          (is (nil? (:app b)))
+          (is (re-find #"booting" (str (:app-note b))) (pr-str (:app-note b)))
+          (is (re-find #"app\.main" (str (:app-note b))))
+          (is (not (re-find #"none is running" (str (:app-note b)))))))
+      (testing "no boot in flight: the declared-but-absent note stands"
+        (swap! sess assoc :app-booting-since (constantly nil))
+        (is (re-find #"none is running" (str (:app-note (ops/session-brief sess))))))
+      (finally (ops/close! sess)))))
