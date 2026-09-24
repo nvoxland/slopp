@@ -13,9 +13,10 @@
     java -jar slopp.jar <dir> --live
     java -jar slopp.jar --main slopp.sync/-main push <dir> <url>
 
-  Local flow (fileless tree): materialize the store (the `build` MCP tool →
-  target/jar-src) then `clojure -T:build uber`. CI flow (checkout of the
-  published repo): `clojure -T:build uber :src src`."
+  Local flow (fileless tree): materialize the store (`slopp build .` — no
+  server needed — or the `build` MCP tool, into target/jar-src) then
+  `clojure -T:build uber`. CI flow (checkout of the published repo):
+  `clojure -T:build uber :src src`."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -253,9 +254,9 @@
       ;; MISSING is unambiguous — refuse.
       (when-not (.exists srcd)
         (throw (ex-info (str "no materialized source at " src " — materialize the"
-                             " store first (the `build` MCP tool, or:"
-                             " slopp --call build '{\"dir\":\""
-                             (.getAbsolutePath (io/file "target/jar-src")) "\"}')")
+                             " store first: `slopp build .` (no server needed),"
+                             " or the `build` MCP tool into "
+                             (.getAbsolutePath (io/file "target/jar-src")))
                         {:src src})))
       ;; Compare the newest FILE under src — a directory's mtime does NOT move
       ;; when nested files are rewritten, which is what made the first version
@@ -312,8 +313,8 @@
                        "  .slopp/store.db changed at " (fmt (.lastModified db))
                        ", after it\n\n"
                        "Materialize, then jar — both steps, in this order:\n"
-                       "  build {dir \"" (.getAbsolutePath (io/file "target/jar-src"))
-                       "\"}   (the MCP tool, or slopp --call build)\n"
+                       "  slopp build .   (no server needed; or the build MCP tool, dir "
+                       (.getAbsolutePath (io/file "target/jar-src")) ")\n"
                        "  clojure -T:build uber\n\n"
                        "Or :stale true to jar THIS materialization deliberately"
                        " — reproducing an old artifact, or bisecting. A refusal"

@@ -548,9 +548,11 @@
   ;; directory": the launcher boots it from the neutral dir exactly as it
   ;; boots the server, the runner's code ships in the jar exactly as the
   ;; server's does, and the exemption was spelled as ONE entry's name.
-  (testing "both entries the jar ships are exempt; a store CLI trampolined by --main is not"
+  (testing "every entry the jar ships is exempt; a store CLI trampolined by --main is not"
     (is (boot/jar-entry? (symbol "slopp-server.process" "-main")))
     (is (boot/jar-entry? (symbol "slopp-server.dev" "-main")))
+    (is (boot/jar-entry? (symbol "slopp-server.build" "-main"))
+        "the one-shot build entry ships in the jar too, and boots from the neutral dir like the others")
     (is (not (boot/jar-entry? (symbol "slopp.sync" "-main")))))
   (testing "the runner from a neutral dir: nothing to narrate, like the server"
     (is (nil? (boot/boot-note {:jar-entry? true :loaded? false :store-file? false

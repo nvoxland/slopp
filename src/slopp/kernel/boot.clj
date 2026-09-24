@@ -683,7 +683,9 @@
                    (when-let [h (jar-head)]
                      (str " This jar was built from store head " h "."))
                    " If the tools are already wedged, materialize from a CHECKOUT"
-                   " instead — `clojure -M -m slopp.kernel.boot . --call build`"
+                   " instead — `clojure -M -m slopp.kernel.boot . --main"
+                   " slopp-server.build/-main .` (the `slopp build` entry, run"
+                   " from the checkout's own files with no jar and no server)"
                    " — where no META-INF is on the classpath and this reader"
                    " answers nil.")
               {:manifest what :found (type m)})))))
@@ -830,12 +832,13 @@
 
 (defn jar-entry?
   "Whether `main` is an entry whose code SHIPS IN THE JAR — the machine
-  server and the dev-instance runner — and is therefore booted from a neutral
+  server, the dev-instance runner and the one-shot build — and is therefore booted from a neutral
   dir on purpose: it reads no store there and writes none. Every other
   `--main` is a store's own CLI, trampolined over the program the dir holds."
   [main]
   (contains? #{(symbol "slopp-server.process" "-main")
-               (symbol "slopp-server.dev" "-main")}
+               (symbol "slopp-server.dev" "-main")
+               (symbol "slopp-server.build" "-main")}
              main))
 
 ^:unsafe (defn -main
