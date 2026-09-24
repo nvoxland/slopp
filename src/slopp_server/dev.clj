@@ -20,6 +20,9 @@
               (let [store (:store @reader)
                     r     (or (live/hot-refresh! reader store (:app-server @reader))
                               (live/refresh! reader store dir))]
+                ;; a reboot is a new child with a new pipe; a hot reload kept both
+                (when (and (:serving? r) (not (:hot? r)))
+                  (live/relay-output! r say))
                 (swap! state assoc
                        :served-version dv :served-head head
                        :last (select-keys r [:serving? :hot? :reason :url :reloaded])
@@ -71,8 +74,10 @@
                                  "slopp-dev-refresh")
                     (.setDaemon true))]
         (.start poll)
-        (say (str "slopp dev: " (or (:url r) (str "running " (pr-str (:started r))))
-                  " — " dir ", re-served at every landing"))
+        ;; the child's own voice — its startup banner names the address, the
+        ;; pid and the record file; nothing here restates them
+        (live/relay-output! r say)
+        (say (str "slopp dev: serving " dir " — re-served at every landing"))
         {:serving? true
          :url      (:url r)
          :port     (:port r)

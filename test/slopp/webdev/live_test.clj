@@ -1253,3 +1253,19 @@
           (finally
             (if was (System/setProperty "slopp.managed-for" was)
                 (System/clearProperty "slopp.managed-for"))))))))
+
+(deftest the-childs-output-after-the-port-line-is-relayed-not-lost
+  ;; `repl/start!` reads the child's merged output until it announces its
+  ;; port, and nothing reads it after that. A managed slopp server prints its
+  ;; own startup banner — address, pid, where the token is — a moment later,
+  ;; into a pipe with no reader: the one line a human is waiting for, gone.
+  ;; The relay hands every later line to the caller, and ends with the stream.
+  (let [rdr  (java.io.BufferedReader.
+              (java.io.StringReader. "slopp server: http://127.0.0.1:7357/api/ (pid 1)\nsecond line\n"))
+        seen (atom [])
+        t    (live/relay-output! {:image {:reader rdr}} #(swap! seen conj %))]
+    (is (some? t) "a running map with an image reader starts a relay")
+    (.join ^Thread t 5000)
+    (is (= ["slopp server: http://127.0.0.1:7357/api/ (pid 1)" "second line"] @seen))
+    (is (nil? (live/relay-output! {:image {}} #(swap! seen conj %)))
+        "nothing to read: no thread, no throw")))

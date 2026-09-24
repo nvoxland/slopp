@@ -916,3 +916,29 @@
     (= version served-version)          :none
     (and head (not= head served-head))  :reserve
     :else                               :touch))
+
+(defn ^:export relay-output!
+  "Forward what the app image prints AFTER its port line to `say`, one line at
+  a time, on a daemon thread that ends with the stream. Returns the thread,
+  or nil when `running` has no image reader.
+
+  `repl/start!` reads the child's merged output only until it announces its
+  port; from then on the pipe has no reader. A managed slopp server prints
+  its own startup banner — the address, its pid, where the token is — a
+  moment later, so the one line a human waits for was written into nothing,
+  and a chatty child could fill the pipe and stall. The relay is the child's
+  voice: a runner hands it the terminal, and no line is invented on the
+  child's behalf."
+  [running say]
+  (when-let [rdr (:reader (:image running))]
+    (doto (Thread. ^Runnable
+                   (fn []
+                     (try
+                       (loop []
+                         (when-let [line (.readLine ^java.io.BufferedReader rdr)]
+                           (say line)
+                           (recur)))
+                       (catch Throwable _ nil)))
+                   "slopp-app-output")
+      (.setDaemon true)
+      (.start))))

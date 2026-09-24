@@ -17,12 +17,13 @@
                      "slopp-dev-runner" (make-array java.nio.file.attribute.FileAttribute 0)))
         marker (str dir "/ran.txt")
         agent  (external/open! {:slopp.ops/dir dir})
-        entry  (fn [v] (str "(defn -main \"Runs.\" [& _] (spit \"" marker "\" \"" v "\"))"))]
+        said   (atom [])
+        entry  (fn [v] (str "(defn -main \"Runs.\" [& _] (println \"worker says hi\") (spit \"" marker "\" \"" v "\"))"))]
     (try
       (ops/ingest! agent 'worker.core (str "(ns worker.core)\n\n" (entry "v1") "\n") :agent "a")
       (ops/config-file! agent "capabilities" :key "app.main" :value "worker.core/-main" :prompt "the dev instance")
       (external/done! agent :label "v1" :agent "a")
-      (let [h (dev/start! dir :poll-ms 100)]
+      (let [h (dev/start! dir :poll-ms 100 :say #(swap! said conj %))]
         (try
           (testing "it comes up on the store's own declaration, with no server anywhere"
             (is (:serving? h) (str "did not serve: " (:reason h)))
@@ -30,7 +31,12 @@
                   (cond (.exists (io/file marker)) true
                         (> n 100) false
                         :else (do (Thread/sleep 100) (recur (inc n)))))
-                "the declared entry ran in the child"))
+                "the declared entry ran in the child")
+            (is (loop [n 0]
+                  (cond (some #(re-find #"worker says hi" %) @said) true
+                        (> n 50) false
+                        :else (do (Thread/sleep 100) (recur (inc n)))))
+                (str "what the child printed after its port line reaches the runner's say: " (pr-str @said))))
           (testing "a landing by another session is noticed and the instance re-served"
             (ops/edit-replace! agent 'worker.core '-main (entry "v2") :prompt "v2" :agent "a")
             (external/done! agent :label "v2" :agent "a")
