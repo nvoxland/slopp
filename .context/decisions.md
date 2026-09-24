@@ -7616,3 +7616,43 @@ so (the daemon prints nothing for a store that declares no app, by design).
 carries `:app-note` in both directions and `:config-blobbed` for the shape an
 old clone left; `config_file {path}` names the blobbed twin. Observation:
 `.context/findings-log.md` 2026-09-16.
+
+## D-kernel-copies-retired (2026-09-24, user decision) — no tracked `src/` on `main`; the kernel reaches a process only through the jar
+
+**Decision.** `src/slopp/kernel/boot.clj` and `src/slopp/kernel/rt.clj` are
+no longer tracked on `main`, `bin/extract-projection.sh` and the
+`kernel-parity` CI lane are gone, and `slopp.kernel.parity` plus the
+`slopp --main slopp.sync/-main kernel` verb are deleted from the store. The
+kernel is two ordinary store namespaces: `slopp build .` renders them into
+`target/jar-src/src` exactly as it renders everything else, `uber` jars
+them, and that jar is the only copy any process boots from.
+
+**Why the premise changed.** The copies existed for one path: a checkout
+booting itself with `clojure -M -m slopp.kernel.boot .`, no jar. Every way
+slopp runs now starts from a jar — `slopp server`, `slopp dev .`,
+`slopp build .` (2026-09-24, a one-shot that needs no server), and
+`slopp --main ns/fn` for any store entry point. `main` does not track
+`.slopp/store.db`, so a fresh clone had nothing for the file copies to boot
+anyway; and `extract-projection.sh` itself required a jar, so the copies
+never bootstrapped kernel code a jar had not already produced. They were a
+second producer of the same bytes, kept in step by a lane, with no consumer.
+
+**The escape hatch that replaces them.** A kernel change the released jar
+cannot boot: the previous jar runs `slopp build .` (it only has to READ the
+store) and `clojure -T:build uber` cuts the new one. If even the store
+format moved, the `slopp/main` projection branch carries every rendered
+file and `clojure -T:build uber :src src` builds a jar from it without
+reading a store at all. `slopp.kernel.boot/by-capability` names that route.
+
+**What stays special about the kernel** is a runtime fact, not a file:
+`boot` is the code that reads the store, so a change to its boot path
+reaches a fresh process only through a rebuilt jar, and `rt` is injected
+into every image from the jar's copy (or the store's rendering, handed down
+when the parent has no classpath copy). Both were true before and are
+unchanged.
+
+**Supersedes** the standing rule in AGENTS.md that the copies "stay
+committed because `deps.edn` is `{:paths [\"src\"]}` and a bare clone with
+no jar bootstraps from exactly those two files". `:paths ["src"]` stays in
+`deps.edn` for materializations and projection checkouts, where `src`
+exists.

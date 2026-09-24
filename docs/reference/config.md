@@ -8,7 +8,7 @@ Read with `config {key}`, set with `config {key value}`.
 |---|---|---|
 | `user.name` | -- | Commit point author name. `"<git>"` defers to git config. |
 | `user.email` | -- | Commit point author email. `"<git>"` defers to git config. |
-| `git-remote` | unset | Where `git_push` publishes. A relative value like `"."` resolves against the store directory. |
+| `git-remote` | unset | Where `git_push` publishes. A relative value like `"."` resolves against the store directory; when that is the checkout itself, a push publishes the projection into its own `slopp/<branch>`. |
 | `git-branch` | `slopp` | The one branch slopp owns. |
 
 `git_push {url}` saves the first url it is given as the default. One-off urls

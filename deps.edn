@@ -1,3 +1,6 @@
+;; `src` exists only in a materialization (`slopp build .` -> target/jar-src)
+;; or a projection checkout (the slopp/main branch); main tracks no source.
+;; It stays declared so `clojure -M` works in either of those trees.
 {:paths ["src"]
 
  ;; slopp-the-tool's deps: what the boot kernel needs to launch the store's

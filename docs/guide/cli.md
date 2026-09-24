@@ -100,8 +100,8 @@ schema forever, because its own source never moved; reloading its dependencies
 first is what stops it re-capturing a value that is about to change.
 
 The one layer nothing can reload is the boot kernel itself
-(`src/slopp/kernel/boot.clj`, `src/slopp/kernel/rt.clj`) — it is the code doing the
-loading, so a change there needs a rebuilt jar and a restart.
+(`slopp.kernel.boot`, `slopp.kernel.rt`) — it is the code doing the loading,
+so a change there needs a rebuilt jar and a restart.
 
 ## CI
 

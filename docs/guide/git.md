@@ -40,7 +40,9 @@ git_resolve {path}
 
 - **`git_push`** sends your `slopp/<branch>` mirrors up from a checkout.
   Fast-forward only, never force. A fileless store (no `.git`) publishes its
-  projection directly. Pushing onto a branch your working tree has checked out
+  projection directly, and so does a checkout whose saved remote is itself
+  (`"."`, what an import records): there is nothing to mirror to, so the push
+  brings the checkout's own `slopp/<branch>` up to the latest commit point. Pushing onto a branch your working tree has checked out
   is refused -- the ref would move under you.
 
     A refusal is a value, not a status string. `:divergence` names both tips,

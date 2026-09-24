@@ -68,7 +68,8 @@ The oracle must never return a false verdict. Everything here serves that.
      is a clean NAMESPACE SPACE, which is why an image can be recycled rather
      than respawned.
    - **Two copies of `slopp.kernel.rt` exist** and each has its own consumer: the
-     KERNEL FILE (`src/slopp/kernel/rt.clj`, shipped in the uberjar) is what
+     JAR's copy (`slopp/kernel/rt.clj` inside the uberjar — rendered from the
+     store by the `slopp build` that cut that jar, so it lags the store) is what
      `repl/inject-rt!` evals into every image; the STORE namespace is what
      `build!` renders and what slopp's own image actually loads (it wins —
      it loads after the injection). They must agree on **public surface and

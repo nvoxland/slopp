@@ -4,9 +4,12 @@
 
 - **The store IS the source**: every namespace (system + tests) lives in
   `.slopp/store.db`. There are NO project `.clj` files to edit.
-- `src/slopp/kernel/boot.clj` + `src/slopp/kernel/rt.clj` — the boot KERNEL (slopp-the-tool,
-  not project source): `boot` loads the store into the JVM; `rt` is injected
-  into every owned image. `deps.edn` = the tool's dep coordinates.
+- `slopp.kernel.boot` + `slopp.kernel.rt` — the boot KERNEL (slopp-the-tool,
+  not project source), store namespaces like every other: `boot` loads the
+  store into the JVM; `rt` is injected into every owned image. They reach a
+  process only through the jar (`slopp build .` renders them, `uber` jars
+  them); no copy is tracked on `main` (`D-kernel-copies-retired`).
+  `deps.edn` = the tool's dep coordinates.
 - `projects/` — untracked dogfooding grounds (`.context/dogfooding.md`).
 - `benchmarks/results.md` — committed benchmark history.
 - `.slopp/` — the store DB (gitignored; the git repo tracks kernel + docs;

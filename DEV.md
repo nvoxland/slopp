@@ -16,14 +16,15 @@ these are real files:
 - `build.clj` — the uberjar recipe.
 - Docs, CI config, this file, and everything else humans own.
 
-**`src/slopp/kernel/boot.clj` and `src/slopp/kernel/rt.clj` are NOT in that list**, though
-they sit on disk and look like it. The boot kernel lives in the store with
-everything else; `build!` materializes it into `target/jar-src/src` and the
-uberjar is built from THERE, so those two files are projections. Edit them
-with the MCP tools. A hand-edit on disk is overwritten by the next `build!`
-and produces the exact signature of a stale jar — your fix runs nowhere and
-nothing says why. (`deps.edn` puts `src` on the classpath, so a plain REPL
-from a checkout does load the disk copy; that is the only thing it is for.)
+There is no `src/` on `main`. The boot kernel (`slopp.kernel.boot`,
+`slopp.kernel.rt`) lives in the store with everything else; `slopp build .`
+renders it into `target/jar-src/src` like every other namespace and the
+uberjar is built from there. Every way slopp runs starts from a jar, so a
+checkout never boots itself from files: `slopp --main ns/fn` is the spelling
+for running one of the store's entry points from the checkout, and
+`slopp dev .` for serving it. (The two kernel files used to be tracked on
+`main` as generated copies for a jar-free `clojure -M` bootstrap; retired
+2026-09-24, `D-kernel-copies-retired`.)
 
 A slopp server runs a snapshot with no live-reload of its own code
 (`D-no-daemon-live`). That is why development does not happen against the
@@ -125,11 +126,17 @@ launcher, a dependency change, a store format the release cannot read — build
 a jar from a commit point and run the launcher against it:
 
 ```sh
-slopp --call build '{"dir":"'$PWD'/target/jar-src"}'   # materialize the FILELESS store (or the build MCP tool)
-clojure -T:build uber                                  # -> target/slopp.jar, refusing a stale materialization
+slopp build .          # materialize the FILELESS store into target/jar-src — no server needed
+clojure -T:build uber  # -> target/slopp.jar, refusing a stale materialization
 
 SLOPP_JAR=~/src/nvoxland/slopp/target/slopp.jar ~/.claude/skills/slopp/bin/slopp dev .
 ```
+
+`slopp build` opens the store itself, read-only, and materializes what has
+LANDED on the branch; it is the one verb that works with no slopp server,
+because the server is usually the thing being rebuilt. (`slopp --call build
+'{"dir":…}'` is the same materialization routed through a running server,
+from the session's own view.)
 
 `SLOPP_JAR` is honoured by the plugin's `bin/slopp` and skips the fetch and
 the checksum. The path to the launcher is spelled out because a plain
@@ -142,7 +149,7 @@ Never do this as part of ordinary development, which the instance already
 tracks. `session_brief`'s `:host` section says what jar the process you are
 talking to was built from and how far behind the store it is.
 
-From a checkout with no server at all, `clojure -M -m slopp.kernel.boot .`
+From a checkout with no server at all, `SLOPP_SERVER_DIR=$PWD slopp server`
 boots slopp from the store and serves it once, with no refresh of its own
 code — useful for a smoke test, not for development.
 
@@ -345,10 +352,11 @@ Two rules for writing:
 At commit points:
 
 ```sh
-clojure -M -m slopp.kernel.boot . --main slopp.lab.benchmark/-main
+slopp --main slopp.lab.benchmark/-main
 ```
 
-The tree is fileless, so a plain `-m slopp.lab.benchmark` finds nothing.
+The tree is fileless: the jar's kernel loads the checkout's store and runs
+the instrument from it, so a plain `-m slopp.lab.benchmark` finds nothing.
 History appends to `benchmarks/results.md`, which is **gitignored**: it is a
 local record, not a committed one, so rows only ever compare against other rows
 from the same machine. Don't commit it and don't reinstate it in CI.

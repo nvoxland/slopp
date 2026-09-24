@@ -173,8 +173,8 @@ The resulting graph is acyclic and nearly linear:
 | 8 | `bench` | `bench` `.benchmark` `.evalseed` — dev instruments, on no user path |
 
 **`slopp.kernel.boot`, `slopp.kernel.rt` and `slopp.sync` are deliberately exempt.** Each is a
-published interface (`java -jar slopp.jar`, `clojure -M -m slopp.kernel.boot`,
-`slopp --main slopp.sync/-main import .`); renaming them breaks other people's
+published interface (`java -jar slopp.jar`, `--main slopp.kernel.boot/-main`
+in a built app, `slopp --main slopp.sync/-main import .`); renaming them breaks other people's
 scripts to buy taxonomy.
 
 **The framework/app boundary is load-bearing and mechanically enforced.**

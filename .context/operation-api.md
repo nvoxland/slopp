@@ -464,7 +464,7 @@ its store-backed static reader moved to `api.web/store-reader`.
 
 - **MCP stdio** (`clojure -M -m slopp.mcp [dir]`) — Claude Code and Codex
   (`config.toml` recipe in README). Optional dir = durable session. The
-  in-repo `.mcp.json` runs it THROUGH `slopp.kernel.boot` (`-m slopp.kernel.boot .`)
+  in-repo `.mcp.json` runs it THROUGH `slopp.kernel.boot` (the jar's entry)
   so slopp serves from its own store, no exported source — see
   "Running from the store" below.
 - ~~**Git smart-HTTP**~~ — **REMOVED 2026-08-02.** Serving the store to a git
@@ -567,14 +567,15 @@ its store-backed static reader moved to `api.web/store-reader`.
   otherwise refuses naming how to set one. It used to lead with a local
   listener URL; there is no listener.
 - CLI (fileless tree — everything enters through the boot trampoline):
-  `clojure -M -m slopp.kernel.boot <dir> --main slopp.sync/-main
+  `slopp --main slopp.sync/-main
   clone <url> <dir> | push <dir> [url] | pull <dir>`. Auth:
   `SLOPP_GIT_TOKEN=$(gh auth token)` env on the command. Proven against
   real GitHub (nvoxland/slopp): push → API edit → pull → FF push.
 
 ## Running from the store (`slopp.kernel.boot`)
 
-- The entry `clojure -M -m slopp.kernel.boot <dir> [--main ns/fn]` runs the
+- The entry `java -jar slopp.jar <dir> [--main ns/fn]` (`slopp --main ns/fn`
+  from the launcher) runs the
   store's program WITHOUT exported source: `load-store!` reads every ns's
   byte-exact source with raw next.jdbc, `dependency-order`s them (parses ns
   requires — a self-contained mirror of `store/ns-dependency-order`), and

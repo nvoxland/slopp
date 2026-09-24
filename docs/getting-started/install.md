@@ -129,12 +129,15 @@ slopp --call git_clone '{"url":"https://github.com/you/proj.git","dir":"proj"}'
 
 ```sh
 git clone https://github.com/nvoxland/slopp.git && cd slopp
-clojure -M -m slopp.kernel.boot .
+slopp --main slopp.sync/-main import .    # build .slopp/store.db from the slopp branch
+slopp dev .                               # serve the checkout's in-progress slopp
 ```
 
-The working tree is fileless: only the boot kernel (`src/slopp/kernel/boot.clj`,
-`src/slopp/kernel/rt.clj`) and `deps.edn` are real files. `slopp.kernel.boot` loads every
-namespace's byte-exact source out of `store.db` into the JVM in dependency
-order and invokes the entry point, so a plain `-m slopp-server.mcp` finds nothing.
+The working tree is fileless: `deps.edn`, `build.clj`, docs and the plugin
+are the only real files, and there is no `src/`. The jar's boot kernel loads
+every namespace's byte-exact source out of `store.db` into the JVM in
+dependency order and invokes the entry point, so a plain `-m slopp-server.mcp`
+finds nothing. To cut your own jar from the store: `slopp build .` then
+`clojure -T:build uber`.
 
 Next: [your first session](first-session.md).

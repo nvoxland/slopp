@@ -76,8 +76,9 @@ Purpose: track whether the product is getting better to use — **wall time**
 and **token cost** (chars/4 of the JSON actually sent/received through
 `mcp/handle`) to build each sample app via scripted agent sessions.
 
-- Run: `clojure -M -m slopp.kernel.boot . --main slopp.lab.benchmark/-main`
-  (the tree is fileless — plain `-m slopp.lab.benchmark` finds nothing; NOT part
+- Run: `slopp --main slopp.lab.benchmark/-main` from the checkout
+  (the tree is fileless — the jar's kernel loads the store and runs the
+  instrument; plain `-m slopp.lab.benchmark` finds nothing; NOT part
   of `clojure -M:test` — it
   spawns several JVMs and takes minutes).
 - Each app = a deterministic script of MCP tool calls (deliberate red steps

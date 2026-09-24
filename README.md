@@ -69,7 +69,7 @@ on the store's files manifest names the launcher and the fn it delegates to.
 
 The server loads its code once at boot and serves it until restarted — it
 does not hot-reload its own namespaces. From a checkout of this repo,
-`clojure -M -m slopp.kernel.boot .` boots the same way. (Working ON slopp,
+`SLOPP_SERVER_DIR=$PWD slopp server` boots the same way. (Working ON slopp,
 the in-progress version runs as a dev instance the slopp server re-serves at each
 `done`; the slopp server stays on its released jar.)
 

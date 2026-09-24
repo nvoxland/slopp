@@ -593,8 +593,18 @@ ADDING A REGISTER = one row here. Nothing else.
     marker also points at, and dropping it there left the retroactive commit
     silently projecting the CURRENT state.
 - `git_map` (main store.db) pins each `:commit` delta → sha at first projection,
-  keyed `(delta_id, fingerprint)` (fingerprint = SHA-256 of `[id at description
-  target]`); query surfaces read it, and it's the insert-skip key above.
+  keyed `(delta_id, fingerprint)` where BOTH are the marker's IDENTITY
+  (`git/marker-identity`: its `:origin-id` when a rebase-land re-minted it,
+  else its id; fingerprint = SHA-256 of `[identity at description]`). Query
+  surfaces read it, and it's the insert-skip key above. Neither the fresh id
+  nor `:target` is in the key: a rebase-land re-mints the branch's markers
+  onto the thread's chain under new ids with re-pointed targets, and keyed on
+  those the projection minted a SECOND commit (a second `Slopp-Commit:` stamp)
+  for a commit point it had already published — this store's mirror refused
+  the push that followed (2026-09-23). The copy carries `:origin-id` through
+  any number of hops (`store.merge/merge-logs`), and a marker the thread
+  already holds verbatim (its view followed the branch) is delivered without
+  being minted at all (`holds-verbatim?`).
 - **The local SERVER face is GONE (2026-08-02).** Commit points used to be served
   over localhost smart-HTTP so a git client could clone/fetch the store as a
   remote. It forced exact-project handling that got complex for what it bought,

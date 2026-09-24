@@ -126,20 +126,16 @@ plus the links, and skips cleanly when `ideas/` is absent (a fresh clone).
 - **The working tree is FILELESS**: slopp's own code (system + tests) lives
   in `.slopp/store.db`; only `deps.edn` and `build.clj` are files humans own.
   ALL development goes through slopp's MCP tools — including the boot kernel,
-  which is IN the store despite `src/slopp/kernel/boot.clj` and `src/slopp/kernel/rt.clj`
-  existing on disk. **Those two are projections**: `build!` materializes them
-  from the store over `target/jar-src/`, so a hand-edit there is silently
-  discarded at build time and looks exactly like a stale jar. Edit
-  `slopp.kernel.boot` / `slopp.kernel.rt` through the tools like everything else.
-  **After changing either, run `bin/extract-projection.sh`** — it re-derives the
-  two tracked copies from the store, so they are GENERATED rather than typed.
-  They stay committed because `deps.edn` is `{:paths ["src"]}` and a bare clone
-  with no jar bootstraps from exactly those two files; generated is not the same
-  as untracked. Forgetting is caught by the `kernel-parity` CI lane, which names
-  the script — the copies have drifted five times and every reconciliation was a
-  copy. What is
-  special about them is narrower than "needs a restart", and the distinction
-  is worth knowing because it decides whether you interrupt the user:
+  `slopp.kernel.boot` and `slopp.kernel.rt`, which are ordinary store
+  namespaces: `slopp build .` renders them into `target/jar-src/src` like
+  every other namespace and `uber` jars them. There is no `src/` on `main`
+  and no second copy anywhere (retired 2026-09-24, `D-kernel-copies-retired`;
+  the hand-tracked copies had drifted five times and every reconciliation
+  was a copy). Every way slopp runs starts from a jar — `slopp server`,
+  `slopp dev`, `slopp build`, `slopp --main …` — so nothing needs the kernel
+  as a file on a checkout. What IS special about the kernel is narrower than
+  "needs a restart", and the distinction is worth knowing because it decides
+  whether you interrupt the user:
   **a kernel function the poll loop CALLS is hot-fixable** (`reload-ns!` is
   looked up per poll, so a redefinition takes effect on the next one — this
   is how the alias wedge was fixed on a running host); **the loop's own body
@@ -207,7 +203,7 @@ plus the links, and skips cleanly when `ideas/` is absent (a fresh clone).
 - **Dogfooding is a standing practice:** build real things through slopp
   itself under `projects/<name>/` (untracked); write findings to a
   `REPORT.md` there; findings drive the roadmap. See `.context/dogfooding.md`.
-- **Benchmark at commit points** (`clojure -M -m slopp.kernel.boot . --snapshot --main slopp.lab.benchmark/-main` — the tree is fileless; plain `-m slopp.lab.benchmark` finds nothing).
+- **Benchmark at commit points** (`slopp --main slopp.lab.benchmark/-main` from the checkout — the tree is fileless, so the jar's kernel loads the store's program and runs the instrument from it).
   The row appends to `benchmarks/results.md`, which is **gitignored** — a LOCAL
   record, never committed. See `.context/dogfooding.md`.
 - **The image is the oracle:** verification correctness depends on
