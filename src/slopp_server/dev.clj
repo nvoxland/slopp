@@ -1,4 +1,23 @@
-(ns slopp-server.dev (:require [slopp.ops.external :as external] [slopp.ops :as ops] [slopp.ops.engine :as engine] [slopp.webdev.live :as live] [slopp.store.db :as db]))
+(ns slopp-server.dev
+  "`slopp dev [dir]` — a project's DEV INSTANCE served from its store and kept
+  current with every landing, with no slopp server, no registry and no agent
+  needed to trip the first boot.
+
+  The one loop the machine server runs for a managed child, on its own: a
+  read-only reader on the store, the app image `slopp.webdev.live/refresh!`
+  boots from the store's own declaration (`app.main` or `http.enabled`), and
+  a poll that re-serves it — in place when the changed namespaces can be
+  pushed, by reboot when they cannot — each time main advances. The child's
+  own output is relayed to the terminal, so the startup banner a human waits
+  for is the instance's, not one written on its behalf. A human asked for
+  it, so it lives until stopped, not until an agent leaves. For slopp's own
+  checkout the instance IS a slopp server on the ordinary port, and every
+  agent on the box attaches to it."
+  (:require [slopp.ops.external :as external]
+            [slopp.ops :as ops]
+            [slopp.ops.engine :as engine]
+            [slopp.webdev.live :as live]
+            [slopp.store.db :as db]))
 
 (defn- tick!
   "One poll: when the store's data version moved and MAIN advanced, bring the

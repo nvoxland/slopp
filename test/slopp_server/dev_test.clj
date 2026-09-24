@@ -1,9 +1,13 @@
 (ns slopp-server.dev-test
-  "`slopp dev [dir]`: a project's dev instance served from its store and kept current with every done, with no slopp server, no bootstrap agent and no registry — a reader on the store, the app image live/start! boots, and the same re-serve decision the machine server's poll makes. General: any proje…"
+  "Tests for the standalone dev-instance runner: it boots a project's declared
+  entry from the store in a real child JVM, relays what the child prints,
+  notices a landing by another session and re-serves, ignores un-landed
+  work, and stops."
   (:require [slopp-server.dev :as dev]
             [slopp.ops.external :as external]
             [slopp.ops :as ops]
-            [clojure.java.io :as io] [clojure.test :refer [deftest is testing use-fixtures]]))
+            [clojure.java.io :as io]
+            [clojure.test :refer [deftest is testing]]))
 
 (deftest ^:external the-runner-serves-a-projects-dev-instance-and-re-serves-it-at-every-landing
   ;; The dev instance used to be reachable only as a CHILD of the machine
