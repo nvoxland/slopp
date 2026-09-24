@@ -18,7 +18,7 @@
             [slopp.ops :as ops]
             [slopp.kernel.boot :as boot]
             [slopp.store.db :as db]
-            [slopp.git :as git] [rewrite-clj.node :as n] [rewrite-clj.parser :as p] [slopp.store :as store] [slopp.git.client :as git.client] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.kernel.parity :as parity] [slopp.store.render :as store.render] [slopp.edit.modules :as edit.modules] [slopp.store.merge :as merge] [slopp.ops.branch :as branch]))
+            [slopp.git :as git] [rewrite-clj.node :as n] [rewrite-clj.parser :as p] [slopp.store :as store] [slopp.git.client :as git.client] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store.render :as store.render] [slopp.edit.modules :as edit.modules] [slopp.store.merge :as merge] [slopp.ops.branch :as branch]))
 
 (defn path-ns
   "`src/foo/bar_baz.clj` → `foo.bar-baz`; nil for anything that is not a
@@ -1078,12 +1078,11 @@
       n)))
 
 (defn -main
-  "clojure -M -m slopp.sync clone <url> <dir> | import <dir> | import-dir <store-dir> <from-dir> | push <dir> [url] | pull <dir> | test <dir> | kernel <file-copy> <store-copy> [accepted,names]"
-  [& [cmd a b c]]
+  "clojure -M -m slopp.sync clone <url> <dir> | import <dir> | import-dir <store-dir> <from-dir> | push <dir> [url] | pull <dir> | test <dir>"
+  [& [cmd a b]]
   (let [usage (str "usage: clone <url> <dir> | import <dir>"
                    " | import-dir <store-dir> <from-dir> | push <dir> [url]"
-                   " | pull <dir> | test <dir> [shards]"
-                   " | kernel <file-copy> <store-copy> [accepted,names]")
+                   " | pull <dir> | test <dir> [shards]")
         r (case cmd
             "clone"  (clone! a b)
             "import" (import! (or a "."))
@@ -1100,16 +1099,6 @@
             "test"   (let [sess (external/open! {:slopp.ops/dir a})]
                        (try (external/external-test-run! sess :parallel (test-args a b))
                             (finally (ops/close! sess))))
-            ;; The kernel exists as a hand-maintained file AND as a store
-            ;; namespace, and no TEST can compare them: in every context a
-            ;; test runs, the "file" IS the store's rendering, so the
-            ;; comparison is a tautology. Both copies are only reachable from
-            ;; a shell that can see two git refs — so the check lives here,
-            ;; takes both sides as paths, and the caller decides where each
-            ;; came from.
-            "kernel" (parity/kernel-parity
-                      (slurp a) (slurp b)
-                      (into #{} (map symbol) (remove str/blank? (str/split (or c "") #","))))
             {:error usage})]
     (println (pr-str r))
     (shutdown-agents)

@@ -682,12 +682,10 @@
                    " store, then `clojure -T:build uber`) and restart the host."
                    (when-let [h (jar-head)]
                      (str " This jar was built from store head " h "."))
-                   " If the tools are already wedged, materialize from a CHECKOUT"
-                   " instead — `clojure -M -m slopp.kernel.boot . --main"
-                   " slopp-server.build/-main .` (the `slopp build` entry, run"
-                   " from the checkout's own files with no jar and no server)"
-                   " — where no META-INF is on the classpath and this reader"
-                   " answers nil.")
+                   " If the tools are already wedged, build a jar without reading"
+                   " the store: check out the slopp/main projection branch and"
+                   " run `clojure -T:build uber :src src` there — no META-INF is"
+                   " on that classpath, so this reader answers nil.")
               {:manifest what :found (type m)})))))
 
 (defn ^:export framework-files
@@ -842,13 +840,13 @@
              main))
 
 ^:unsafe (defn -main
-  "clojure -M -m slopp.kernel.boot <dir> [--main ns/fn arg...]
+  "java -jar slopp.jar <dir> [--main ns/fn arg...]
 
   Load the store's program into THIS jvm and run its entry point (default
   slopp-server.process/-main with no args: one slopp for the machine, on the default
   port — the dir is what is loaded, never the port). --main trampolines any
   store CLI — in a fileless tree this is THE entry point: e.g.
-    clojure -M -m slopp.kernel.boot . --main slopp.sync/-main push . <url>
+    slopp --main slopp.sync/-main push . <url>   (java -jar slopp.jar . --main …)
 
   The kernel loads a store's program ONCE and runs it — it does not reload.
   A process that must track its store AS IT CHANGES is a DEV INSTANCE, and

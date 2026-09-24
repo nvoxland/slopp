@@ -5,7 +5,7 @@
   sent/received). Deliberate red steps are included — debugging is part of
   real usage. Run at commit-points (the tree is fileless, so this goes through the
   boot kernel):
-  clojure -M -m slopp.kernel.boot . --snapshot --main slopp.lab.benchmark/-main
+  slopp --main slopp.lab.benchmark/-main
   Appends rows to benchmarks/results.md (committed).
 
   Scripts must exercise CURRENT best practice; bump an app's :v when its
@@ -139,7 +139,7 @@
           (str "# Benchmark history\n\n"
                "Wall + token cost of building each sample app through the MCP surface\n"
                "(via the boot kernel, since the tree is fileless:\n"
-               "`clojure -M -m slopp.kernel.boot . --main slopp.lab.benchmark/-main`).\n"
+               "`slopp --main slopp.lab.benchmark/-main`).\n"
                "Rows are comparable only within the same script version (v).\n\n"
                "| date | sha | app | v | steps | wall ms | tok in | tok out |\n"
                "|---|---|---|---|---|---|---|---|\n")))
@@ -153,7 +153,7 @@
 (defn -main "CLI: run every benchmark app, print a row per app, and append the results to
   `benchmarks/results.md`. The tree is fileless, so this runs through the boot
   kernel:
-  `clojure -M -m slopp.kernel.boot . --main slopp.lab.benchmark/-main`"
+  `slopp --main slopp.lab.benchmark/-main`"
   [& _]
   (let [rows (doall
               (for [app apps]
