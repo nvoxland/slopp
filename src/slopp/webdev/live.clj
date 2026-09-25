@@ -674,75 +674,6 @@
       []
       (boot/with-dependents now edited))))
 
-(defn ^:export hot-refresh!
-  "Push what MOVED into the already-running app image and keep it serving —
-  `{:hot? true …}` on success, `nil` when this refresh cannot be done in
-  place and the caller should fall back to [[refresh!]].
-
-  **This is the change `serve-code` names and nobody had made.** A full
-  re-boot replaces the child JVM, so `:http/perform-ctx` is rebuilt and any
-  state the app kept there — a cache, a registry, a pool — is silently gone at
-  every `done`. Hot-loading leaves the context alone because it never re-runs
-  the generated call.
-
-  Returns nil rather than throwing for the cases in-place cannot serve, and
-  each is a real one:
-
-  - **nothing running**, or a running map from before this existed and so
-    carrying no `:loaded` — there is nothing to diff against.
-  - **the LOAD ORDER changed** — a namespace appeared or disappeared. A new
-    namespace may need requiring in a dependency order this image never had,
-    and a departed one leaves vars answering that the store no longer defines.
-    `--live` handles the second with `departed-vars`; an app image has no
-    equivalent, so a boot is the honest answer.
-  - **a reload FAILED** — the running version is left untouched and the caller
-    re-boots, which is `refresh!`'s existing safe-swap and is already tested.
-
-  **Two things are retaken on success, and the first one was missed for a
-  month.** `:served-at` is what `app-behind` counts from; leaving it at boot
-  made the count rise forever while `done` stayed honestly silent about a
-  refresh that had worked. And the static dir the child serves from is
-  RE-SYNCED, because `boot!` wrote it on the assumption that a refresh
-  replaces the image — true until this function existed. A recompiled bundle
-  reached the store and never the child: 23 hours, 57 changes, one
-  consumer's browser. The child reads per request, so syncing in place is
-  the whole fix."
-  [session store running]
-  (let [was (:loaded running)
-        now (into {} (map (juxt identity #(store.render/render-ns store %)))
-                  (load-order store))]
-    (when (and (:serving? running) (seq was)
-               ;; same POPULATION, or an in-place reload cannot be honest
-               (= (set (keys was)) (set (keys now))))
-      (let [todo   (hot-reload-set was now)
-            ;; the dir the child is serving from — assets that moved since
-            ;; boot are written INTO it, not beside it
-            plan   (:plan running)
-            synced (when-let [sd (:static-dir plan)]
-                     (materialize-static! store (:static plan) (:dir @session) sd))
-            ;; recorded on the session exactly as `refresh!` does, or the
-            ;; session goes on holding the pre-reload map and every later
-            ;; refresh diffs against a `:loaded` that has moved on
-            keep!  (fn [r] (swap! session assoc :app-server r) r)
-            stamp  (fn [r]
-                     (cond-> (assoc r :hot? true
-                                    ;; the head this image NOW serves, not the
-                                    ;; one it booted on: what app-behind counts from
-                                    :served-at (:head-at store)
-                                    :currency (currency/of (:db @session) (:line @session)))
-                       synced (assoc-in [:plan :static-dir] synced)))]
-        (if (empty? todo)
-          ;; nothing moved in code: still a successful refresh, and re-stamping
-          ;; is what makes \"current\" true rather than merely unchanged
-          (keep! (stamp (assoc running :reloaded [])))
-          ;; a failed reload falls out as nil — the running version is
-          ;; untouched and the caller re-boots, which is the safe swap that
-          ;; already exists and is already tested
-          (let [failed (first (keep (fn [n] (image/load-ns! (:image running) store n))
-                                    todo))]
-            (when-not failed
-              (keep! (stamp (assoc running :reloaded (vec todo) :loaded now))))))))))
-
 (defn ^:export declared-url
   "Where a human should open a declared entry that SERVES HTTP:
   `http://<host>:<port>/` — the manager told the child that port, so the
@@ -796,95 +727,6 @@
       (repl/stop! image)
       {:serving? false :plan plan
        :reason (bind-failure (:port plan) (ex-message t))})))
-
-(defn start!
-  "Bring this store's app server up in a DEDICATED image and return
-  `{:serving? true :image :plan :port :url}` — or `{:serving? false :reason …}`.
-
-  `dir` is the store's directory, and it is only ever hashed (`derived-port`).
-
-  Boot-and-load (`boot!`) then bind (`serve-in!`), which is the same pair
-  `refresh!` uses in a different order. One implementation between them is
-  the point: a swap that booted differently from a start would be a second
-  lifecycle, and the two would drift exactly where it is hardest to notice.
-
-  **A failure is a SENTENCE, not a throw.** Nothing the caller can do about a
-  taken port is expressed by a stack trace, and this runs from the dev
-  lifecycle rather than from a user's call — a throw there takes down more
-  than the app server.
-
-  **A taken port is reported, not routed around** — see `derived-port` for
-  why this diverges from the UI listener, which falls back to an ephemeral
-  one. Reporting keeps the decision with the caller: this returns the fact,
-  and a wiring layer that wants a fallback ladder can build one on top
-  without this function having an opinion baked in."
-  [session store dir]
-  (let [plan (serve-plan store dir)]
-    (if-not (:enabled? plan)
-      {:serving? false :reason (:reason plan) :plan plan}
-      (let [booted (boot! session store plan)]
-        (if (:reason booted)
-          (assoc booted :serving? false :plan plan)
-          ;; STAMPED at the start, because it cannot be asked afterwards —
-          ;; see [[currency]]. nil when there is no connection or no line,
-          ;; which `report` keeps as its third state rather than reading as
-          ;; stale.
-          (let [r (serve-in! booted)]
-            (cond-> r
-              (:serving? r)
-              (assoc :currency (currency/of (:db @session)
-                                            (:line @session))))))))))
-
-(defn ^:export refresh!
-  "Re-serve `store` on this session's app server and return the running map.
-  The version that was up is stopped only once the new one has PROVED it
-  loads; the result is held on the session as `:app-server`.
-
-  Called at DONE grain, not per write. Mid-episode the store is intentionally
-  incomplete — a red test written before its implementation is the normal
-  state, not a fault — and reloading a browser into that shows the author a
-  broken app repeatedly and trains them to ignore it. `done` is the point
-  someone says \"I think this is finished\", which is exactly when they want
-  to look.
-
-  **The swap is verified on LOADING, not on binding**, and the asymmetry is
-  the design. A boot that fails at done grain almost always fails because the
-  code does not compile, and that is decided before a socket is involved —
-  so the check that protects the running app is cheap and happens first. A
-  bind failure means a foreign process holds the port, which no ordering can
-  prevent and which is reported instead.
-
-  So a red store leaves the previous version answering and the session's
-  `:app-server` untouched: \"always up\" and \"up to date\" only conflict when
-  a boot fails, and this is the answer to that conflict. A red `done` still
-  refreshes — `done` REPORTS rather than refuses and a red one STANDS, so
-  \"finished\" and \"green\" are different questions, and seeing the app is
-  part of how you find out you were not finished.
-
-  The old image is stopped BEFORE the new one binds, because they want the
-  same derived port. That is a real gap in service, and it is the price of a
-  stable url — the alternative, binding the new one somewhere else first,
-  keeps the app up under an address nobody was given."
-  [session store dir]
-  (let [plan (serve-plan store dir)]
-    (if-not (:enabled? plan)
-      {:serving? false :reason (:reason plan) :plan plan}
-      (let [booted (boot! session store plan)]
-        (if (:reason booted)
-          (assoc booted :serving? false :plan plan)
-          (do (stop! (:app-server @session))
-              ;; RE-stamped, not inherited. A refresh is a NEW version of the
-              ;; app, and carrying the previous stamp forward would report the
-              ;; new process as current to a store it never saw — the precise
-              ;; failure the stamp exists to end.
-              (let [served (serve-in! booted)
-                    now    (cond-> served
-                             (:serving? served)
-                             (assoc :currency
-                                    (currency/of (:db @session)
-                                                 (:line @session))))]
-                (swap! session assoc :app-server now)
-                now)))))))
 
 (defn ^:export managed-child-of?
   "Whether THIS process is running as `dir`'s declared entry — the manager set
@@ -942,3 +784,199 @@
                    "slopp-app-output")
       (.setDaemon true)
       (.start))))
+
+^:reads (defn pushed-hashes
+  "{ns-sym hash} for `nses` as main holds them NOW, hashed exactly the way
+  the kernel's own staleness comparison hashes — over `boot/store-sources`,
+  the kernel's rendering. Hashing `render-ns` text instead would read every
+  namespace stale the first time the two renderers differed by a space.
+
+  Read right after the push, so a landing in the few milliseconds between
+  the push and this read is recorded as held when it is not; the next
+  refresh re-sends the record and closes that window."
+  [conn nses]
+  (into {} (map (fn [[n src]] [n (hash src)]))
+        (select-keys (boot/store-sources conn) nses)))
+
+(defn host-record-code
+  "The expression an app image evaluates to adopt the record of what the
+  manager just pushed into it — a STRING, because it crosses an nREPL wire.
+  Feature-detected: an ordinary app's image does not carry the kernel, and
+  there it evaluates to nil and changes nothing."
+  [dir hashes]
+  (str "(when (find-ns 'slopp.kernel.boot)"
+       " ((resolve 'slopp.kernel.boot/adopt-host-record!) "
+       (pr-str (str dir)) " '" (pr-str hashes) "))"))
+
+(defn- record-host!
+  "Hand `running`'s image the record of what it now holds and return
+  `running`. Only for a serving image, and never fatal: a record that fails
+  to land leaves the image's guard answering \"not measured\", which is the
+  honest state, while a throw here would take down an app that is fine."
+  [session running]
+  (when (and (:serving? running) (:image running) (seq (:loaded running)) (:db @session))
+    (try
+      (repl/eval! (:image running)
+                  (host-record-code (:dir @session)
+                                    (pushed-hashes (:db @session) (keys (:loaded running)))))
+      (catch Throwable _ nil)))
+  running)
+
+(defn ^:export hot-refresh!
+  "Push what MOVED into the already-running app image and keep it serving —
+  `{:hot? true …}` on success, `nil` when this refresh cannot be done in
+  place and the caller should fall back to [[refresh!]].
+
+  **This is the change `serve-code` names and nobody had made.** A full
+  re-boot replaces the child JVM, so `:http/perform-ctx` is rebuilt and any
+  state the app kept there — a cache, a registry, a pool — is silently gone at
+  every `done`. Hot-loading leaves the context alone because it never re-runs
+  the generated call.
+
+  Returns nil rather than throwing for the cases in-place cannot serve, and
+  each is a real one:
+
+  - **nothing running**, or a running map from before this existed and so
+    carrying no `:loaded` — there is nothing to diff against.
+  - **the LOAD ORDER changed** — a namespace appeared or disappeared. A new
+    namespace may need requiring in a dependency order this image never had,
+    and a departed one leaves vars answering that the store no longer defines.
+    `--live` handles the second with `departed-vars`; an app image has no
+    equivalent, so a boot is the honest answer.
+  - **a reload FAILED** — the running version is left untouched and the caller
+    re-boots, which is `refresh!`'s existing safe-swap and is already tested.
+
+  **Two things are retaken on success, and the first one was missed for a
+  month.** `:served-at` is what `app-behind` counts from; leaving it at boot
+  made the count rise forever while `done` stayed honestly silent about a
+  refresh that had worked. And the static dir the child serves from is
+  RE-SYNCED, because `boot!` wrote it on the assumption that a refresh
+  replaces the image — true until this function existed. A recompiled bundle
+  reached the store and never the child: 23 hours, 57 changes, one
+  consumer's browser. The child reads per request, so syncing in place is
+  the whole fix."
+  [session store running]
+  (let [was (:loaded running)
+        now (into {} (map (juxt identity #(store.render/render-ns store %)))
+                  (load-order store))]
+    (when (and (:serving? running) (seq was)
+               ;; same POPULATION, or an in-place reload cannot be honest
+               (= (set (keys was)) (set (keys now))))
+      (let [todo   (hot-reload-set was now)
+            ;; the dir the child is serving from — assets that moved since
+            ;; boot are written INTO it, not beside it
+            plan   (:plan running)
+            synced (when-let [sd (:static-dir plan)]
+                     (materialize-static! store (:static plan) (:dir @session) sd))
+            ;; recorded on the session exactly as `refresh!` does, or the
+            ;; session goes on holding the pre-reload map and every later
+            ;; refresh diffs against a `:loaded` that has moved on
+            keep!  (fn [r] (swap! session assoc :app-server r) (record-host! session r))
+            stamp  (fn [r]
+                     (cond-> (assoc r :hot? true
+                                    ;; the head this image NOW serves, not the
+                                    ;; one it booted on: what app-behind counts from
+                                    :served-at (:head-at store)
+                                    :currency (currency/of (:db @session) (:line @session)))
+                       synced (assoc-in [:plan :static-dir] synced)))]
+        (if (empty? todo)
+          ;; nothing moved in code: still a successful refresh, and re-stamping
+          ;; is what makes \"current\" true rather than merely unchanged
+          (keep! (stamp (assoc running :reloaded [])))
+          ;; a failed reload falls out as nil — the running version is
+          ;; untouched and the caller re-boots, which is the safe swap that
+          ;; already exists and is already tested
+          (let [failed (first (keep (fn [n] (image/load-ns! (:image running) store n))
+                                    todo))]
+            (when-not failed
+              (keep! (stamp (assoc running :reloaded (vec todo) :loaded now))))))))))
+
+(defn start!
+  "Bring this store's app server up in a DEDICATED image and return
+  `{:serving? true :image :plan :port :url}` — or `{:serving? false :reason …}`.
+
+  `dir` is the store's directory, and it is only ever hashed (`derived-port`).
+
+  Boot-and-load (`boot!`) then bind (`serve-in!`), which is the same pair
+  `refresh!` uses in a different order. One implementation between them is
+  the point: a swap that booted differently from a start would be a second
+  lifecycle, and the two would drift exactly where it is hardest to notice.
+
+  **A failure is a SENTENCE, not a throw.** Nothing the caller can do about a
+  taken port is expressed by a stack trace, and this runs from the dev
+  lifecycle rather than from a user's call — a throw there takes down more
+  than the app server.
+
+  **A taken port is reported, not routed around** — see `derived-port` for
+  why this diverges from the UI listener, which falls back to an ephemeral
+  one. Reporting keeps the decision with the caller: this returns the fact,
+  and a wiring layer that wants a fallback ladder can build one on top
+  without this function having an opinion baked in."
+  [session store dir]
+  (let [plan (serve-plan store dir)]
+    (if-not (:enabled? plan)
+      {:serving? false :reason (:reason plan) :plan plan}
+      (let [booted (boot! session store plan)]
+        (if (:reason booted)
+          (assoc booted :serving? false :plan plan)
+          ;; STAMPED at the start, because it cannot be asked afterwards —
+          ;; see [[currency]]. nil when there is no connection or no line,
+          ;; which `report` keeps as its third state rather than reading as
+          ;; stale.
+          (let [r (serve-in! booted)]
+            (record-host! session
+                          (cond-> r
+                            (:serving? r)
+                            (assoc :currency (currency/of (:db @session)
+                                                          (:line @session)))))))))))
+
+(defn ^:export refresh!
+  "Re-serve `store` on this session's app server and return the running map.
+  The version that was up is stopped only once the new one has PROVED it
+  loads; the result is held on the session as `:app-server`.
+
+  Called at DONE grain, not per write. Mid-episode the store is intentionally
+  incomplete — a red test written before its implementation is the normal
+  state, not a fault — and reloading a browser into that shows the author a
+  broken app repeatedly and trains them to ignore it. `done` is the point
+  someone says \"I think this is finished\", which is exactly when they want
+  to look.
+
+  **The swap is verified on LOADING, not on binding**, and the asymmetry is
+  the design. A boot that fails at done grain almost always fails because the
+  code does not compile, and that is decided before a socket is involved —
+  so the check that protects the running app is cheap and happens first. A
+  bind failure means a foreign process holds the port, which no ordering can
+  prevent and which is reported instead.
+
+  So a red store leaves the previous version answering and the session's
+  `:app-server` untouched: \"always up\" and \"up to date\" only conflict when
+  a boot fails, and this is the answer to that conflict. A red `done` still
+  refreshes — `done` REPORTS rather than refuses and a red one STANDS, so
+  \"finished\" and \"green\" are different questions, and seeing the app is
+  part of how you find out you were not finished.
+
+  The old image is stopped BEFORE the new one binds, because they want the
+  same derived port. That is a real gap in service, and it is the price of a
+  stable url — the alternative, binding the new one somewhere else first,
+  keeps the app up under an address nobody was given."
+  [session store dir]
+  (let [plan (serve-plan store dir)]
+    (if-not (:enabled? plan)
+      {:serving? false :reason (:reason plan) :plan plan}
+      (let [booted (boot! session store plan)]
+        (if (:reason booted)
+          (assoc booted :serving? false :plan plan)
+          (do (stop! (:app-server @session))
+              ;; RE-stamped, not inherited. A refresh is a NEW version of the
+              ;; app, and carrying the previous stamp forward would report the
+              ;; new process as current to a store it never saw — the precise
+              ;; failure the stamp exists to end.
+              (let [served (serve-in! booted)
+                    now    (cond-> served
+                             (:serving? served)
+                             (assoc :currency
+                                    (currency/of (:db @session)
+                                                 (:line @session))))]
+                (swap! session assoc :app-server now)
+                (record-host! session now))))))))

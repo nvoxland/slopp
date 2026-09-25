@@ -7,7 +7,7 @@
   the blue/green swap need a real image and are `^:external`."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.store :as store]
-            [slopp.webdev.live :as live] [clojure.edn :as edn] [clojure.string :as str] [slopp.http.client :as http.client] [slopp.http :as slopp.http] [clojure.set :as set] [slopp.store.artifacts :as artifacts] [slopp.ops.external :as external] [slopp.ops :as ops] [clojure.java.io :as io]))
+            [slopp.webdev.live :as live] [clojure.edn :as edn] [clojure.string :as str] [slopp.http.client :as http.client] [slopp.http :as slopp.http] [clojure.set :as set] [slopp.store.artifacts :as artifacts] [slopp.ops.external :as external] [slopp.ops :as ops] [clojure.java.io :as io] [slopp.kernel.boot :as boot]))
 
 (deftest a-serve-plan-is-derived-from-the-store
   (let [src (str "(ns shop.api)\n\n"
@@ -1269,3 +1269,35 @@
     (is (= ["slopp server: http://127.0.0.1:7357/api/ (pid 1)" "second line"] @seen))
     (is (nil? (live/relay-output! {:image {}} #(swap! seen conj %)))
         "nothing to read: no thread, no throw")))
+
+(deftest ^:external an-adopted-host-record-is-measured-like-a-booted-one
+  ;; A managed image never boots through the kernel, so nothing records what
+  ;; it holds. The manager that PUSHED the code knows, and hands the record
+  ;; over; from then on the measure is the same one a booted host gets.
+  (let [dir   (str (java.nio.file.Files/createTempDirectory
+                    "slopp-adopt" (make-array java.nio.file.attribute.FileAttribute 0)))
+        s     (external/open! {:slopp.ops/dir dir})]
+    (try
+      (ops/ingest! s 'ad.core "(ns ad.core)\n\n(defn ^:unused-ok f [x] x)\n" :agent "a")
+      (external/done! s :label "v1" :agent "a")
+      (boot/adopt-host-record! dir (live/pushed-hashes (:db @s) '[ad.core]))
+      (is (= [] (boot/host-stale-now '#{ad.core}))
+          "what was pushed is what main holds: current")
+      (ops/edit-replace! s 'ad.core 'f "(defn ^:unused-ok f [x] (inc x))" :prompt "v2" :agent "a")
+      (external/done! s :label "v2" :agent "a")
+      (is (= '[ad.core] (boot/host-stale-now '#{ad.core}))
+          "main moved and nothing was re-pushed: stale, measured from the ADOPTED dir")
+      (finally
+        (boot/adopt-host-record! nil {})
+        (ops/close! s)))))
+
+(deftest the-manager-hands-the-image-the-record-of-what-it-pushed
+  ;; The expression crosses an nREPL wire, so it is a STRING, and the image
+  ;; it lands in may not carry the kernel at all (an ordinary app): it must
+  ;; do nothing there rather than throw.
+  (let [code (live/host-record-code "/w/proj" '{a.core 11 b.core -2})]
+    (is (string? code))
+    (is (re-find #"adopt-host-record!" code))
+    (is (re-find #"find-ns" code) "feature-detected, never assumed")
+    (is (re-find #"/w/proj" code))
+    (is (re-find #"a\.core 11" code) "the hashes ride as data")))

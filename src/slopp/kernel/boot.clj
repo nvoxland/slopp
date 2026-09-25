@@ -43,7 +43,7 @@
         (jdbc/execute! conn ["PRAGMA busy_timeout=5000"])
         conn))))
 
-^:reads (defn store-sources
+^:reads (defn ^:export store-sources
           "{ns-sym source} for every namespace on the store db's TRUNK — the
   store's own rendering, reproduced without any slopp code. Forms joined by
   ONE BLANK LINE, a form's `comment` directly above it, one trailing newline.
@@ -877,20 +877,38 @@
 ^:reads (defn ^:export host-stale-now
   "Which of `nses` THIS process holds at other than the store's CURRENT
   source, measured now — a sorted vector, `[]` when all are current, or nil
-  when there is nothing to compare: no store was loaded at boot (a released
-  server from a neutral dir, a test JVM), or the dir it booted from no longer
-  has a store.
+  when there is nothing to compare: no store was loaded at boot and no
+  manager handed a record over ([[adopt-host-record!]]), or the store dir
+  no longer has a store.
 
   [[host-drift]] is the same comparison taken ONCE, at boot, and the kernel
   never reloads, so it cannot see main move afterwards — which is exactly
   when a snapshot host goes stale. Only namespaces this process actually
-  LOADED are compared: a namespace it never held is not code it runs."
+  LOADED are compared: a namespace it never held is not code it runs. The
+  store compared against is the one the record names, else the dir this
+  process booted from."
   [nses]
-  (let [{:keys [armed?] loaded :nses} @host-loaded]
+  (let [{:keys [armed?] loaded :nses rec-dir :dir} @host-loaded]
     (when armed?
-      (when-let [dir (:dir @boot-info)]
+      (when-let [dir (or rec-dir (:dir @boot-info))]
         (when-let [c (open-conn dir)]
           (with-open [conn c]
             (host-stale-of loaded
                            (select-keys (store-sources conn)
                                         (filter #(contains? loaded %) nses)))))))))
+
+(defn ^:export adopt-host-record!
+  "Arm this process's host record with what it was GIVEN rather than what it
+  booted: `hashes` is {ns-sym (hash kernel-rendered-source)} for the
+  namespaces a manager pushed into this image, and `dir` the store they were
+  pushed from. From then on [[host-stale-now]] measures this process like a
+  host the kernel booted.
+
+  A managed image — the dev instance, any app child — gets its code over
+  nREPL namespace by namespace and never runs `-main`, so nothing else ever
+  arms its record, and an unarmed record answers \"not measured\" forever.
+  Replaced whole on every call: the manager re-sends the full record after
+  each push, so a namespace it no longer loads cannot linger as current."
+  [dir hashes]
+  (reset! host-loaded {:armed? true :nses hashes :stale [] :dir dir})
+  nil)
