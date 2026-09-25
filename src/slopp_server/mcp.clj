@@ -1893,7 +1893,7 @@
                     (catch Exception e {:error (ex-message e)}))]
         (if p
           (-> r
-              (assoc :published (select-keys p [:pushed :branch :error :status :divergence :via]))
+              (assoc :published (select-keys p [:pushed :branch :error :status :divergence :via :deferred :stale :why]))
               ;; the publish, timed: it re-folds every journal before the
               ;; push and was the commit point's unmeasured ninety seconds
               (update :ms assoc :publish (- (System/currentTimeMillis) tp)))

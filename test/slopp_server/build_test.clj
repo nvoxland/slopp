@@ -159,6 +159,9 @@
         (is (re-find #":src \"src\"" (last cmd)) "over the tree's own src, never a path outside it")
         (is (= (str proj "/target/app.jar") (:jar r)) (pr-str r))
         (is (.exists (io/file proj "target" "app.jar")) "copied up to the project's target/")
+        (is (= "jar" (slurp (io/file proj "target" "app.jar"))) "the bytes, whole")
+        (is (not-any? #(re-find #"\.building$" (.getName ^java.io.File %)) (.listFiles (io/file proj "target")))
+            "landed by rename: no staging file is left beside it")
         (is (some #(re-find #"target/app\.jar" %) (build-cli/report-lines r)) (pr-str (build-cli/report-lines r)))))
     (testing "a tree with no recipe is a refusal that names what to track"
       (reset! calls [])

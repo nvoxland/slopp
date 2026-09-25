@@ -11,7 +11,7 @@
             [slopp.store.db :as db]
             [slopp.git :as git]
             [slopp.store :as store]
-            [slopp.sync :as sync] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history] [clojure.edn :as edn] [slopp.project.capabilities :as capabilities] [slopp.project.dev :as dev])
+            [slopp.sync :as sync] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history] [clojure.edn :as edn] [slopp.project.capabilities :as capabilities] [slopp.project.dev :as dev] [slopp.kernel.boot :as boot])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]
            [org.eclipse.jgit.api Git]
@@ -1144,4 +1144,56 @@
           (is (= (:pushed row) (:sha (first (ops/query-commits s)))) "and it is the latest commit point's sha"))
         (testing "and again is nothing to do"
           (is (= "UP_TO_DATE" (:status (first (:mirrored (sync/mirror-push! dir))))))))
+      (finally (ops/close! s)))))
+
+(deftest a-projection-is-deferred-by-a-host-whose-projection-code-is-stale
+  ;; The projection is a pure function of main's journal ONLY when every
+  ;; process minting it runs the same projection code. A snapshot host behind
+  ;; the store mints different shas for the same journal, and its push then
+  ;; diverges the mirror. Deferring is lossless: the commit point is already
+  ;; recorded, and a current process mints the same history from main.
+  (testing "a current host (nothing stale, or never measured) publishes"
+    (is (nil? (sync/projection-deferral [] "main")))
+    (is (nil? (sync/projection-deferral nil "main"))))
+  (testing "a stale host defers, naming what is stale and what clears it"
+    (let [d (sync/projection-deferral '[slopp.git slopp.store] "main")]
+      (is (:deferred d))
+      (is (= "slopp/main" (:branch d)))
+      (is (= '[slopp.git slopp.store] (:stale d)))
+      (is (re-find #"slopp\.git" (:why d)) (:why d))
+      (is (re-find #"restart" (:why d)) "the way out is named")
+      (is (not (re-find #"(?i)error|failed" (:why d)))
+          "a deferral is not a failure: the commit point stands")))
+  (testing "the projection code is the minting code and what it calls, not the orchestration around it"
+    (is (contains? sync/projection-nses 'slopp.git))
+    (is (contains? sync/projection-nses 'slopp.git.client))
+    (is (contains? sync/projection-nses 'slopp.store.render))
+    (is (not (contains? sync/projection-nses 'slopp.ops))
+        "slopp.ops reaches half the store; keying on it would defer every publish")))
+
+(deftest ^:external a-stale-host-leaves-the-mirror-where-it-was
+  (let [dir (work-repo! (temp-dir))
+        s   (external/open! {:slopp.ops/dir dir})
+        ref-sha (fn [] (let [repo (-> (FileRepositoryBuilder.) (.setGitDir (io/file dir ".git")) (.build))]
+                         (try (some-> (.resolve repo "refs/heads/slopp/main") (.name))
+                              (finally (.close repo)))))]
+    (try
+      (with-open [conn (db/open! dir)] (db/set-meta! conn "git-remote" "."))
+      (ops/ingest! s 'st.core "(ns st.core)\n(defn ^:unused-ok f [x] x)\n")
+      (external/commit-point! s "first" :agent "alice")
+      (testing "stale: nothing is minted or moved, and the answer says why"
+        (let [r (sync/publish-local! dir "main" :stale-host '[slopp.git])]
+          (is (:deferred r) (pr-str r))
+          (is (nil? (:error r)) "a deferral is not an error")
+          (is (nil? (ref-sha)) "the mirror branch was never created")))
+      (testing "git_push to this checkout defers the same way"
+        (with-redefs [boot/host-stale-now (constantly '[slopp.git])]
+          (let [r (sync/mirror-push! dir)]
+            (is (re-find #"DEFERRED" (pr-str r)) (pr-str r))
+            (is (re-find #"slopp\.git" (pr-str r)) (pr-str r))
+            (is (nil? (ref-sha))))))
+      (testing "current: the same call publishes"
+        (let [r (sync/publish-local! dir "main" :stale-host [])]
+          (is (= "OK" (:status r)) (pr-str r))
+          (is (some? (ref-sha)))))
       (finally (ops/close! s)))))

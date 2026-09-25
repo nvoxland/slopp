@@ -557,3 +557,20 @@
   (testing "the runner from a neutral dir: nothing to narrate, like the server"
     (is (nil? (boot/boot-note {:jar-entry? true :loaded? false :store-file? false
                               :dir "/home/me/.slopp" :mode "snapshot"})))))
+
+(deftest host-staleness-now-is-nil-until-something-was-measured
+  ;; A process that loaded no store (a released server from a neutral dir,
+  ;; every test JVM) has nothing to compare: nil, never [] — "did not look"
+  ;; must not read as "looked and current".
+  (let [saved-loaded @boot/host-loaded
+        saved-info   @boot/boot-info]
+    (try
+      (reset! boot/host-loaded {:armed? false :nses {} :stale nil})
+      (is (nil? (boot/host-stale-now '#{slopp.git})))
+      (testing "armed, but booted with no store dir: still nothing to compare against"
+        (reset! boot/host-loaded {:armed? true :nses {'slopp.git 1} :stale []})
+        (reset! boot/boot-info nil)
+        (is (nil? (boot/host-stale-now '#{slopp.git}))))
+      (finally
+        (reset! boot/host-loaded saved-loaded)
+        (reset! boot/boot-info saved-info)))))

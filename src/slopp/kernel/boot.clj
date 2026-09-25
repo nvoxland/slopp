@@ -873,3 +873,24 @@
       (when-let [f (seq (:load-failures (meta sources)))]
         (swap! boot-info assoc :load-failures (vec f))))
     (apply (requiring-resolve main) args)))
+
+^:reads (defn ^:export host-stale-now
+  "Which of `nses` THIS process holds at other than the store's CURRENT
+  source, measured now — a sorted vector, `[]` when all are current, or nil
+  when there is nothing to compare: no store was loaded at boot (a released
+  server from a neutral dir, a test JVM), or the dir it booted from no longer
+  has a store.
+
+  [[host-drift]] is the same comparison taken ONCE, at boot, and the kernel
+  never reloads, so it cannot see main move afterwards — which is exactly
+  when a snapshot host goes stale. Only namespaces this process actually
+  LOADED are compared: a namespace it never held is not code it runs."
+  [nses]
+  (let [{:keys [armed?] loaded :nses} @host-loaded]
+    (when armed?
+      (when-let [dir (:dir @boot-info)]
+        (when-let [c (open-conn dir)]
+          (with-open [conn c]
+            (host-stale-of loaded
+                           (select-keys (store-sources conn)
+                                        (filter #(contains? loaded %) nses)))))))))

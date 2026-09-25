@@ -382,45 +382,6 @@
                    (seq (.getRefsByPrefix (.getRefDatabase repo) "refs/remotes/origin/slopp/"))))
       (finally (.close repo)))))
 
-(defn publish-local!
-  "Mirror the store's commit-point history into THIS checkout's local git as
-  refs/heads/slopp/<store-branch> (user decision 2026-07-14): every
-  commit_point lands in local git automatically, so the repo durably
-  carries the slopp history; REMOTE publishing stays explicit (git_push).
-  ONE projection algorithm: `ensure-projected!` (inside `push-to-remote!`)
-  already projects main + every on-disk branch line onto this ctx with the
-  store's graft base — so a non-main `store-branch` just names its OWN
-  projected ref as the push SOURCE (`:branch`). (Two earlier bugs here:
-  omitting `:branch` pushed main's ref onto every mirror; a line-dir ctx
-  re-projected the branch without the main db's graft meta and minted a
-  divergent, non-fast-forward chain.) `:head-store` is the caller's already-
-  folded store for `store-branch` — the commit point that just landed holds
-  it, and handing it over lets the projection mint the new commit from it
-  without reading the journal (D2b). Never reads or writes the git-remote
-  default. nil when `dir` isn't a git checkout; push refusals surface as
-  {:error} (e.g. the mirror branch is checked out)."
-  [dir store-branch & {:keys [head-store]}]
-  (when (.exists (io/file dir ".git"))
-    (let [ctx     (git/open-ctx! dir)
-          line    (or store-branch "main")
-          mirror  (str "slopp/" line)]
-      (try
-        (if (= mirror (checked-out-branch (str dir)))
-          {:error (str "refs/heads/" mirror " is checked out — cannot mirror onto"
-                       " a live working tree")}
-          (assoc (git.client/push-to-remote! ctx (str dir)
-                                         :branch line
-                                         :remote-branch mirror
-                                         ;; this push never leaves the repo —
-                                         ;; the \"remote\" is `dir` itself. Saying
-                                         ;; so is what stops a refusal here
-                                         ;; naming a remote nobody has and
-                                         ;; advising a pull that cannot happen
-                                         :mirror? true
-                                         :head-stores (when head-store {line head-store}))
-                 :branch mirror))
-        (finally (git/close-ctx! ctx))))))
-
 (defn- working-repo
   "The CHECKOUT's own git repo at `dir` (mirror ops act on refs/heads/slopp/*
   there, not on the store's projection repo). nil when not a checkout."
@@ -1071,6 +1032,93 @@
          (= (.getCanonicalPath (io/file s))
             (.getCanonicalPath (io/file (str dir)))))))
 
+(def projection-nses
+  "The namespaces whose code decides what the projection MINTS: `slopp.git`
+  and `slopp.git.client` and what they transitively require. Two processes
+  holding the same versions of these mint the same shas from the same
+  journal; a process holding older ones mints different shas, and its push
+  diverges the mirror.
+
+  Declared rather than derived at publish time because deriving needs a
+  store value of slopp's OWN code, which a process serving another project
+  does not hold. It is the require closure of `slopp.git.client` as of
+  2026-09-24; `slopp.sync` itself and `slopp.ops` are left out on purpose —
+  they orchestrate the publish rather than shape the bytes, and `slopp.ops`
+  reaches half the store, so keying on it would defer nearly every publish."
+  '#{slopp.git slopp.git.client slopp.build slopp.cache slopp.index.analyze
+     slopp.index.derive slopp.index.refs slopp.store slopp.store.artifacts
+     slopp.store.db slopp.store.fields slopp.store.render})
+
+(defn projection-deferral
+  "The answer a publish gives INSTEAD of minting when `stale` — the
+  projection namespaces this host holds at other than the store's current
+  source — is non-empty; nil when it is empty or was never measured.
+
+  Deferring loses nothing. The projection is derived from main's journal and
+  the commit point is already recorded and landed, so the next publish by a
+  process running current code mints the same history, this commit point
+  included. Minting it here instead is how the mirror diverged: same
+  journal, older code, different shas."
+  [stale store-branch]
+  (when (seq stale)
+    {:deferred true
+     :branch   (str "slopp/" (or store-branch "main"))
+     :stale    (vec stale)
+     :why      (str "projection deferred: this host runs " (str/join ", " stale)
+                    " at an older version than the store holds, and projection"
+                    " code that is behind mints different commits for the same"
+                    " history. The commit point is recorded; the next publish by"
+                    " a current process (restart this one, or any `slopp dev` /"
+                    " server started since) projects it.")}))
+
+(defn publish-local!
+  "Mirror the store's commit-point history into THIS checkout's local git as
+  refs/heads/slopp/<store-branch> (user decision 2026-07-14): every
+  commit_point lands in local git automatically, so the repo durably
+  carries the slopp history; REMOTE publishing stays explicit (git_push).
+  ONE projection algorithm: `ensure-projected!` (inside `push-to-remote!`)
+  already projects main + every on-disk branch line onto this ctx with the
+  store's graft base — so a non-main `store-branch` just names its OWN
+  projected ref as the push SOURCE (`:branch`). (Two earlier bugs here:
+  omitting `:branch` pushed main's ref onto every mirror; a line-dir ctx
+  re-projected the branch without the main db's graft meta and minted a
+  divergent, non-fast-forward chain.) `:head-store` is the caller's already-
+  folded store for `store-branch` — the commit point that just landed holds
+  it, and handing it over lets the projection mint the new commit from it
+  without reading the journal (D2b). Never reads or writes the git-remote
+  default. nil when `dir` isn't a git checkout; push refusals surface as
+  {:error} (e.g. the mirror branch is checked out).
+
+  A host whose PROJECTION CODE is stale ([[projection-nses]], measured by
+  `boot/host-stale-now` unless `:stale-host` says) answers
+  [[projection-deferral]] and touches nothing: the same journal minted by
+  older code is a different history, and pushing it diverges the mirror."
+  [dir store-branch & {:keys [head-store stale-host]}]
+  (when (.exists (io/file dir ".git"))
+    (or (projection-deferral (if (some? stale-host)
+                               stale-host
+                               (boot/host-stale-now projection-nses))
+                             store-branch)
+        (let [ctx     (git/open-ctx! dir)
+              line    (or store-branch "main")
+              mirror  (str "slopp/" line)]
+          (try
+            (if (= mirror (checked-out-branch (str dir)))
+              {:error (str "refs/heads/" mirror " is checked out — cannot mirror onto"
+                           " a live working tree")}
+              (assoc (git.client/push-to-remote! ctx (str dir)
+                                             :branch line
+                                             :remote-branch mirror
+                                             ;; this push never leaves the repo —
+                                             ;; the \"remote\" is `dir` itself. Saying
+                                             ;; so is what stops a refusal here
+                                             ;; naming a remote nobody has and
+                                             ;; advising a pull that cannot happen
+                                             :mirror? true
+                                             :head-stores (when head-store {line head-store}))
+                     :branch mirror))
+            (finally (git/close-ctx! ctx)))))))
+
 (defn mirror-push!
   "Push local MIRROR branches (refs/heads/slopp/<b>) from a git CHECKOUT to
   a git remote. `branches` = STORE branch names (default [\"main\"]).
@@ -1096,8 +1144,14 @@
           (this-checkout? dir target)
           (let [rows (mapv (fn [b]
                              (let [p (publish-local! dir b)]
-                               (if (:error p)
+                               (cond
+                                 (:deferred p)
+                                 {:ref (str "refs/heads/" (:branch p)) :status "DEFERRED" :message (:why p)}
+
+                                 (:error p)
                                  {:ref (str "refs/heads/slopp/" b) :status "REJECTED" :message (:error p)}
+
+                                 :else
                                  {:ref (str "refs/heads/" (:branch p)) :status (:status p)
                                   :pushed (:pushed p) :via (:via p)})))
                            branches)]

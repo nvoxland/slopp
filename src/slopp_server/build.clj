@@ -176,9 +176,20 @@
                            " (--native), a jar recipe it does not yet.")})
             (run cmd (str tree) "build/uber")
             (if-let [^java.io.File jar (newest-jar)]
-              (let [dest (io/file (str (or proj tree)) "target" (.getName jar))]
+              (let [dest    (io/file (str (or proj tree)) "target" (.getName jar))
+                    staging (io/file (str (or proj tree)) "target" (str (.getName jar) ".building"))]
                 (io/make-parents dest)
-                (io/copy jar dest)
+                ;; written beside the destination, then RENAMED over it: a
+                ;; running server keeps the old inode and the next launch
+                ;; gets this one — overwriting in place truncates the inode
+                ;; that server has open and its lazy classloads read a
+                ;; shifted zip (the jar-swap corruption uber itself avoids)
+                (io/copy jar staging)
+                (java.nio.file.Files/move
+                 (.toPath staging) (.toPath dest)
+                 (into-array java.nio.file.CopyOption
+                             [java.nio.file.StandardCopyOption/ATOMIC_MOVE
+                              java.nio.file.StandardCopyOption/REPLACE_EXISTING]))
                 (assoc r :jar (.getPath dest)))
               {:error (str "build/uber ran in " tree " and wrote no .jar under " tree
                            "/target — its output above says what it did instead")}))))))
