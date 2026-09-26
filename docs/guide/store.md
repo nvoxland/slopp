@@ -66,11 +66,12 @@ that a write failed to land.
 ## Getting real files out
 
 ```sh
-slopp build . --out /tmp/proj-out      # from a shell, no server needed
+slopp build . --tree --out /tmp/proj-out       # from a shell, no server needed
 slopp --call build '{"dir":"/tmp/proj-out"}'   # or routed through the running server
 ```
 
-`build` materializes the store as ordinary files -- source, a generated
+(`slopp build .` without `--tree` goes on to cut the artifact — a native
+binary by default, a jar with `--jar`.) `build` materializes the store as ordinary files -- source, a generated
 `deps.edn` from the dependency manifest, tracked files from the files manifest,
 and the module manifest as a read-only `modules` file. With a `main` argument it
 also emits a GraalVM native-image recipe.

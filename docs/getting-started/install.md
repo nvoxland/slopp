@@ -133,11 +133,11 @@ slopp --main slopp.sync/-main import .    # build .slopp/store.db from the slopp
 slopp dev .                               # serve the checkout's in-progress slopp
 ```
 
-The working tree is fileless: `deps.edn`, `build.clj`, docs and the plugin
-are the only real files, and there is no `src/`. The jar's boot kernel loads
+The working tree is fileless: docs, the plugin and CI config are the only
+real files — no `src/`, no `deps.edn`, no `build.clj` (both are produced
+from the store into every built tree). The jar's boot kernel loads
 every namespace's byte-exact source out of `store.db` into the JVM in
 dependency order and invokes the entry point, so a plain `-m slopp-server.mcp`
-finds nothing. To cut your own jar from the store: `slopp build .` then
-`clojure -T:build uber`.
+finds nothing. To cut your own jar from the store: `slopp build . --jar`.
 
 Next: [your first session](first-session.md).

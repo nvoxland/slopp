@@ -200,7 +200,7 @@ slopp query_project
 slopp thread_open '{"thread":"ci"}'
 slopp commit_point '{"description":"release 1.2","thread":"ci"}'
 slopp --main slopp.sync/-main test .    # isolated suite from a store build
-slopp build . [--out DIR]               # materialize the store into a runnable tree — no server needed
+slopp build . [--native|--jar|--tree]   # the artifact from the store (native binary by default) — no server needed
 ```
 
 CI for a slopp repo is usually: checkout → `import` (or checkout the `slopp`

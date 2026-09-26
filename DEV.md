@@ -7,14 +7,14 @@ a store — read `plugins/slopp/skills/slopp/SKILL.md`, or the published
 ## The one thing to understand first
 
 **The working tree is fileless.** slopp's own code, system and tests both,
-lives in `.slopp/store.db`. There are no project `.clj` files to edit. Only
-these are real files:
-
-- `deps.edn` — the kernel's own dependency coordinates. Project code declares
-  its deps in the store manifest (`deps_add`); `build!` generates a project
-  `deps.edn` from that.
-- `build.clj` — the uberjar recipe.
-- Docs, CI config, this file, and everything else humans own.
+lives in `.slopp/store.db`. There are no project `.clj` files to edit, and no
+build inputs on `main` either: `deps.edn` is generated from the dependency
+manifest (`deps_add`) into every materialized tree and projection checkout,
+and `build.clj` — the uberjar recipe — is a file on the store's files
+manifest (`file_put`) that `build!` writes into the tree, where
+`slopp build . --jar` runs it. What `main` holds is docs, the plugin, CI
+config, `bin/` scripts and `.context/` — everything humans own and nothing a
+build reads.
 
 There is no `src/` on `main`. The boot kernel (`slopp.kernel.boot`,
 `slopp.kernel.rt`) lives in the store with everything else; `slopp build .`
@@ -126,17 +126,24 @@ launcher, a dependency change, a store format the release cannot read — build
 a jar from a commit point and run the launcher against it:
 
 ```sh
-slopp build .          # materialize the FILELESS store into target/jar-src — no server needed
-clojure -T:build uber  # -> target/slopp.jar, refusing a stale materialization
+slopp build . --jar    # materialize the FILELESS store into target/jar-src, run the
+                       # store-tracked build.clj there, copy the jar to target/slopp.jar
 
 SLOPP_JAR=~/src/nvoxland/slopp/target/slopp.jar ~/.claude/skills/slopp/bin/slopp dev .
 ```
 
-`slopp build` opens the store itself, read-only, and materializes what has
-LANDED on the branch; it is the one verb that works with no slopp server,
-because the server is usually the thing being rebuilt. (`slopp --call build
-'{"dir":…}'` is the same materialization routed through a running server,
-from the session's own view.)
+`slopp build` opens the store itself, read-only, materializes what has
+LANDED on the branch, and cuts the artifact from that tree; it is the one
+verb that works with no slopp server, because the server is usually the
+thing being rebuilt. `slopp build .` alone builds a NATIVE binary from the
+same tree (the default for every slopp project), and `slopp build . --tree`
+stops at the materialization. There is no `clojure -T:build` at the repo
+root any more: main carries no deps.edn and no build.clj, so the recipe runs
+in the tree with tools.build supplied inline, exactly as the release lane
+runs it on a projection checkout. Missing tools are named before a recipe
+runs (the clojure CLI; GraalVM's `native-image` for the default).
+(`slopp --call build '{"dir":…}'` is the bare materialization routed through
+a running server, from the session's own view.)
 
 `SLOPP_JAR` is honoured by the plugin's `bin/slopp` and skips the fetch and
 the checksum. The path to the launcher is spelled out because a plain
@@ -167,13 +174,21 @@ in `.claude/settings.json`.
 
 ### Building the jar
 
-**`uber` alone REFUSES rather than shipping a stale jar**, and writes nothing
-when it does. It bundles whatever is under `target/jar-src/src`, which if you
-skip the materialize step can be days old; if `.slopp/store.db` is newer than
-that tree, the build stops before touching `target/slopp.jar`, names the head
-and both timestamps, and gives you the two commands. `:stale true` jars it
-anyway — legitimate for reproducing an old artifact or bisecting — and prints
-that it did.
+`slopp build . --jar` is the whole flow: it materializes fresh and runs
+`build/uber {:src "src"}` in the tree, so what it jars is always what it just
+rendered. The recipe, `build.clj`, is a file on the store's files manifest
+(`file_put` to change it) and rides into every tree; there is no copy on
+`main` and no `:build` alias anywhere — the verb and the release lane both
+hand tools.build in with `-Sdeps`.
+
+**Run by hand from a project directory, `uber` REFUSES rather than shipping a
+stale jar**, and writes nothing when it does. Its default `:src` is
+`target/jar-src/src`, which if you skip the materialize step can be days old;
+if `.slopp/store.db` is newer than that tree, the build stops before touching
+`target/slopp.jar`, names the head and both timestamps, and gives you the
+command. `:stale true` jars it anyway — legitimate for reproducing an old
+artifact or bisecting — and prints that it did. (That guard cannot fire
+through the verb, which always materializes first.)
 
 This was a WARNING plus exit 0 until 2026-08-23, and it failed exactly as a
 warning does: it printed, and the invariant part of the output — "built

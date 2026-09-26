@@ -119,3 +119,23 @@ can't vet (calling an opaque dep, or the ~12 host forms). Greppable
   bytecode call-graph — `:pure` is the manual narrowing.
 - `:pure`/`:dep-ns`/native verdicts are per exact `coord@version`; a version
   change re-analyzes.
+
+## The kernel's own deps are manifest entries, not a file (2026-09-24)
+
+`main` carries no `deps.edn`; the one every tree and projection checkout
+gets is `build/deps-edn` over the store's manifest. Two entries there are
+easy to mistake for dead weight and are not:
+
+- **malli** ships because `slopp.cli.spec` declares command arguments in it
+  and is vendored into consuming projects, so a consumer must resolve what
+  it requires, and the version a consumer is handed must be the one the
+  framework was developed against.
+- **replicant** is never loaded by the JVM (`slopp.webapp.dom` is `:cljs`),
+  but `build.clj`'s framework-deps derivation resolves each vendored file's
+  requires against the basis that built the jar, and REFUSES on a lib it
+  cannot find — so a lib absent from the manifest is a lib a browser app is
+  never told about, and dies inside the vendored shim.
+
+The rule: every manifest entry is required by a production namespace that
+SHIPS. That was a comment in the hand-written `deps.edn`; the file is gone
+and the rule lives here.

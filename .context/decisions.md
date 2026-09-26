@@ -7656,3 +7656,162 @@ committed because `deps.edn` is `{:paths [\"src\"]}` and a bare clone with
 no jar bootstraps from exactly those two files". `:paths ["src"]` stays in
 `deps.edn` for materializations and projection checkouts, where `src`
 exists.
+
+## D-build-verb-cuts-the-artifact (2026-09-24, user decision) — `slopp build` produces the artifact; native binary by default
+
+**Decision.** The `build` CLI verb's goal is the ARTIFACT, not the
+materialized tree. `slopp build [dir]` compiles a native binary by default
+(the `build-native.sh` recipe `build!` emits, run in the tree); `--jar` runs
+a jar recipe (the project's own `build.clj` over the tree's `src`, else one
+the tree carries, else a refusal naming the gap); `--tree` stops at the
+materialization. Tools are checked by name before a recipe runs.
+
+**Why.** The tree is an intermediate every artifact is cut from — the
+external test tier, `compile_client`, `uber` — and nobody wants it for its
+own sake; a verb named `build` that stopped there left the user one more
+command short of anything they could ship. The MCP `build` op keeps the
+intermediate role for agents and internal callers. Native is the default
+because a slopp app's shipped form is the binary its recipe already
+describes; the jar is slopp-the-tool's own artifact and stays one flag away.
+
+**Open.** A GENERATED jar recipe: `build!` emits the native recipe for every
+store but no `build.clj`, so `--jar` today works only where an author wrote
+one (slopp itself). Emitting a generic tools.build `uber` recipe into the
+tree, the way `build-native.sh` is emitted, would make `--jar` universal.
+
+## D-behaviour-axis (2026-09-24, user decision) — the Code section reads the code by what it DOES, not by what files hold it
+
+**Decision.** The Code section's screens stop answering only "what is here?"
+(module → namespace → form, a package tree by another name) and answer the
+questions someone asks to understand a system without reading it. Every one
+is derived from data the store already computes, and every picture keeps a
+text or table twin:
+
+- **Ways in** (`/store`, under the map): every door the store declares — the
+  `app.main` entry, HTTP routes, commands, webapp screens, `^:entry-point`
+  forms — from `query-surface`, each linking to its sequence.
+- **Sequence** (`/store/form/<id>/sequence`, a form lens) and **path**
+  (`/store/flow?from=&to=`): a static trace in BODY order, depth first, drawn
+  a lane per MODULE (not per form: five to fifteen lanes stay legible and a
+  boundary crossing is the event worth seeing), with an indented step list.
+  Cycles, callees already drawn and depth/step/fan-out cuts are marked, never
+  silent.
+- **Data dictionary** (`/store/data`): keys ranked by spread; a key opens its
+  users by module, split into forms that NAME it and forms that DESTRUCTURE it.
+- **Conformance** (`/store/conformance`, a Code lens): a reflexion model —
+  every production module edge classed convergent / divergent / absent /
+  test-only against the declared manifest.
+- **Overlay dial and treemap** (`/store?overlay=…`, `/store/treemap`): size,
+  effects, unwarranted, churn and risk tint the same map; the treemap shows
+  where the code's weight is.
+- **Tests as the spec** and **story**: a namespace's, module's and form's
+  covering tests rendered as the sentences they are named as; the `/story`
+  lens lists the commit points that touched a subject with their asks.
+- The Code rail stacks modules in layer order, foundation last.
+
+**Mechanics chosen, and why.**
+
+- **Body order is derived, not stored.** `slopp.read.graph/ordered-callees`
+  sorts the analysis' var-usage rows by row/column at query time. The
+  persisted `:refs` index is keyed on a source digest and carries no
+  position; adding one there would leave every persisted row without it until
+  its namespace was rewritten. `call-sequence` is a pure fold (a first cut
+  over volatiles was flagged effectful by the effect analysis, which would
+  have tainted every model built on it).
+- **Keyword use is labelled honestly.** `keyword-refs`' `:literal` fires for
+  `(assoc m :k v)`, `{:k v}` and `(:k m)` alike, so the dictionary says
+  "names it" versus "destructures it" and never "produces". A map-key
+  producer signal is an index change left open.
+- **Tier is a node class, not a band.** `graph/positions` places rows by
+  layer; tier bands would reorder members and reflow the map. Overlays
+  (conformance classes, dial tints, tier borders) restyle an unmoved picture;
+  a declared-but-unused module edge has no routed geometry and is drawn
+  straight between the boxes it names.
+- **Dials are permalinks and cost only when asked.** `?overlay=` on the same
+  map; each dial is its own endpoint (`/overlay/:dial`), because churn
+  hydrates history and risk runs the review scan. A share reads as value over
+  forms; a count is ranked within the store, and the dial's note says which.
+- **One ask per screen stays the rule.** The data dictionary answers index and
+  chosen key in one document; the flow picker always asks (blank ends answer
+  an empty trace with a note), which also keeps the canned-answer guard able
+  to see every endpoint a page uses.
+
+**Supersedes** nothing in D-module-view: the module map stays the landing and
+the diagram stays data. It retires the `lenses` note that `:module` and `:ns`
+"need a plumbing change" — a lens is a page of its own at
+`<subject>/<lens>`, with the bare page's `(:lens state)` kept only as the
+registry test's seam.
+
+**Open.** A dynamic (test-driven) sequence needs an ORDERED capture; the
+trace map records which forms a test reaches, not when. Search-as-you-type
+on the path picker. A `:module` treemap (namespace → form).
+
+## D-no-build-inputs-on-main (2026-09-24, user decision) — `deps.edn` and `build.clj` leave `main`; every build input is produced from the store
+
+**Decision.** `main` tracks no `deps.edn` and no `build.clj`. `deps.edn` is
+generated from the dependency manifest by `build/deps-edn` into every
+materialized tree and projection checkout, as it already was for CI and the
+release. `build.clj` lives on the store's files manifest only, rides into
+every tree, and `slopp build . --jar` runs it THERE with tools.build
+supplied inline and `build/uber {:src "src"}` called directly — the release
+lane's own call — then copies the jar up to the project's `target/`. The
+`tracked-file-parity` CI lane is gone with the second copy it compared.
+
+**Why the premise changed.** "Human-owned" meant "read by the Clojure CLI
+before any store code can run", and that was true of exactly one consumer:
+a human typing `clojure -T:build uber` at the repo root. CI and the release
+never did that; they check out `slopp/main`, whose `deps.edn` is generated
+and whose `build.clj` is the store's, and they hand tools.build in with
+`-Sdeps`. With `slopp build` doing the same from a fresh materialization
+(`D-build-verb-cuts-the-artifact`), the root-level copies had no reader.
+The mirror lane existed only because there were two copies; with one, it
+compares nothing.
+
+**What it costs.** `uber`'s staleness guard (materialization older than the
+store) applies only to the retired repo-root spelling; the verb always
+materializes first, so the case it guarded cannot arise through it. The
+prose in the old `deps.edn` (why malli and replicant are kernel deps) moved
+to `.context/dependencies.md`. Bootstrapping a clone needs the launcher's
+release jar and the clojure CLI; it never needed a checkout's files, since
+`.slopp/store.db` is not tracked either.
+
+**Supersedes** the "only `deps.edn` and `build.clj` are files humans own"
+rule in AGENTS.md and DEV.md, and the `build.clj` mirror lane recorded
+2026-08 (`tracked-file-parity`).
+
+## D-stale-host-defers-projection (2026-09-25, user decision) — a host running stale projection code records the commit point but does not project it
+
+**Decision.** `slopp.sync/publish-local!`, the one door both a commit point's
+auto-publish and `git_push` to this checkout go through, asks the kernel
+(`boot/host-stale-now`) which of `slopp.sync/projection-nses` this process
+holds at other than the store's current source, measured at publish time.
+Any stale: it mints and moves nothing and answers `{:deferred :stale :why}`;
+`git_push` reports the row as `DEFERRED`. The commit point itself is already
+recorded and landed, and the next publish by a current process projects it.
+
+**Why.** The projection is a pure function of main's journal only across
+processes running the same projection code. On 2026-09-24 a snapshot host
+235 deltas behind re-minted another session's commit points under different
+shas after that session changed how commit identity survives a rebase-land,
+and the mirror diverged (non-fast-forward, recovered by a later publish from
+a current process). The boot-time host measure (`host-drift`) could not
+catch it: the kernel never reloads, so that measure is taken once and never
+sees main move afterwards.
+
+**Limits.** Only a host that loaded the store at boot (the dev instance, a
+server booted from the checkout) can be measured; a released server from a
+neutral dir answers nil and publishes as before, since its code is the jar
+and it serves other projects' stores. The namespace set is declared (the
+require closure of `slopp.git.client`), not derived, because deriving needs a
+store value of slopp's own code.
+
+**Amended 2026-09-25: a managed image adopts its record.** The dev instance
+(and any app child) gets its code pushed over nREPL and never runs the
+kernel's `-main`, so its host record stayed unarmed and the guard answered
+"not measured". The manager now hands the image the record after every
+successful push — start, refresh, in-place hot refresh — as
+`boot/adopt-host-record!` with the kernel-rendered source hashes of what it
+loaded and the store dir (`slopp.webdev.live/record-host!`). Best-effort: a
+record that fails to land leaves the image "not measured", never a broken
+app. The pushing code runs in the RUNNER, whose code is the jar, so this
+reaches a running `slopp dev` only after a jar rebuild and a runner restart.

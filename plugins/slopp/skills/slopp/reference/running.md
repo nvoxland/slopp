@@ -147,7 +147,7 @@ and the pages a human opens sit beside it:
 | `GET /api/projects/<slug>/<resource>` | the project's typed read API, mounted: `/api/<resource>` in its own contract, with the mount replacing that prefix rather than nesting under it |
 | `POST /api/otel/v1/logs` | the one telemetry sink: `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:7357/api/otel` |
 | `GET /` | the picker: every open project, linked |
-| `GET /p/<slug>/**` | that project's pages — timeline, change review, form permalinks, the namespace index — a browser app over the mounted API; `session_brief` reports it as `:pages`; 404 off the declared page table |
+| `GET /p/<slug>/**` | that project's pages — timeline, change review, form permalinks, and the Code section (the module map with its ways in, a form's call sequence, the path between two forms, the data dictionary, conformance, the overlay dial and treemap, a subject's tests and story) — a browser app over the mounted API; `session_brief` reports it as `:pages`; 404 off the declared page table |
 | `GET /css/style.css`, `GET /assets/**` | the stylesheet and the compiled bundle, from the slopp server's own store under `--live` or from the jar |
 
 It records itself in `~/.slopp/server.json` (`url pid token`, readable by
@@ -189,15 +189,21 @@ stop it: a human asked for it, so it does not follow the agents' lifecycle
 the way a managed child does. A slopp server that is also up must not serve
 the same instance; it will report the taken port.
 
-**A build needs no server either: `slopp build [dir] [--out DIR] [--main
-ns/fn] [--name NAME]`.** It is the `build` op from a shell: the entry opens
-the project's store itself, read-only, and materializes what has LANDED on
-the branch into `target/jar-src` by default (where a `clojure -T:build uber`
-reads), printing where the tree landed and, when the store declares an entry,
-the native recipe's script. Nothing is stranded on a thread because nothing
-is written. A routed `slopp --call build '{"dir":…}'` still builds the
-session's own view through a running server; the verb exists because the
-server is often the thing being rebuilt.
+**A build needs no server either: `slopp build [dir] [--native|--jar|--tree]
+[--out DIR] [--main ns/fn] [--name NAME]`.** It builds the project's
+ARTIFACT: the entry opens the store itself, read-only, materializes what has
+LANDED on the branch into `target/jar-src` (the `build` op's tree), and then
+runs the recipe the mode names there — `--native`, the default, runs the
+`build-native.sh` slopp emitted and prints the binary's path; `--jar` runs
+the `build.clj` the tree carries (a file on the store's files manifest) with
+tools.build supplied inline, copies the jar up to the project's `target/`,
+and refuses with a sentence when the store tracks no recipe; `--tree` stops
+at the tree. Missing tools are named before anything runs (GraalVM's
+`native-image`, the clojure CLI), and a store that declares no entry is told
+that native has nothing to compile. Nothing is stranded on a thread because
+nothing is written. A routed `slopp --call build '{"dir":…}'` is the bare
+materialization from the session's own view through a running server; the
+verb exists because the server is often the thing being rebuilt.
 
 **Working ON slopp is working through the in-progress slopp.** slopp's own
 checkout is a project like any other, and its dev config declares the

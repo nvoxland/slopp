@@ -124,8 +124,12 @@ plus the links, and skips cleanly when `ideas/` is absent (a fresh clone).
   Code lives in a store (SQLite-backed delta log), NOT in `.clj` files on
   disk; a VFS renders source on demand. Stance: `.context/architecture.md`.
 - **The working tree is FILELESS**: slopp's own code (system + tests) lives
-  in `.slopp/store.db`; only `deps.edn` and `build.clj` are files humans own.
-  ALL development goes through slopp's MCP tools — including the boot kernel,
+  in `.slopp/store.db`, and NO build input lives on `main` — no `src/`, no
+  `deps.edn`, no `build.clj` (the last two retired 2026-09-24,
+  `D-no-build-inputs-on-main`). `deps.edn` is generated from the dependency
+  manifest wherever a tree is materialized; `build.clj` is a file on the
+  store's files manifest that rides into every tree; the jar is the builder
+  (`slopp build .`). ALL development goes through slopp's MCP tools — including the boot kernel,
   `slopp.kernel.boot` and `slopp.kernel.rt`, which are ordinary store
   namespaces: `slopp build .` renders them into `target/jar-src/src` like
   every other namespace and `uber` jars them. There is no `src/` on `main`

@@ -182,7 +182,7 @@ config_file {path "capabilities" key "app.version" value "1.0.0"}
 ```
 
 ```sh
-slopp build . --out /tmp/shop-out
+slopp build . --tree --out /tmp/shop-out   # the tree; `slopp build .` alone compiles the binary
 ```
 
 `build` materializes the store as ordinary files with a generated `deps.edn`,

@@ -9,7 +9,9 @@
   store into the JVM; `rt` is injected into every owned image. They reach a
   process only through the jar (`slopp build .` renders them, `uber` jars
   them); no copy is tracked on `main` (`D-kernel-copies-retired`).
-  `deps.edn` = the tool's dep coordinates.
+  `deps.edn` is GENERATED from the dependency manifest into every tree and
+  projection checkout; `build.clj` is a file on the store's files manifest.
+  Neither lives on `main` (`D-no-build-inputs-on-main`).
 - `projects/` — untracked dogfooding grounds (`.context/dogfooding.md`).
 - `benchmarks/results.md` — committed benchmark history.
 - `.slopp/` — the store DB (gitignored; the git repo tracks kernel + docs;
