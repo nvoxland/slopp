@@ -56,61 +56,6 @@
         :else
         (do (Thread/sleep 25) (recur sb))))))
 
-^:unsafe (defn ^:export eval!
-  "Eval `code` in the image; returns a vector of returned values, read as data
-  when readable and left as the raw printed string otherwise (so evals that
-  return unreadable objects — namespaces, functions — don't blow up).
-
-  **Three states, three answers.** An eval that threw and one that returned
-  nothing must not share a representation — the rule at the transport, and it took two
-  goes to get all three.
-
-  **It THREW.** This once kept only `:value`, and a throw produces none — the
-  exception arrives as `:err`/`:ex`, which were dropped. So `[]` meant either
-  \"returned nothing\" or \"blew up\", and every caller doing `(first …)` got nil
-  for both. That silence is what let one `:cljs` namespace hollow out the whole
-  in-image test tier: `ns-interns` threw, the throw evaporated here, and the
-  runner's caller saw a result with no summary and reported green. The error
-  text now comes back as the single value.
-
-  **It RETURNED NOTHING.** nREPL sends `{:value \"nil\"}` for an eval whose
-  result is nil, so this is `[nil]` — a value, and it stays one.
-
-  **IT NEVER ANSWERED**, which is the state the second fix still missed. An
-  EMPTY vector cannot come from a successful eval, because a success always
-  carries a `:value` — so `[]` meant the image was unresponsive, and every
-  caller read it as the sentence above. Reported by a consumer who spent eight
-  calls and an hour bisecting their own code against `(+ 1 1)` → `[]`; the
-  surface accused their expression using a value that looks like a normal
-  answer. It now says the run did not happen, carries the nREPL `:status` —
-  the only evidence of why — and names `restart`, because a reader holding a
-  dead image reaches for the one verb that rebuilds it.
-
-  `image` is an OPAQUE handle from `start!`: the caller never builds one, it
-  passes back what it was given. Destructuring it here would advertise
-  internals as a contract a caller is expected to know; reading them in the
-  body says the truth. It also keeps the handle's key shape out of arglists,
-  which is what made renaming `:client` brick a whole session."
-  [image code]
-  ;; realized ONCE — the seq is consumed twice below, and nrepl/message is lazy
-  (let [msgs (doall (nrepl/message (:client image) {:op "eval" :code code
-                                                    :session (:session image)}))
-        vals (mapv (fn [v] (try (read-string v) (catch Exception _ v)))
-                   (keep :value msgs))]
-    (if (seq vals)
-      vals
-      (let [ex  (some :ex msgs)
-            err (str/trim (apply str (keep :err msgs)))]
-        (if (or ex (seq err))
-          [(str/trim (str ex (when (and ex (seq err)) ": ") err))]
-          [(str "the image returned no value and no error for this eval, so the"
-                " RUN DID NOT HAPPEN — a successful eval always carries a value"
-                " (even nil), which makes this an unresponsive or closed image"
-                " rather than an empty answer from your expression."
-                (when-let [st (seq (distinct (mapcat :status msgs)))]
-                  (str " nREPL status: " (str/join ", " st) "."))
-                " `restart` builds a fresh image.")])))))
-
 (defn ^:export stop!
   "Destroy the image subprocess and release its connection. `image` is the
   opaque handle from `start!` — see `eval!` for why it is not destructured.
@@ -190,44 +135,6 @@
       {:err (str/trim (str/join " " (distinct errs)))}
       {:values (->> msgs (keep :value)
                     (mapv (fn [v] (try (read-string v) (catch Exception _ v)))))})))
-
-^:unsafe (defn- eval-outcome
-  "Classify a completed nREPL eval's messages: `{:values [...]}` (plus
-   `:stderr` when the eval WROTE to stderr without failing) or `{:err msg}`.
-
-   The verdict comes from nREPL's `eval-error` STATUS, which is the only thing
-   that actually knows. Reading `:err` — the stderr STREAM — as the verdict
-   instead meant any library that prints at load turned a successful eval into
-   an error AND discarded its values: garden's `WARNING: abs already refers to
-   …` did exactly that, and because a second eval finds the namespace already
-   loaded and prints nothing, it was non-reproducible on the retry.
-
-   A failure's message keeps the stderr text, which is where the exception's
-   own message lives (`:ex` names only the class), falling back to the class
-   when the eval failed silently."
-  [msgs]
-  (let [stderr  (str/join (keep :err msgs))
-        failed? (some #(some #{"eval-error"} (:status %)) msgs)]
-    (if failed?
-      {:err (str/trim (if (str/blank? stderr)
-                        (or (some :ex msgs) "eval-error")
-                        stderr))}
-      (cond-> {:values (->> msgs (keep :value)
-                            (mapv (fn [v] (try (read-string v)
-                                               (catch Exception _ v)))))}
-        (not (str/blank? stderr)) (assoc :stderr stderr)))))
-
-^:unsafe (defn ^:export eval-checked!
-  "Like `eval!` but surfaces evaluation errors instead of silently dropping
-  them (F-3c2 — an eval that throws must not look like an empty result).
-  Returns `{:values [...]}` — with `:stderr` when the eval printed there
-  without failing — or `{:err msg}`. `eval-outcome` does the classifying, and
-  it reads nREPL's `eval-error` status rather than the stderr stream. `image`
-  is the opaque handle — see `eval!` for why it is not destructured."
-  [image code]
-  (eval-outcome
-   (doall (nrepl/message (:client image) {:op "eval" :code code
-                                          :session (:session image)}))))
 
 (defonce ^{:ambient-ok "process-global by necessity: an image is an OS
   subprocess, so the pool of reusable ones is a property of this JVM and not
@@ -317,6 +224,324 @@
   silently miss is worse than none**, because it buys confidence it has not
   earned. Anything that dirties an image in a new way must mark it here."
   "(boolean (resolve 'user/slopp-image-dirty))")
+
+(defn- add-libs-code
+  "The form the IMAGE evaluates to hot-add `deps-map` — a value, so what it
+  does is checkable without spawning a JVM.
+
+  It seeds repositories first, and only when there are none. `add-libs` builds
+  its Maven procurer from the basis, and with none it has nowhere to look —
+  Maven then refuses even artifacts already in `~/.m2` that it cannot
+  attribute to a configured repository.
+
+  CORRECTED: this used to say the image has no basis, just like a `java -jar`
+  host. It does have one. The default image is `clojure -Sdeps … -M`, which
+  the CLI starts with a real basis — measured through a live oracle: both
+  standard repos, and every resolved lib of the store's manifest. So the seed
+  is a no-op on the path that actually runs. What earns it a place is the
+  other one: `start!` accepts a custom `:cmd`, and an image launched as a bare
+  `java -cp … clojure.main` has no basis at all. Guarded, it costs nothing and
+  covers that case; the reason first given for it was simply not true.
+
+  This bites a USER's store harder than slopp's own, where the host uberjar
+  happens to carry every declared lib and the failures were therefore
+  invisible. Nothing of a user's manifest comes from slopp's jar.
+
+  `slopp.kernel.boot/ensure-repos!` is CALLED, not restated, so the host and the
+  image cannot come to disagree about where artifacts live."
+  [deps-map]
+  (str "(do (require 'clojure.repl.deps 'clojure.java.basis"
+       " 'clojure.java.basis.impl)"
+       " (when-not (seq (:mvn/repos (clojure.java.basis/current-basis)))"
+       " (clojure.java.basis.impl/update-basis! merge {:mvn/repos "
+       (pr-str boot/default-repos) "}))"
+       " (intern 'user 'slopp-image-dirty true)"
+       " (clojure.repl.deps/add-libs '" (pr-str deps-map) ")"
+       " (ns-unmap 'user 'slopp-image-dirty))"))
+
+(def ^:export default-image-jvm-opts
+  "The JVM budget every owned image launches under. Host property, never store
+  config: a store is shared by every writer and by CI, and how much memory this
+  BOX will spend on child JVMs is not a property of the code being written.
+  `SLOPP_IMAGE_JVM_OPTS` overrides it; an explicitly EMPTY value means none,
+  which is the off-arm any re-measurement needs.
+
+  **These two flags are a PAIR, and each alone is worse than neither.** That is
+  the whole reason the budget is a list with a guard rather than two settings:
+
+  | arm | committed, loaded image |
+  |---|---|
+  | neither | 722,040 / 724,763 KB |
+  | `-Xms32m` alone | +2.3% — WORSE |
+  | `-XX:+UseSerialGC` alone | ~2x — far worse still |
+  | **both** | **538,189 / 538,544 KB, −25.6%** |
+
+  Measured against a 279-namespace store, arms alternated, a full GC forced
+  before each sample, reproducible to 0.07%. The saving is not the heap alone:
+  the serial collector drops GC bookkeeping from 62 MB to 0.6 MB and takes
+  ~35 MB of collector worker stacks with it, and it sizes the heap SMALLER
+  (278 -> 192 MB) rather than larger.
+
+  Why neither works alone. `-Xms` sets the INITIAL heap, and an image that
+  loads a real store allocates past 32m before it is ready — so on its own it
+  changes nothing except to make the JVM grow into place, overshooting. And
+  Serial commits its ergonomic initial heap at startup (576 MB on the measuring
+  box) and, unlike G1, never uncommits — so on its own it holds far more than
+  G1 ever would. Told what heap to start with, it holds far less.
+
+  **Throughput was the gate and it came back clear.** Serial is
+  single-threaded, and a memory win that costs suite wall clock is not a win.
+  Twelve samples per arm of the whole in-image suite, run repeatedly inside one
+  settled image so process startup could not swamp it: median 2738 ms without,
+  2639 ms with. The difference is not significant (t~0.77) and bounds a
+  regression at about +5% at worst, with the point estimate slightly in the
+  budget's FAVOUR — and serial's spread was half G1's. Correctness was never
+  the question: every assertion passes identically, and the store holds no
+  soft or weak references for a collector change to perturb.
+
+  One honest limit: this is one store's workload. A far more allocation-heavy
+  project could find single-threaded collection costs it more, and the symptom
+  would be slower tests rather than wrong ones. That is what the override is
+  for, and it is documented where a user will meet it.
+
+  Refused, so nobody re-derives them. `-Xss1m` is noise here (one arm landed
+  ABOVE the base) and buys 2% while risking StackOverflow inside a test, which
+  is a FALSE RED. `-Xmx` appears in no winning arm at all and manufactures
+  OutOfMemoryError, the same failure. `-XX:TieredStopAtLevel=1` trades ~35 MB
+  for 2-5x on suite wall clock. `-Xshare:on` refuses to START the VM on a stale
+  archive, and a dead image is a false verdict where a slow one is not."
+  ["-XX:+UseSerialGC" "-Xms32m"])
+
+(defn ^:export image-jvm-opts
+  "The JVM budget for an owned image: `SLOPP_IMAGE_JVM_OPTS` when the host set
+  one (whitespace-separated), else `default-image-jvm-opts`.
+
+  **An explicitly EMPTY value means no budget at all**, and that is the point
+  rather than an edge case: it is the off-arm. A memory change is only worth
+  what a controlled A/B on a quiet box says it is worth, and an off-arm you
+  reach by editing code is one nobody runs. Unset and empty must therefore
+  differ — unset is the shipped budget, empty is as-shipped-before-the-budget.
+
+  `getenv` is a parameter rather than a read, because the process environment
+  is state a test cannot set, and a precedence rule nobody can exercise is one
+  that drifts."
+  [getenv]
+  (if-let [override (getenv "SLOPP_IMAGE_JVM_OPTS")]
+    (vec (re-seq #"\S+" override))
+    default-image-jvm-opts))
+
+(defn- default-cmd
+  "The target image launch command: Clojure + nREPL, plus the store's external
+  dependency manifest (`deps`, lib→coord) merged into `-Sdeps` so store code
+  that requires those libs compiles (trust Tier 1). `inherent-deps` (nREPL,
+  malli) are merged LAST so slopp-the-tool's own image deps are always present
+  at slopp's versions — regardless of the project manifest.
+
+  The parent-death watchdog rides `-e` (a clojure.main INIT opt, so it runs
+  before `-m` starts nREPL): the child can never exist without its reaper,
+  closing the boot-window orphan class — a parent killed between spawn and
+  nREPL connect used to leave a JVM nothing would ever reap.
+
+  Read-eval is OFF at the JVM's root, for the DATA the image reads at
+  runtime: a `read-string` inside an `^:unsafe` boundary form gets the safe
+  default instead of running a `#=` an outside caller sent. It is no defence
+  for stored CODE — Clojure's loader turns read-eval back on for every file
+  it loads — which is why the write gate refuses `#=` there.
+
+  The memory budget rides `-J` opts, and their PLACEMENT is load-bearing:
+  `-J` is a clj-opt, collected by the launcher only from the part of the
+  command line before `-M`. The same strings after `-M` are handed to the
+  program as arguments and never reach the JVM — a budget that silently does
+  nothing, which is worse than none because it MEASURES as no effect. They go
+  first, ahead of everything.
+
+  `opts` is an argument in the third arity because the shipped budget is empty
+  (see [[default-image-jvm-opts]]): the placement rule above still has to be
+  provable, and a rule that can only be exercised when someone happens to have
+  configured a budget is one that breaks the day someone does."
+  ([] (default-cmd nil))
+  ([deps] (default-cmd deps (image-jvm-opts #(System/getenv %))))
+  ([deps opts]
+   (-> [clojure-bin "-J-Dclojure.read.eval=false"]
+       (into (map #(str "-J" %)) opts)
+       (into ["-Sdeps"
+              (pr-str {:deps (merge deps inherent-deps)})
+              "-M" "-e" watchdog-src "-m" "nrepl.cmdline"]))))
+
+(defn rt-source
+  "The slopp.kernel.rt source an image is bootstrapped with: the copy on the
+  READING process's classpath — either layout, see [[inject-rt!]] — else
+  `fallback`, the store's own rendering, which the image door hands down when
+  the store holds the kernel.
+
+  REFUSES by name when there is neither. `slurp` of nil read as `image boot
+  failed: Cannot open <nil> as a Reader`, which is what every image the dev
+  instance tried to boot died of: a managed child gets its code over nREPL
+  into an empty dir and has no rt.clj on its classpath at all, so an agent
+  attached to it could read and never write."
+  [resource fallback]
+  (or (some-> (resource "slopp/kernel/rt.clj") slurp)
+      (some-> (resource "slopp/rt.clj") slurp)
+      fallback
+      (throw (ex-info (str "no slopp.kernel.rt source to bootstrap the image with:"
+                           " neither slopp/kernel/rt.clj nor slopp/rt.clj is on this"
+                           " process's classpath, and the store handed down no"
+                           " rendering of its own. A process booted from a store"
+                           " over nREPL (a managed dev instance) has no source"
+                           " files — the image door passes the store's"
+                           " slopp.kernel.rt when the store holds it")
+                      {:slopp.image.repl/rt-source :missing}))))
+
+^:unsafe (defn- read-printed
+  "One value the image PRINTED, read back as data — or `v` itself, the raw
+  string, when it does not read (namespaces, functions).
+
+  Read with read-eval OFF. The image runs store code and this runs in the
+  server, and any type can print itself as `#=(…)` through `print-method`;
+  with read-eval on, reading that value ran code in the SERVER. Off, such a
+  value stays the string it printed as. Not `clojure.edn`: that reader also
+  refuses `#'var` and regex values that callers get back today. The one
+  shape this does lose is a record literal, which the reader builds only
+  with read-eval on; it now arrives as its printed string."
+  [v]
+  (try (binding [*read-eval* false] (read-string v))
+       (catch Exception _ v)))
+
+^:unsafe (defn ^:export eval!
+  "Eval `code` in the image; returns a vector of returned values, read as data
+  when readable and left as the raw printed string otherwise (so evals that
+  return unreadable objects — namespaces, functions — don't blow up).
+
+  **Three states, three answers.** An eval that threw and one that returned
+  nothing must not share a representation — the rule at the transport, and it took two
+  goes to get all three.
+
+  **It THREW.** This once kept only `:value`, and a throw produces none — the
+  exception arrives as `:err`/`:ex`, which were dropped. So `[]` meant either
+  \"returned nothing\" or \"blew up\", and every caller doing `(first …)` got nil
+  for both. That silence is what let one `:cljs` namespace hollow out the whole
+  in-image test tier: `ns-interns` threw, the throw evaporated here, and the
+  runner's caller saw a result with no summary and reported green. The error
+  text now comes back as the single value.
+
+  **It RETURNED NOTHING.** nREPL sends `{:value \"nil\"}` for an eval whose
+  result is nil, so this is `[nil]` — a value, and it stays one.
+
+  **IT NEVER ANSWERED**, which is the state the second fix still missed. An
+  EMPTY vector cannot come from a successful eval, because a success always
+  carries a `:value` — so `[]` meant the image was unresponsive, and every
+  caller read it as the sentence above. Reported by a consumer who spent eight
+  calls and an hour bisecting their own code against `(+ 1 1)` → `[]`; the
+  surface accused their expression using a value that looks like a normal
+  answer. It now says the run did not happen, carries the nREPL `:status` —
+  the only evidence of why — and names `restart`, because a reader holding a
+  dead image reaches for the one verb that rebuilds it.
+
+  `image` is an OPAQUE handle from `start!`: the caller never builds one, it
+  passes back what it was given. Destructuring it here would advertise
+  internals as a contract a caller is expected to know; reading them in the
+  body says the truth. It also keeps the handle's key shape out of arglists,
+  which is what made renaming `:client` brick a whole session."
+  [image code]
+  ;; realized ONCE — the seq is consumed twice below, and nrepl/message is lazy
+  (let [msgs (doall (nrepl/message (:client image) {:op "eval" :code code
+                                                    :session (:session image)}))
+        vals (mapv read-printed (keep :value msgs))]
+    (if (seq vals)
+      vals
+      (let [ex  (some :ex msgs)
+            err (str/trim (apply str (keep :err msgs)))]
+        (if (or ex (seq err))
+          [(str/trim (str ex (when (and ex (seq err)) ": ") err))]
+          [(str "the image returned no value and no error for this eval, so the"
+                " RUN DID NOT HAPPEN — a successful eval always carries a value"
+                " (even nil), which makes this an unresponsive or closed image"
+                " rather than an empty answer from your expression."
+                (when-let [st (seq (distinct (mapcat :status msgs)))]
+                  (str " nREPL status: " (str/join ", " st) "."))
+                " `restart` builds a fresh image.")])))))
+
+^:unsafe (defn- eval-outcome
+  "Classify a completed nREPL eval's messages: `{:values [...]}` (plus
+   `:stderr` when the eval WROTE to stderr without failing) or `{:err msg}`.
+
+   The verdict comes from nREPL's `eval-error` STATUS, which is the only thing
+   that actually knows. Reading `:err` — the stderr STREAM — as the verdict
+   instead meant any library that prints at load turned a successful eval into
+   an error AND discarded its values: garden's `WARNING: abs already refers to
+   …` did exactly that, and because a second eval finds the namespace already
+   loaded and prints nothing, it was non-reproducible on the retry.
+
+   A failure's message keeps the stderr text, which is where the exception's
+   own message lives (`:ex` names only the class), falling back to the class
+   when the eval failed silently."
+  [msgs]
+  (let [stderr  (str/join (keep :err msgs))
+        failed? (some #(some #{"eval-error"} (:status %)) msgs)]
+    (if failed?
+      {:err (str/trim (if (str/blank? stderr)
+                        (or (some :ex msgs) "eval-error")
+                        stderr))}
+      (cond-> {:values (->> msgs (keep :value)
+                            (mapv read-printed))}
+        (not (str/blank? stderr)) (assoc :stderr stderr)))))
+
+^:unsafe (defn ^:export eval-checked!
+  "Like `eval!` but surfaces evaluation errors instead of silently dropping
+  them (F-3c2 — an eval that throws must not look like an empty result).
+  Returns `{:values [...]}` — with `:stderr` when the eval printed there
+  without failing — or `{:err msg}`. `eval-outcome` does the classifying, and
+  it reads nREPL's `eval-error` status rather than the stderr stream. `image`
+  is the opaque handle — see `eval!` for why it is not destructured."
+  [image code]
+  (eval-outcome
+   (doall (nrepl/message (:client image) {:op "eval" :code code
+                                          :session (:session image)}))))
+
+(defn- inject-rt!
+  "Load slopp's runtime support (slopp.kernel.rt — traced test execution) into the
+  image, ensure the parent-death watchdog is aboard, wrap rt against itself
+  (#126), record the BASELINE namespace set, then return to `user`. Every
+  owned image carries all of it.
+
+  The self-instrument call is FEATURE-DETECTED, not assumed. `io/resource` reads
+  whichever rt source is on the READING process's classpath, and that differs
+  by caller: the external runner is a built project, so it gets the store's
+  rendered rt; the MCP server runs from the uberjar, so it gets whatever rt that
+  jar was built with — which lags the store by design. Calling a var the older
+  copy lacks would break every image the moment the jar fell behind.
+
+  The timing is the point: wrapping here — before anything calls in — is what
+  makes rt's own entry points visible. `traced-run` cannot wrap itself from the
+  inside; it is already on the stack by then, which is exactly why it measured
+  zero covering tests while 213 exercised it.
+
+  The same timing argument gives `:baseline` its only correct moment: the
+  namespace set here is the image with rt aboard and NO store code, which is
+  exactly what `reset!` must be able to return to before a second tenant may
+  have it. Failing to capture it is never fatal — an image with no baseline
+  simply refuses to be recycled.
+
+  The WATCHDOG (see `watchdog-src`) normally boards the child's own command
+  line, before nREPL starts — this re-run is the safety net for images
+  launched with a custom :cmd; the name guard makes it land exactly once."
+  [handle]
+  ;; BOTH paths, for the same reason the resolve below is feature-detected:
+  ;; the jar lags the store, and the kernel move changed where rt renders.
+  ;; A built project has slopp/kernel/rt.clj; a jar built before that move
+  ;; has slopp/rt.clj and nothing else. Ordered new-first so the current
+  ;; layout always wins; the second arm dies with the last jar predating
+  ;; the move, and until then it is what keeps every image startable.
+  (eval! handle (rt-source io/resource (:rt-fallback handle)))
+  (eval! handle "(when-let [f (resolve 'slopp.kernel.rt/self-instrument!)] (f))")
+  (eval! handle watchdog-src)
+  (let [handle (assoc handle :baseline
+                      (try {:nses (first (eval! handle "(set (map ns-name (all-ns)))"))
+                            :cp   (first (eval! handle dirty-probe))}
+                           (catch Throwable _ nil)))]
+    (eval! handle "(in-ns 'user)")
+    ;; the fallback was for the bootstrap above and is not part of the handle
+    (dissoc handle :rt-fallback)))
 
 ^:unsafe (defn ^:export reset-to-baseline!
   "Return `image` to the state it recorded at boot, so the next tenant gets it
@@ -457,40 +682,6 @@
          true)
      (do (stop! image) false))))
 
-(defn- add-libs-code
-  "The form the IMAGE evaluates to hot-add `deps-map` — a value, so what it
-  does is checkable without spawning a JVM.
-
-  It seeds repositories first, and only when there are none. `add-libs` builds
-  its Maven procurer from the basis, and with none it has nowhere to look —
-  Maven then refuses even artifacts already in `~/.m2` that it cannot
-  attribute to a configured repository.
-
-  CORRECTED: this used to say the image has no basis, just like a `java -jar`
-  host. It does have one. The default image is `clojure -Sdeps … -M`, which
-  the CLI starts with a real basis — measured through a live oracle: both
-  standard repos, and every resolved lib of the store's manifest. So the seed
-  is a no-op on the path that actually runs. What earns it a place is the
-  other one: `start!` accepts a custom `:cmd`, and an image launched as a bare
-  `java -cp … clojure.main` has no basis at all. Guarded, it costs nothing and
-  covers that case; the reason first given for it was simply not true.
-
-  This bites a USER's store harder than slopp's own, where the host uberjar
-  happens to carry every declared lib and the failures were therefore
-  invisible. Nothing of a user's manifest comes from slopp's jar.
-
-  `slopp.kernel.boot/ensure-repos!` is CALLED, not restated, so the host and the
-  image cannot come to disagree about where artifacts live."
-  [deps-map]
-  (str "(do (require 'clojure.repl.deps 'clojure.java.basis"
-       " 'clojure.java.basis.impl)"
-       " (when-not (seq (:mvn/repos (clojure.java.basis/current-basis)))"
-       " (clojure.java.basis.impl/update-basis! merge {:mvn/repos "
-       (pr-str boot/default-repos) "}))"
-       " (intern 'user 'slopp-image-dirty true)"
-       " (clojure.repl.deps/add-libs '" (pr-str deps-map) ")"
-       " (ns-unmap 'user 'slopp-image-dirty))"))
-
 (defn ^:export add-libs!
   "Hot-add dependency coords (`deps-map`, lib→coord) to the RUNNING image via
   Clojure 1.12 `clojure.repl.deps/add-libs` — no restart. Idempotent for
@@ -518,178 +709,6 @@
              handle
              (add-libs-code deps-map))]
       (when (:err r) r))))
-
-(def ^:export default-image-jvm-opts
-  "The JVM budget every owned image launches under. Host property, never store
-  config: a store is shared by every writer and by CI, and how much memory this
-  BOX will spend on child JVMs is not a property of the code being written.
-  `SLOPP_IMAGE_JVM_OPTS` overrides it; an explicitly EMPTY value means none,
-  which is the off-arm any re-measurement needs.
-
-  **These two flags are a PAIR, and each alone is worse than neither.** That is
-  the whole reason the budget is a list with a guard rather than two settings:
-
-  | arm | committed, loaded image |
-  |---|---|
-  | neither | 722,040 / 724,763 KB |
-  | `-Xms32m` alone | +2.3% — WORSE |
-  | `-XX:+UseSerialGC` alone | ~2x — far worse still |
-  | **both** | **538,189 / 538,544 KB, −25.6%** |
-
-  Measured against a 279-namespace store, arms alternated, a full GC forced
-  before each sample, reproducible to 0.07%. The saving is not the heap alone:
-  the serial collector drops GC bookkeeping from 62 MB to 0.6 MB and takes
-  ~35 MB of collector worker stacks with it, and it sizes the heap SMALLER
-  (278 -> 192 MB) rather than larger.
-
-  Why neither works alone. `-Xms` sets the INITIAL heap, and an image that
-  loads a real store allocates past 32m before it is ready — so on its own it
-  changes nothing except to make the JVM grow into place, overshooting. And
-  Serial commits its ergonomic initial heap at startup (576 MB on the measuring
-  box) and, unlike G1, never uncommits — so on its own it holds far more than
-  G1 ever would. Told what heap to start with, it holds far less.
-
-  **Throughput was the gate and it came back clear.** Serial is
-  single-threaded, and a memory win that costs suite wall clock is not a win.
-  Twelve samples per arm of the whole in-image suite, run repeatedly inside one
-  settled image so process startup could not swamp it: median 2738 ms without,
-  2639 ms with. The difference is not significant (t~0.77) and bounds a
-  regression at about +5% at worst, with the point estimate slightly in the
-  budget's FAVOUR — and serial's spread was half G1's. Correctness was never
-  the question: every assertion passes identically, and the store holds no
-  soft or weak references for a collector change to perturb.
-
-  One honest limit: this is one store's workload. A far more allocation-heavy
-  project could find single-threaded collection costs it more, and the symptom
-  would be slower tests rather than wrong ones. That is what the override is
-  for, and it is documented where a user will meet it.
-
-  Refused, so nobody re-derives them. `-Xss1m` is noise here (one arm landed
-  ABOVE the base) and buys 2% while risking StackOverflow inside a test, which
-  is a FALSE RED. `-Xmx` appears in no winning arm at all and manufactures
-  OutOfMemoryError, the same failure. `-XX:TieredStopAtLevel=1` trades ~35 MB
-  for 2-5x on suite wall clock. `-Xshare:on` refuses to START the VM on a stale
-  archive, and a dead image is a false verdict where a slow one is not."
-  ["-XX:+UseSerialGC" "-Xms32m"])
-
-(defn ^:export image-jvm-opts
-  "The JVM budget for an owned image: `SLOPP_IMAGE_JVM_OPTS` when the host set
-  one (whitespace-separated), else `default-image-jvm-opts`.
-
-  **An explicitly EMPTY value means no budget at all**, and that is the point
-  rather than an edge case: it is the off-arm. A memory change is only worth
-  what a controlled A/B on a quiet box says it is worth, and an off-arm you
-  reach by editing code is one nobody runs. Unset and empty must therefore
-  differ — unset is the shipped budget, empty is as-shipped-before-the-budget.
-
-  `getenv` is a parameter rather than a read, because the process environment
-  is state a test cannot set, and a precedence rule nobody can exercise is one
-  that drifts."
-  [getenv]
-  (if-let [override (getenv "SLOPP_IMAGE_JVM_OPTS")]
-    (vec (re-seq #"\S+" override))
-    default-image-jvm-opts))
-
-(defn- default-cmd
-  "The target image launch command: Clojure + nREPL, plus the store's external
-  dependency manifest (`deps`, lib→coord) merged into `-Sdeps` so store code
-  that requires those libs compiles (trust Tier 1). `inherent-deps` (nREPL,
-  malli) are merged LAST so slopp-the-tool's own image deps are always present
-  at slopp's versions — regardless of the project manifest.
-
-  The parent-death watchdog rides `-e` (a clojure.main INIT opt, so it runs
-  before `-m` starts nREPL): the child can never exist without its reaper,
-  closing the boot-window orphan class — a parent killed between spawn and
-  nREPL connect used to leave a JVM nothing would ever reap.
-
-  The memory budget rides `-J` opts, and their PLACEMENT is load-bearing:
-  `-J` is a clj-opt, collected by the launcher only from the part of the
-  command line before `-M`. The same strings after `-M` are handed to the
-  program as arguments and never reach the JVM — a budget that silently does
-  nothing, which is worse than none because it MEASURES as no effect. They go
-  first, ahead of everything.
-
-  `opts` is an argument in the third arity because the shipped budget is empty
-  (see [[default-image-jvm-opts]]): the placement rule above still has to be
-  provable, and a rule that can only be exercised when someone happens to have
-  configured a budget is one that breaks the day someone does."
-  ([] (default-cmd nil))
-  ([deps] (default-cmd deps (image-jvm-opts #(System/getenv %))))
-  ([deps opts]
-   (-> [clojure-bin]
-       (into (map #(str "-J" %)) opts)
-       (into ["-Sdeps"
-              (pr-str {:deps (merge deps inherent-deps)})
-              "-M" "-e" watchdog-src "-m" "nrepl.cmdline"]))))
-
-(defn rt-source
-  "The slopp.kernel.rt source an image is bootstrapped with: the copy on the
-  READING process's classpath — either layout, see [[inject-rt!]] — else
-  `fallback`, the store's own rendering, which the image door hands down when
-  the store holds the kernel.
-
-  REFUSES by name when there is neither. `slurp` of nil read as `image boot
-  failed: Cannot open <nil> as a Reader`, which is what every image the dev
-  instance tried to boot died of: a managed child gets its code over nREPL
-  into an empty dir and has no rt.clj on its classpath at all, so an agent
-  attached to it could read and never write."
-  [resource fallback]
-  (or (some-> (resource "slopp/kernel/rt.clj") slurp)
-      (some-> (resource "slopp/rt.clj") slurp)
-      fallback
-      (throw (ex-info (str "no slopp.kernel.rt source to bootstrap the image with:"
-                           " neither slopp/kernel/rt.clj nor slopp/rt.clj is on this"
-                           " process's classpath, and the store handed down no"
-                           " rendering of its own. A process booted from a store"
-                           " over nREPL (a managed dev instance) has no source"
-                           " files — the image door passes the store's"
-                           " slopp.kernel.rt when the store holds it")
-                      {:slopp.image.repl/rt-source :missing}))))
-
-(defn- inject-rt!
-  "Load slopp's runtime support (slopp.kernel.rt — traced test execution) into the
-  image, ensure the parent-death watchdog is aboard, wrap rt against itself
-  (#126), record the BASELINE namespace set, then return to `user`. Every
-  owned image carries all of it.
-
-  The self-instrument call is FEATURE-DETECTED, not assumed. `io/resource` reads
-  whichever rt source is on the READING process's classpath, and that differs
-  by caller: the external runner is a built project, so it gets the store's
-  rendered rt; the MCP server runs from the uberjar, so it gets whatever rt that
-  jar was built with — which lags the store by design. Calling a var the older
-  copy lacks would break every image the moment the jar fell behind.
-
-  The timing is the point: wrapping here — before anything calls in — is what
-  makes rt's own entry points visible. `traced-run` cannot wrap itself from the
-  inside; it is already on the stack by then, which is exactly why it measured
-  zero covering tests while 213 exercised it.
-
-  The same timing argument gives `:baseline` its only correct moment: the
-  namespace set here is the image with rt aboard and NO store code, which is
-  exactly what `reset!` must be able to return to before a second tenant may
-  have it. Failing to capture it is never fatal — an image with no baseline
-  simply refuses to be recycled.
-
-  The WATCHDOG (see `watchdog-src`) normally boards the child's own command
-  line, before nREPL starts — this re-run is the safety net for images
-  launched with a custom :cmd; the name guard makes it land exactly once."
-  [handle]
-  ;; BOTH paths, for the same reason the resolve below is feature-detected:
-  ;; the jar lags the store, and the kernel move changed where rt renders.
-  ;; A built project has slopp/kernel/rt.clj; a jar built before that move
-  ;; has slopp/rt.clj and nothing else. Ordered new-first so the current
-  ;; layout always wins; the second arm dies with the last jar predating
-  ;; the move, and until then it is what keeps every image startable.
-  (eval! handle (rt-source io/resource (:rt-fallback handle)))
-  (eval! handle "(when-let [f (resolve 'slopp.kernel.rt/self-instrument!)] (f))")
-  (eval! handle watchdog-src)
-  (let [handle (assoc handle :baseline
-                      (try {:nses (first (eval! handle "(set (map ns-name (all-ns)))"))
-                            :cp   (first (eval! handle dirty-probe))}
-                           (catch Throwable _ nil)))]
-    (eval! handle "(in-ns 'user)")
-    ;; the fallback was for the bootstrap above and is not part of the handle
-    (dissoc handle :rt-fallback)))
 
 (defn ^:export ^{:live-handle true
         :malli/schema

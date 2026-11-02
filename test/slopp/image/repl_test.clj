@@ -402,27 +402,29 @@
   ;; The budget is injected rather than read, because the shipped default is
   ;; empty (a controlled A/B took `-Xms32m` back out), and a rule that can only
   ;; be exercised when someone has configured a budget is one that breaks on
-  ;; the day someone does.
-  (let [cmd (vec (#'slopp.image.repl/default-cmd nil ["-Xms8m" "-Xss1m"]))
+  ;; the day someone does. The read-eval switch is a -J opt too, but not part
+  ;; of the budget (see an-image-reads-with-read-eval-off), so it is set aside.
+  (let [budget? #(and (str/starts-with? % "-J")
+                      (not= % "-J-Dclojure.read.eval=false"))
+        cmd (vec (#'repl/default-cmd nil ["-Xms8m" "-Xss1m"]))
         m   (.indexOf cmd "-M")
-        js  (filterv #(clojure.string/starts-with? % "-J") cmd)]
+        js  (filterv budget? cmd)]
     (is (= ["-J-Xms8m" "-J-Xss1m"] js)
         (str "each budget opt rides -J-prefixed, in order: " cmd))
     (is (nat-int? m) (str "the launch command must carry -M: " cmd))
     (is (every? #(< (.indexOf cmd %) m) js)
         (str "budget opts must precede -M to be read as clj-opts: " cmd))
     (is (< (.indexOf cmd "-J-Xms8m") (.indexOf cmd "-Sdeps"))
-        "the budget leads the command line"))
+        "the budget leads the command line")
 
-  (testing "an empty budget adds nothing at all — the off-arm"
-    (is (empty? (filterv #(clojure.string/starts-with? % "-J")
-                         (#'slopp.image.repl/default-cmd nil [])))))
+    (testing "an empty budget adds no budget opt — the off-arm"
+      (is (empty? (filterv budget? (#'repl/default-cmd nil []))))))
 
   (testing "and the default arity still resolves the budget from the host"
     ;; the 2-arity is the seam; the 1-arity is what start! actually calls, and
     ;; it must keep reading the environment rather than shipping a fixed list.
-    (is (= (vec (#'slopp.image.repl/default-cmd nil))
-           (vec (#'slopp.image.repl/default-cmd
+    (is (= (vec (#'repl/default-cmd nil))
+           (vec (#'repl/default-cmd
                  nil (repl/image-jvm-opts #(System/getenv %))))))))
 
 (deftest the-image-budget-is-overridable-and-empty-means-none
@@ -483,3 +485,24 @@
       (is (some? m) "nothing at all is a refusal, not a nil handed to slurp")
       (is (str/includes? (str m) "slopp/kernel/rt.clj") m)
       (is (str/includes? (str m) "classpath") m))))
+
+(deftest the-server-never-evaluates-what-the-image-prints
+  ;; The image is store code's process; the server is slopp's. An image value
+  ;; printed as #=(…) — any type can print that way through print-method —
+  ;; was read here with read-eval ON, so the SERVER ran it.
+  (let [outcome @#'repl/eval-outcome]
+    (is (= ["#=(+ 1 2)"] (:values (outcome [{:value "#=(+ 1 2)"}])))
+        "read-time eval is refused, and the value stays the printed string")
+    (is (= [{:a 1} nil 'x] (:values (outcome [{:value "{:a 1}"} {:value "nil"} {:value "x"}])))
+        "ordinary data still reads as data")))
+
+(deftest an-image-reads-with-read-eval-off
+  ;; The dialect gate refuses #= at write time; the image is the second line.
+  ;; The JVM property sets the reader's ROOT value at startup, so every thread
+  ;; nREPL later starts inherits it — a binding made inside an -e init would
+  ;; not, because clojure.main runs both under its own thread bindings.
+  (doseq [cmd [(vec (#'repl/default-cmd nil []))
+               (vec (#'repl/default-cmd nil ["-Xms8m"]))]]
+    (let [i (.indexOf cmd "-J-Dclojure.read.eval=false")]
+      (is (nat-int? i) (str "the switch rides every launch: " cmd))
+      (is (< i (.indexOf cmd "-M")) "before -M, where the launcher reads clj-opts"))))

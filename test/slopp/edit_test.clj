@@ -593,3 +593,23 @@
     (is (re-find #"\[x\.y :as y\]" (:src r)) (:src r))
     (is (not (re-find #":as xy" (:src r))) "the old clause is gone")
     (is (re-find #"\[clojure\.string :as str\]" (:src r)) "the neighbour stays")))
+
+(deftest read-time-eval-is-refused-wherever-it-sits
+  ;; Measured 2026-11-02: '#=(…), #inst #=(…) and an ^:unsafe form carrying #=
+  ;; all passed the gate, because the symbol walk prunes quoted and tagged
+  ;; data and ^:unsafe skips it; a #= in metadata was refused only by
+  ;; accident, as a use of `eval`. #= is not data: the reader RUNS it while
+  ;; the source is read, before any gate or test sees the value.
+  (let [check #(edit/dialect-check (:node (edit/parse-one %)))]
+    (doseq [src ["(def x #=(+ 1 2))"
+                 "(def x '#=(+ 1 2))"
+                 "(def x #inst #=(str \"2020\"))"
+                 "(def x ^{:m #=(+ 1 2)} [1])"
+                 "^:unsafe (def x #=(+ 1 2))"]]
+      (let [err (check src)]
+        (is (some? err) src)
+        (is (re-find #"#=" (str err)) "the refusal names the construct the author wrote")
+        (is (re-find #"compute" (str err)) "and the replacement")))
+    (testing "the data shapes it hid among still pass"
+      (is (nil? (check "(def x '(+ 1 2))")))
+      (is (nil? (check "(def x #inst \"2020-01-01\")"))))))

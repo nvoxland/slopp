@@ -787,97 +787,6 @@
        (let [ns (namespace sym)]
          (or (nil? ns) (= "clojure.core" ns)))))
 
-(defn dialect-check
-  "nil if the form is admissible; an error string otherwise (D3/D4). An
-  `^:unsafe` form is admissible by assertion — the author takes on the
-  obligation the analyzer can't discharge (it stays greppable via `unsafe?`).
-  Shared by the single-form edit gate (`parse-form`) and the whole-namespace
-  import gate (`dialect-scan`) so both paths reject identically."
-  [node]
-  (when-not (unsafe? node)
-    (let [s    (n/sexpr node)
-          head (when (seq? s) (first s))
-          ;; ANY tagged literal sexprs as `(read-string "#<tag> …")`, so it is
-          ;; recognised by SHAPE and by its TAG — never by mentioning the
-          ;; banned symbol, which is the one thing this gate must not do.
-          ;;
-          ;; This arm previously matched the single tag it was written for
-          ;; (`#?`), so every OTHER tagged literal fell through to the denylist
-          ;; below and was blamed on `read-string`: the synthetic head of its
-          ;; own expansion, and a symbol the author's source does not contain.
-          ;; Measured: `#inst` and `#uuid` — ordinary data literals the store
-          ;; round-trips perfectly — were refused outright.
-          tag-of (fn [x]
-                   (when (and (seq? x) (symbol? (first x))
-                              (= "read-string" (name (first x)))
-                              (= 2 (count x)) (string? (second x)))
-                     (let [t (str/triml (second x))]
-                       (when (str/starts-with? t "#")
-                         (apply str (take-while
-                                     (complement #{\space \tab \newline \return
-                                                   \( \[ \{ \" \^})
-                                     (subs t 1)))))))
-          tagged? (fn [x] (some? (tag-of x)))
-          tags    (into #{} (keep tag-of) (tree-seq coll? seq s))
-          ;; a tagged literal is DATA: the gate reads no more inside one than
-          ;; inside a string. `#?`/`#?@` are the exception, and the reason is
-          ;; that they change what code is READ.
-          ;;
-          ;; QUOTED forms are data by the identical argument, and leaving them
-          ;; out cost more than the tagged case: `slopp.store/def-heads` is a
-          ;; quoted SET naming the head symbols this analyzer recognises —
-          ;; `defmacro` among them — so the vocabulary a gate reads was refused
-          ;; BY that gate, and slopp could not import its own projection. To
-          ;; execute a banned symbol you have to call it unquoted, which the
-          ;; walk still sees; a quoted mention is a name, not a call.
-          quoted? (fn [x] (and (seq? x) (= 'quote (first x))))
-          data?   (fn [x] (or (tagged? x) (quoted? x)))
-          hits    (filter banned-sym? (all-symbols node data?))]
-      (cond
-        (some #{"?" "?@"} tags)
-        (str "dialect (D3): reader conditionals (#?/#?@) are not allowed in"
-             " stored code — slopp is single-dialect, so a form must read the"
-             " same everywhere. Write the one branch this store targets.")
-
-        (contains? banned-heads head)
-        (str "dialect (D4): user macros are banned — " head)
-
-        (seq hits)
-        (let [hit (first hits)]
-          (str "dialect (D3): denylisted symbol used — " hit
-               " — "
-               (if (and (local-name? s hit) (not= "defmacro" (name hit)))
-                 ;; positional, so it cannot live on the denylist entry: the
-                 ;; symbol is fine, its USE as a binding name is not
-                 (str "you are using it as a LOCAL name, which cannot invoke"
-                      " clojure.core/" (name hit) " at all (locals shadow); the"
-                      " gate matches symbol NAMES regardless of position, so"
-                      " RENAME the local (binding → bnd, eval → ev) — ^:unsafe"
-                      " is the wrong tool here")
-                 (get banned-syms (symbol (name hit))))))
-        :else nil))))
-
-(defn dialect-scan
-  "Run the D3/D4 dialect gate (the SAME check `parse-form` applies per form) over
-  every form of `ns-sym` already in `store`. The import path parses a whole
-  namespace at once, so it can't gate through `parse-form` — this closes the
-  hole. Returns an error string naming EVERY offending form (a whole-ns import
-  otherwise has to be re-sent once per host form, discovering them one rejection
-  at a time), or nil if all are admissible. `^:unsafe` forms pass exactly as on
-  the edit path: a host form can only ENTER the store already marked, so it is
-  never frozen (un-editable) against a later edit of its own body."
-  [store ns-sym]
-  (let [violations (keep (fn [e]
-                           (when-let [err (dialect-check (:node e))]
-                             (str "  " (or (:name e) "?") ": " err)))
-                         (store/forms store ns-sym))]
-    (when (seq violations)
-      (str (if (= 1 (count violations))
-             "1 form uses a denylisted symbol — mark it ^:unsafe"
-             (str (count violations) " forms use denylisted symbols — mark each ^:unsafe"))
-           " if the boundary code is intentional:\n"
-           (str/join "\n" violations)))))
-
 (defn ^:export control-char-refusal
   "nil if `source` is free of raw control characters; a teaching string if not.
    Tab, newline and carriage return are ordinary whitespace and pass.
@@ -901,36 +810,6 @@
          "transit. Spell it as an escape the READER sees (\\\\uXXXX), or use a "
          "class like \\p{Cntrl}. Stored control bytes make the source read as "
          "BINARY to grep, so the form goes invisible to every text sweep.")))
-
-(defn parse-form
-  "Parse `source` as exactly ONE dialect-legal top-level form (the gate every
-  WRITE shares): `control-char-refusal` on the raw text, `parse-one` for the
-  parse, then D3/D4 via `dialect-check`, plus D7 — hand-written `(declare …)`
-  is refused here (the EDIT path only): the pipeline OWNS ordering — it
-  reorders definitions above their callers, or inserts a marked declare itself
-  for a genuine cycle, so the agent never writes one. Imports (`dialect-scan`)
-  keep their declares.
-  Returns {:node node} or {:error msg} — never throws (F3)."
-  [source]
-  (if-let [ctl (control-char-refusal source)]
-    {:error ctl}
-    (let [r (parse-one source)]
-      (if (:error r)
-        r
-        (try
-          (let [node (:node r)
-                s    (n/sexpr node)]
-            (if (and (seq? s) (= 'declare (first s)))
-              {:error (str "(declare …) is managed for you — slopp orders forms"
-                           " itself: write your forms in any order (definitions are"
-                           " reordered above their callers), and a genuine"
-                           " mutual-recursion cycle gets a marked declare inserted"
-                           " automatically. Drop the declare and write the real forms.")}
-              (if-let [err (dialect-check node)]
-                {:error err}
-                {:node node})))
-          (catch Exception e
-            {:error (str "unparseable source (unbalanced?): " (ex-message e))}))))))
 
 (def reentrant-vars
   "Vars that run the WHOLE suite, or a server that never returns. A deftest
@@ -1027,58 +906,6 @@
                " (deftest ^:external " (second s) " …) — external tests run in"
                " the external suite (test_run {:external true})"))))))
 
-(defn replace-form
-  "Pure edit: validate `new-source` (one dialect-legal form) and replace the form
-  named `form-name` in `ns-sym`, keeping its id and appending a `:replace` delta.
-  Returns {:store :delta :warnings} (warnings = D6 `!`-effect violations of the
-  resulting namespace) or {:error msg}.
-
-  Refuses outright when `form-name` addresses TWO elements — the shared
-  chokepoint for that check, so every caller of the pure edit inherits it.
-  Also refuses a replace that RENAMES the form onto a name another form
-  already bears (mirroring rename!'s collision check): landing it leaves two
-  definitions answering to one name — cold-load passes (redefinition is only a
-  warning) and every later name-addressed edit refuses as ambiguous."
-  [store ns-sym form-name new-source & {:keys [prompt agent system]}]
-  (let [ambiguous (ambiguous-form-error store ns-sym form-name)
-        {:keys [node error]} (parse-form new-source)
-        new-name  (when node (store/form-symbol node))
-        collision (when (and new-name (not= new-name form-name))
-                    (let [hit (store/form-named store ns-sym new-name)
-                          old (store/form-named store ns-sym form-name)]
-                      (when (and hit (not= (:id hit) (:id old)))
-                        {:error (str new-name " already exists in " ns-sym
-                                     " — a replace may not RENAME " form-name
-                                     " onto an existing form (two definitions"
-                                     " would answer to one name). Delete or"
-                                     " rename one of them first.")})))]
-    (cond
-      ambiguous ambiguous
-
-      error {:error error}
-
-      collision collision
-
-      (isolation-refusal (require-aliases store ns-sym) node)
-      {:error (isolation-refusal (require-aliases store ns-sym) node)}
-
-      :else
-      (let [old (:node (store/form-named store ns-sym form-name))]
-        (if-let [[store' delta] (store/replace-node store ns-sym form-name node
-                                                    :prompt prompt :agent agent
-                                                    :system system)]
-          (let [{:keys [refuse advisories]}
-                (gates/gate-check store' ns-sym (or (store/form-symbol node) form-name))
-                drift (when old (contract-drift old node))]
-            (if refuse
-              {:error refuse}
-              (cond-> {:store    store'
-                       :delta    delta
-                       :warnings (ns-warnings store' ns-sym)}
-                (seq advisories) (assoc :advisories advisories)
-                (seq drift)      (assoc :drift drift))))
-          (missing-form-error store ns-sym form-name))))))
-
 (defn live-callers-error
   "Refuse deleting `ns-sym/nm` while something still CALLS it — nil when
   nothing does.
@@ -1120,35 +947,6 @@
                    " order — a caller inside the group is fine), or one"
                    " edit_delete_form each, callers first. If two forms call"
                    " EACH OTHER, a group deleting both is the valid order.")})))
-
-(defn parse-forms
-  "Parse `source` as ONE OR MORE dialect-legal top-level forms — the batch
-  face of `parse-form`, for a write that lands several new forms at once.
-  Every form passes the same gate one would (`control-char-refusal` on the
-  text, D3/D4 via `dialect-check`, D7's declare ban). Returns
-  `{:nodes [node …]}` or `{:error msg}` — never throws (F3)."
-  [source]
-  (if-let [ctl (control-char-refusal source)]
-    {:error ctl}
-    (try
-      (let [nodes (vec (filter n/sexpr-able? (n/children (p/parse-string-all source))))]
-        (if (empty? nodes)
-          {:error "expected at least one top-level form, got 0"}
-          (or (some (fn [node]
-                      (let [s (n/sexpr node)]
-                        (cond
-                          (and (seq? s) (= 'declare (first s)))
-                          {:error (str "(declare …) is managed for you — slopp orders forms"
-                                       " itself: write your forms in any order (definitions are"
-                                       " reordered above their callers), and a genuine"
-                                       " mutual-recursion cycle gets a marked declare inserted"
-                                       " automatically. Drop the declare and write the real forms.")}
-                          (dialect-check node)
-                          {:error (dialect-check node)})))
-                    nodes)
-              {:nodes nodes})))
-      (catch Exception e
-        {:error (str "unparseable source (unbalanced?): " (ex-message e))}))))
 
 (defn- gate-with
   "nil if `code` uses none of `banned` where it could act; else the refusal
@@ -1386,3 +1184,231 @@
                     (when (and a1 (or (nil? n2) (<= (* 2 n2) n1)))
                       [lib (symbol a1)]))))
           per-lib)))
+
+(defn- read-eval-refusal
+  "The teaching string when `node` holds a `#=` reader-eval node anywhere —
+  under a quote, inside a tagged literal, in metadata — else nil.
+
+  Walked over the PARSED nodes, not the sexpr: rewrite-clj keeps `#=` as its
+  own node type, while the sexpr turns it into an ordinary call that the
+  symbol walk then prunes as quoted or tagged data. And it holds even for an
+  `^:unsafe` form: unsafe asserts an obligation the analyzer cannot
+  discharge, but `#=` is discharged by nobody — the reader runs it while the
+  source is read, before any gate, test or review sees what it computed.
+
+  This gate is the ONLY defence for stored code. Clojure's loader binds
+  read-eval back on for every file it loads (`load-file`, `require`,
+  `load-string` all do), so no switch at load time can stop it — measured."
+  [node]
+  (when (some #(= :eval (n/tag %)) (tree-seq n/inner? n/children node))
+    (str "dialect (D3): #= (read-time eval) is not allowed in stored code — the"
+         " reader runs it while the source is READ, before any gate or test"
+         " sees the value. Compute the value in code instead: write (+ 1 2)"
+         " where you wrote #=(+ 1 2), or a def whose body computes it.")))
+
+(defn dialect-check
+  "nil if the form is admissible; an error string otherwise (D3/D4). An
+  `^:unsafe` form is admissible by assertion — the author takes on the
+  obligation the analyzer can't discharge (it stays greppable via `unsafe?`)
+  — except for `#=`, which no assertion makes safe (see [[read-eval-refusal]]).
+  Shared by the single-form edit gate (`parse-form`) and the whole-namespace
+  import gate (`dialect-scan`) so both paths reject identically."
+  [node]
+  (or
+   (read-eval-refusal node)
+   (when-not (unsafe? node)
+    (let [s    (n/sexpr node)
+          head (when (seq? s) (first s))
+          ;; ANY tagged literal sexprs as `(read-string "#<tag> …")`, so it is
+          ;; recognised by SHAPE and by its TAG — never by mentioning the
+          ;; banned symbol, which is the one thing this gate must not do.
+          ;;
+          ;; This arm previously matched the single tag it was written for
+          ;; (`#?`), so every OTHER tagged literal fell through to the denylist
+          ;; below and was blamed on `read-string`: the synthetic head of its
+          ;; own expansion, and a symbol the author's source does not contain.
+          ;; Measured: `#inst` and `#uuid` — ordinary data literals the store
+          ;; round-trips perfectly — were refused outright.
+          tag-of (fn [x]
+                   (when (and (seq? x) (symbol? (first x))
+                              (= "read-string" (name (first x)))
+                              (= 2 (count x)) (string? (second x)))
+                     (let [t (str/triml (second x))]
+                       (when (str/starts-with? t "#")
+                         (apply str (take-while
+                                     (complement #{\space \tab \newline \return
+                                                   \( \[ \{ \" \^})
+                                     (subs t 1)))))))
+          tagged? (fn [x] (some? (tag-of x)))
+          tags    (into #{} (keep tag-of) (tree-seq coll? seq s))
+          ;; a tagged literal is DATA: the gate reads no more inside one than
+          ;; inside a string. `#?`/`#?@` are the exception, and the reason is
+          ;; that they change what code is READ.
+          ;;
+          ;; QUOTED forms are data by the identical argument, and leaving them
+          ;; out cost more than the tagged case: `slopp.store/def-heads` is a
+          ;; quoted SET naming the head symbols this analyzer recognises —
+          ;; `defmacro` among them — so the vocabulary a gate reads was refused
+          ;; BY that gate, and slopp could not import its own projection. To
+          ;; execute a banned symbol you have to call it unquoted, which the
+          ;; walk still sees; a quoted mention is a name, not a call. (`#=` is
+          ;; the one thing that executes from INSIDE data, which is why it is
+          ;; refused above, over the nodes, before this walk.)
+          quoted? (fn [x] (and (seq? x) (= 'quote (first x))))
+          data?   (fn [x] (or (tagged? x) (quoted? x)))
+          hits    (filter banned-sym? (all-symbols node data?))]
+      (cond
+        (some #{"?" "?@"} tags)
+        (str "dialect (D3): reader conditionals (#?/#?@) are not allowed in"
+             " stored code — slopp is single-dialect, so a form must read the"
+             " same everywhere. Write the one branch this store targets.")
+
+        (contains? banned-heads head)
+        (str "dialect (D4): user macros are banned — " head)
+
+        (seq hits)
+        (let [hit (first hits)]
+          (str "dialect (D3): denylisted symbol used — " hit
+               " — "
+               (if (and (local-name? s hit) (not= "defmacro" (name hit)))
+                 ;; positional, so it cannot live on the denylist entry: the
+                 ;; symbol is fine, its USE as a binding name is not
+                 (str "you are using it as a LOCAL name, which cannot invoke"
+                      " clojure.core/" (name hit) " at all (locals shadow); the"
+                      " gate matches symbol NAMES regardless of position, so"
+                      " RENAME the local (binding → bnd, eval → ev) — ^:unsafe"
+                      " is the wrong tool here")
+                 (get banned-syms (symbol (name hit))))))
+        :else nil)))))
+
+(defn dialect-scan
+  "Run the D3/D4 dialect gate (the SAME check `parse-form` applies per form) over
+  every form of `ns-sym` already in `store`. The import path parses a whole
+  namespace at once, so it can't gate through `parse-form` — this closes the
+  hole. Returns an error string naming EVERY offending form (a whole-ns import
+  otherwise has to be re-sent once per host form, discovering them one rejection
+  at a time), or nil if all are admissible. `^:unsafe` forms pass exactly as on
+  the edit path: a host form can only ENTER the store already marked, so it is
+  never frozen (un-editable) against a later edit of its own body."
+  [store ns-sym]
+  (let [violations (keep (fn [e]
+                           (when-let [err (dialect-check (:node e))]
+                             (str "  " (or (:name e) "?") ": " err)))
+                         (store/forms store ns-sym))]
+    (when (seq violations)
+      (str (if (= 1 (count violations))
+             "1 form uses a denylisted symbol — mark it ^:unsafe"
+             (str (count violations) " forms use denylisted symbols — mark each ^:unsafe"))
+           " if the boundary code is intentional:\n"
+           (str/join "\n" violations)))))
+
+(defn parse-form
+  "Parse `source` as exactly ONE dialect-legal top-level form (the gate every
+  WRITE shares): `control-char-refusal` on the raw text, `parse-one` for the
+  parse, then D3/D4 via `dialect-check`, plus D7 — hand-written `(declare …)`
+  is refused here (the EDIT path only): the pipeline OWNS ordering — it
+  reorders definitions above their callers, or inserts a marked declare itself
+  for a genuine cycle, so the agent never writes one. Imports (`dialect-scan`)
+  keep their declares.
+  Returns {:node node} or {:error msg} — never throws (F3)."
+  [source]
+  (if-let [ctl (control-char-refusal source)]
+    {:error ctl}
+    (let [r (parse-one source)]
+      (if (:error r)
+        r
+        (try
+          (let [node (:node r)
+                s    (n/sexpr node)]
+            (if (and (seq? s) (= 'declare (first s)))
+              {:error (str "(declare …) is managed for you — slopp orders forms"
+                           " itself: write your forms in any order (definitions are"
+                           " reordered above their callers), and a genuine"
+                           " mutual-recursion cycle gets a marked declare inserted"
+                           " automatically. Drop the declare and write the real forms.")}
+              (if-let [err (dialect-check node)]
+                {:error err}
+                {:node node})))
+          (catch Exception e
+            {:error (str "unparseable source (unbalanced?): " (ex-message e))}))))))
+
+(defn replace-form
+  "Pure edit: validate `new-source` (one dialect-legal form) and replace the form
+  named `form-name` in `ns-sym`, keeping its id and appending a `:replace` delta.
+  Returns {:store :delta :warnings} (warnings = D6 `!`-effect violations of the
+  resulting namespace) or {:error msg}.
+
+  Refuses outright when `form-name` addresses TWO elements — the shared
+  chokepoint for that check, so every caller of the pure edit inherits it.
+  Also refuses a replace that RENAMES the form onto a name another form
+  already bears (mirroring rename!'s collision check): landing it leaves two
+  definitions answering to one name — cold-load passes (redefinition is only a
+  warning) and every later name-addressed edit refuses as ambiguous."
+  [store ns-sym form-name new-source & {:keys [prompt agent system]}]
+  (let [ambiguous (ambiguous-form-error store ns-sym form-name)
+        {:keys [node error]} (parse-form new-source)
+        new-name  (when node (store/form-symbol node))
+        collision (when (and new-name (not= new-name form-name))
+                    (let [hit (store/form-named store ns-sym new-name)
+                          old (store/form-named store ns-sym form-name)]
+                      (when (and hit (not= (:id hit) (:id old)))
+                        {:error (str new-name " already exists in " ns-sym
+                                     " — a replace may not RENAME " form-name
+                                     " onto an existing form (two definitions"
+                                     " would answer to one name). Delete or"
+                                     " rename one of them first.")})))]
+    (cond
+      ambiguous ambiguous
+
+      error {:error error}
+
+      collision collision
+
+      (isolation-refusal (require-aliases store ns-sym) node)
+      {:error (isolation-refusal (require-aliases store ns-sym) node)}
+
+      :else
+      (let [old (:node (store/form-named store ns-sym form-name))]
+        (if-let [[store' delta] (store/replace-node store ns-sym form-name node
+                                                    :prompt prompt :agent agent
+                                                    :system system)]
+          (let [{:keys [refuse advisories]}
+                (gates/gate-check store' ns-sym (or (store/form-symbol node) form-name))
+                drift (when old (contract-drift old node))]
+            (if refuse
+              {:error refuse}
+              (cond-> {:store    store'
+                       :delta    delta
+                       :warnings (ns-warnings store' ns-sym)}
+                (seq advisories) (assoc :advisories advisories)
+                (seq drift)      (assoc :drift drift))))
+          (missing-form-error store ns-sym form-name))))))
+
+(defn parse-forms
+  "Parse `source` as ONE OR MORE dialect-legal top-level forms — the batch
+  face of `parse-form`, for a write that lands several new forms at once.
+  Every form passes the same gate one would (`control-char-refusal` on the
+  text, D3/D4 via `dialect-check`, D7's declare ban). Returns
+  `{:nodes [node …]}` or `{:error msg}` — never throws (F3)."
+  [source]
+  (if-let [ctl (control-char-refusal source)]
+    {:error ctl}
+    (try
+      (let [nodes (vec (filter n/sexpr-able? (n/children (p/parse-string-all source))))]
+        (if (empty? nodes)
+          {:error "expected at least one top-level form, got 0"}
+          (or (some (fn [node]
+                      (let [s (n/sexpr node)]
+                        (cond
+                          (and (seq? s) (= 'declare (first s)))
+                          {:error (str "(declare …) is managed for you — slopp orders forms"
+                                       " itself: write your forms in any order (definitions are"
+                                       " reordered above their callers), and a genuine"
+                                       " mutual-recursion cycle gets a marked declare inserted"
+                                       " automatically. Drop the declare and write the real forms.")}
+                          (dialect-check node)
+                          {:error (dialect-check node)})))
+                    nodes)
+              {:nodes nodes})))
+      (catch Exception e
+        {:error (str "unparseable source (unbalanced?): " (ex-message e))}))))
