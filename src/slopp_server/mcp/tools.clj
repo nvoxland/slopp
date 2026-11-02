@@ -365,6 +365,16 @@
     :description "Close the turn (usually automatic)."
     :inputSchema {:type "object"
                   :properties {:note {:type "string"}}}}
+   {:name "flag_test" :image-free true
+    :description "Record that you believe a deftest is WRONG, and why, for the human to decide. The exit when a write is refused because the test grades a change you made this episode — the test stays as it is; say in your reply which test you flagged."
+    :inputSchema {:type "object"
+                  :properties {:ns {:type "string"} :name {:type "string"}
+                               :reason {:type "string"}}
+                  :required ["ns" "name" "reason"]}}
+   {:name "mutate" :read-only true
+    :description "Mutation testing beyond what `done` reaches: break each function in small ways (a flipped comparison, a swapped and/or, an off-by-one literal) in the image, re-run the tests that run it, and report faults no test notices. With no ns: the functions earlier dones did not reach before their time budget ran out (`:unchecked` in their findings). With ns: every function in that namespace. budget_ms defaults to 120000 (two minutes). The store is never changed; the real code is re-loaded after each mutant."
+    :inputSchema {:type "object"
+                  :properties {:ns {:type "string"} :budget_ms {:type "integer"}}}}
    {:name "full_check" :read-only true
     :description "The WHOLE-STORE check: lint, dead surface, both layering graphs, the rule sweep, and every test in every tier (in-image, ^:integration, ^:external). Nothing forces it, and a close already carries the whole-store verdict when the store is small — reach for this on a big store after a broad change, after deleting a caller, or before a commit you stand behind. A verdict that still STANDS returns in a millisecond (:standing true); force=true re-runs. affected=true narrows the ^:external tier (nearly all the cost) to what changes since the last commit-point reach; :external :cost reads the tier as its slowest shard and :narrowing-ceiling-ms as the most narrowing can return."
     :inputSchema {:type "object" :properties {:affected {:type "boolean"}
@@ -913,10 +923,10 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
    {:name "depends" :blurb "What reaches what: the call path between two forms or the neighbourhood around one (bodies on the way), callers and callees, the module graph, a macro expansion." :ops ["query_flow" "query_depends" "query_call" "query_macroexpand"]}
    {:name "history" :blurb "What changed, why and when: form history, intents, commit-points, git, branches." :ops ["query_history" "query_changes" "query_commits" "query_git" "query_branches" "report" "file_history"]}
    {:name "eval" :blurb "The live oracle: evaluate, observe a fn's real calls, query the store value." :ops ["query_eval" "query_observe" "query_store"]}
-   {:name "edit" :blurb "Verified writes: a whole unit of work — or any slice of one — as ONE change call; bookkeeping ops beside it." :ops ["change" "edit_comment" "edit_revert" "undo" "episode_revert"]}
+   {:name "edit" :blurb "Verified writes: a whole unit of work — or any slice of one — as ONE change call; bookkeeping ops beside it, including flag_test, the objection to a test you may not edit." :ops ["change" "edit_comment" "flag_test" "edit_revert" "undo" "episode_revert"]}
    {:name "refactor" :blurb "Transformations the tool derives from ONE intent: renames with their callers, extraction, signatures, moves." :ops ["rename_sweep" "edit_rename" "edit_extract" "edit_requalify" "change_signature" "edit_move_forms" "module_extract" "ns_rename" "ns_realias" "cleanup"]}
    {:name "declare" :blurb "Namespaces, requires, module edges and dials, dependencies." :ops ["ns_create" "ns_delete" "ns_add_require" "ns_remove_require" "module_dep" "module_purity" "module_role" "module_platform" "deps_add" "deps_remove" "deps_list" "deps_pure" "js_dep"]}
-   {:name "verify" :blurb "A bigger question than one write answers, and none of them writes: chosen tests, the whole store, a review, a drafted test, a rendered screen." :ops ["test_run" "full_check" "review_scan" "draft_test" "screen"]}
+   {:name "verify" :blurb "A bigger question than one write answers, and none of them writes: chosen tests, the whole store, a review, a drafted test, a rendered screen, a mutation pass." :ops ["test_run" "full_check" "review_scan" "draft_test" "screen" "mutate"]}
    {:name "build" :blurb "Artifacts, and the image they come from: the jar's sources, the browser bundle, a generated client, the dev server, a rebuilt image." :ops ["build" "compile_client" "generate_client" "restart"]}
    {:name "store" :blurb "The store itself: health, doctor, compaction, config, and what it declares (capabilities, rules, vocabulary, surface, telemetry, cost)." :ops ["store_health" "store_doctor" "store_compact" "config" "config_file" "query_capabilities" "query_rules" "query_vocabulary" "query_surface" "query_rule_telemetry" "query_cost"]}
    {:name "slopp" :blurb "The remainder, named as such: git, branches, threads, files, turns, help." :ops ["git_push" "git_clone" "git_pull" "git_conflicts" "git_resolve" "import_dir" "branch_create" "branch_switch" "branch_merge" "branch_delete" "thread_list" "thread_drop" "thread_open" "merge_from" "file_put" "file_get" "file_list" "file_remove" "turn_begin" "turn_end" "help"]}

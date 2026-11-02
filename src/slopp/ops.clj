@@ -20,7 +20,7 @@
             [slopp.edit :as edit]
             [slopp.edit.refactor :as refactor]
             [slopp.index.normalize :as normalize]
-            [slopp.store.db :as db] [rewrite-clj.parser :as p] [slopp.read.history :as history] [slopp.project.deps :as project.deps] [slopp.ops.engine :as engine] [slopp.read.modules :as read.modules] [slopp.read.orient :as orient] [slopp.edit.modules :as edit.modules] [slopp.rules :as rules] [slopp.ops.done :as done] [slopp.rules.shape :as shape] [slopp.index.analyze :as analyze] [slopp.edit.lintgate :as lintgate] [slopp.project.capabilities :as capabilities] [clojure.edn :as edn] [slopp.store.fields :as fields] [slopp.index.refs :as refs] [slopp.read.telemetry :as telemetry] [slopp.store.artifacts :as artifacts] [clojure.java.io :as io] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.catalog :as catalog] [slopp.rules.webapp :as rules.webapp] [slopp.project.dev :as dev]))
+            [slopp.store.db :as db] [rewrite-clj.parser :as p] [slopp.read.history :as history] [slopp.project.deps :as project.deps] [slopp.ops.engine :as engine] [slopp.read.modules :as read.modules] [slopp.read.orient :as orient] [slopp.edit.modules :as edit.modules] [slopp.rules :as rules] [slopp.ops.done :as done] [slopp.rules.shape :as shape] [slopp.index.analyze :as analyze] [slopp.edit.lintgate :as lintgate] [slopp.project.capabilities :as capabilities] [clojure.edn :as edn] [slopp.store.fields :as fields] [slopp.index.refs :as refs] [slopp.read.telemetry :as telemetry] [slopp.store.artifacts :as artifacts] [clojure.java.io :as io] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.catalog :as catalog] [slopp.rules.webapp :as rules.webapp] [slopp.project.dev :as dev] [slopp.rules.mutate :as mutate]))
 
 ^{:auto-declare "mutual recursion: add-form!, add-require!, auto-require-retry, canonical-source!, create-ns!, edit-group!, edit-replace!, edit-subform!, prune-requires!, remove-require!, revert-form!"}
 (declare add-form! add-require! auto-require-retry canonical-source! create-ns! edit-group! edit-replace! edit-subform! prune-requires! remove-require! revert-form!)
@@ -5428,6 +5428,171 @@
                             " url. If it never appears, the server's stderr"
                             " carries the boot verdict")))))
 
+(defn flag-test!
+  "`flag_test`: record that `agent` believes the deftest `ns/name` is wrong, and
+  why. The exit D-test-immutability names when it refuses an edit to a test
+  grading the agent's own change: the objection lands as a :flag-test marker
+  for a human, and the test is untouched. Refuses a test that does not exist
+  and an empty reason — an objection with no reason gives the human nothing to
+  decide."
+  [session & {:keys [ns name reason agent]}]
+  (let [st (:store @session)
+        q  (when (and ns name) (symbol (str ns) (str name)))]
+    (cond
+      (nil? q)
+      {:error "flag_test needs ns and name — the deftest you believe is wrong"}
+
+      (nil? (store/form-named st (symbol (str ns)) (symbol (str name))))
+      {:error (str "no form " q " — flag_test names an existing deftest")}
+
+      (str/blank? reason)
+      {:error (str "flag_test needs a reason: what the test asserts, and why you"
+                   " believe that is wrong. The human decides from it.")}
+
+      :else
+      (do (engine/commit-appended!
+           session
+           #(first (store/record-flag-test % q reason
+                                           :agent (or agent (:agent-id @session))))
+           [])
+          {:flagged q :reason reason
+           :note (str "recorded for the human; the test is unchanged. Say in your"
+                      " reply which test you flagged and why.")}))))
+
+(defn mutation-run!
+  "Mutation testing outside `done`, which caps itself at 10s per episode. With
+  `ns`, every function in that namespace that has an observed test. Without
+  it, what earlier dones OWE: forms the budget did not reach whose current
+  version is still the one that went unchecked, so a form edited since is not
+  owed twice and a deleted one not at all. `budget-ms` defaults to 120s.
+  Results are recorded exactly as `done` records them, so a checked form
+  leaves the backlog. Returns `{:owed n :targets n :status {status n}
+  :findings [...]}`."
+  [session & {:keys [ns budget-ms]}]
+  (let [{:keys [image store test-map db]} @session
+        owed (when (and db (nil? ns))
+               (mutate/backlog store (db/measurements db "mutation" nil)))
+        fids (if ns
+               (keep :id (store/elements store (symbol (str ns))))
+               (map :fid owed))
+        ts   (mutate/targets store test-map fids)]
+    (cond
+      (nil? image) {:error "mutation testing needs the image, and this session has none"}
+      (empty? ts)  (cond-> {:targets 0}
+                     (nil? ns) (assoc :owed (count owed)))
+      :else
+      (let [rs (mutate/mutate! image store ts :budget-ms (or budget-ms 120000))]
+        (when db (mutate/record! db rs))
+        (cond-> {:targets  (count ts)
+                 :status   (frequencies (map :status rs))
+                 :findings (mutate/findings rs)}
+          (nil? ns) (assoc :owed (count owed)))))))
+
+(defn endorsement-refusal
+  "D-endorsed-examples, as a pure question over a store VALUE: nil when every
+  step may land, else the refusal. Two things are the human's alone. Editing
+  or deleting a test that carries `^{:endorsed …}` — a human read it and said
+  yes, so it is the readable spec, whatever its coverage and whoever wrote it.
+  And adding or changing that marker, since an agent that could endorse its
+  own tests could lock its own oracle. An `intent` (the human's verbatim ask)
+  that names the test lifts both: that is the human deciding."
+  [store intent steps]
+  (let [named?   (fn [nm] (and intent nm (str/includes? intent (str nm))))
+        new-meta (fn [src]
+                   (try (let [f (n/sexpr (p/parse-string src))]
+                          (when (and (seq? f) (= 'deftest (first f)))
+                            [(second f) (:endorsed (meta (second f)))]))
+                        (catch Exception _ nil)))
+        hit      (some (fn [{:keys [action ns name source] :as step}]
+                         (let [act       (some-> action clojure.core/name keyword)
+                               [snm end] (when source (new-meta source))
+                               end       (or end
+                                             (when (some #(str/includes? (str (:source %)) ":endorsed")
+                                                         (:replace step))
+                                               :patched))
+                               nm        (or (some-> name str symbol) snm)
+                               e         (when (and ns nm)
+                                           (store/form-named store (symbol (str ns)) (symbol (str nm))))
+                               old       (when e (:endorsed (store/form-name-meta e)))
+                               q         (when nm (symbol (str ns) (str nm)))]
+                           (cond
+                             (or (nil? q) (named? nm)) nil
+                             (and old (contains? #{:replace :subform :delete :patch nil} act))
+                             [:endorsed q old]
+                             (and end (not= end old)) [:endorse q])))
+                       steps)]
+    (when-let [[k q why] hit]
+      (if (= k :endorsed)
+        (str q " is ENDORSED (" (pr-str why) "): a human read it and said yes, so it is"
+             " the readable spec and no agent episode edits it. If you believe it is"
+             " wrong, record that with flag_test {ns \"" (namespace q) "\" name \"" (name q)
+             "\" reason \"…\"} and say so to the human; an ask that names this test lifts this.")
+        (str "only the human endorses a test: ^{:endorsed …} on " q " needs an ask that"
+             " names it. Ask the human to read " q " and endorse it.")))))
+
+(defn protected-test-refusal
+  "D-test-immutability, as a pure question over a store VALUE: nil when every
+  step may land, else the refusal naming the sanctioned exit.
+
+  An ENDORSED test (see [[endorsement-refusal]]) is refused first and
+  unconditionally: no agent episode edits it, whatever its coverage.
+
+  Otherwise a step that replaces, patches or deletes a deftest is refused when
+  the test ALREADY EXISTED before `agent`'s episode and its OBSERVED coverage
+  (`tmap`, test qsym -> form qsyms) reaches a form `agent` changed in that
+  episode — or a production form another step of these SAME `steps` targets,
+  since the guard runs before any of them lands and one call that weakens a
+  test and edits what it grades is the same move as two. That is the one edit
+  that lets an agent pass by weakening the oracle — the measured failure is
+  editing the test that is red right now, and prompting against it measured
+  no effect, so the guard is the write path's.
+
+  Three things stay open, each for a reason. A test this episode CREATED is the
+  agent's own new spec (red-first has to be able to fix its own typo). A test
+  whose coverage the agent did not touch is not part of the arc being graded.
+  And a turn intent that NAMES the test is the human deciding — the one actor
+  allowed to move an oracle."
+  [store tmap agent intent steps]
+  (or
+   (endorsement-refusal store intent steps)
+   (when (and agent (seq tmap))
+     (let [mine     (filter #(= agent (:agent %)) (history/episode-span store agent))
+           fids     (fn [d] (if (:form-id d) [(:form-id d)] (:form-ids d)))
+           created  (into #{} (comp (filter #(#{:add :ingest} (:op %))) (mapcat fids)) mine)
+           same-call (into #{}
+                           (keep (fn [{:keys [ns name]}]
+                                   (when (and ns name (not (str/ends-with? (str ns) "-test")))
+                                     (symbol (str ns) (str name)))))
+                           steps)
+           changed  (into same-call
+                          (comp (mapcat fids)
+                                (keep (fn [fid]
+                                        (when-let [e (store/form-by-id store fid)]
+                                          (when-let [ns-sym (store/ns-of-form-id store fid)]
+                                            (store/form-trace-keys ns-sym e)))))
+                                cat)
+                          mine)
+           protected? (fn [{:keys [action ns name]}]
+                        (when (and ns name (contains? #{:replace :subform :delete :patch nil}
+                                              (some-> action clojure.core/name keyword)))
+                          (let [ns (symbol (str ns))
+                                name (symbol (str name))
+                                q (symbol (str ns) (str name))
+                                e (store/form-named store ns name)
+                                reach (get tmap q)]
+                            (when (and e reach
+                                       (not (contains? created (:id e)))
+                                       (some changed reach)
+                                       (not (and intent (str/includes? intent (str name)))))
+                              [q (sort (filter changed reach))]))))]
+       (when-let [[q under] (some protected? steps)]
+         (str q " covers " (str/join ", " under) ", which you changed this"
+              " episode — so it is the oracle grading your change, and not yours"
+              " to edit. If you believe the test is wrong, record that with"
+              " flag_test {ns \"" (namespace q) "\" name \"" (name q) "\" reason \"…\"}"
+              " and say so to the human; the human decides. (A test you CREATED this"
+              " episode stays yours, and an ask that names this test lifts this.)"))))))
+
 (defn create-ns!
   "F4: bring a brand-new namespace into being — two modes:
    - **scaffold** (`:requires`, clause strings like \"[clojure.string :as str]\"):
@@ -6136,14 +6301,18 @@
   reported per step; the completeness judgement is still `done`'s, and a
   whole feature in one call meets the same gates a whole feature in one form
   does."
-  [session steps & {:keys [prompt agent no-auto-require]}]
+  [session steps & {:keys [prompt agent no-auto-require protect-tests]}]
   (let [;; qualified in, alias on store: the rewrites and their requires are
         ;; part of the group, and the result says what moved
         {steps :steps, canon :canonicalized, owed :requires} (canonicalize-steps session steps)
         once   (fn [] (cond-> (edit-group-once! session steps :prompt prompt :agent agent)
                         (seq canon) (assoc :canonicalized canon)
                         (seq owed)  (assoc :auto-require (first owed) :auto-requires (vec owed))))
-        r      (once)
+        guard  (when protect-tests
+                 (protected-test-refusal (:store @session) (:test-map @session)
+                                         (or agent (:agent-id @session))
+                                         (:last-intent @session) steps))
+        r      (if guard {:error guard :protected-test true} (once))
         nses   (vec (distinct (map :ns steps)))
         stamps [:auto-require :auto-requires :auto-require-refused
                 :auto-module-dep :auto-module-deps]
@@ -6184,7 +6353,7 @@
                   (if (nil? (:error r2))
                     [r2 tried]
                     (recur r2 tried (inc n))))))))]
-    (if (or no-auto-require (nil? (:error r)))
+    (if (or no-auto-require guard (nil? (:error r)))
       r
       (loop [r r, tried #{}, n 0]
         (let [[ra tried] (requires! r tried)

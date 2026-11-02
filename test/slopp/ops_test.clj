@@ -14,7 +14,7 @@
   cache, history, deps, queries — have their own test namespaces under
   `slopp.api`; what lands here is what needs the whole thing running."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.ops :as ops] [slopp.ops.testrun :as testrun] [clojure.java.io :as io] [clojure.edn :as edn] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store :as store] [clojure.java.shell] [slopp.image.repl :as repl] [slopp.store.artifacts :as artifacts] [slopp.kernel.boot :as boot] [clojure.string :as str] [slopp.image :as image] [slopp.ops.engine :as engine] [slopp.project.capabilities :as capabilities] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.cljs :as cljs] [slopp.rules.webapp :as rules.webapp] [slopp.store.render :as store.render] [slopp.read.telemetry :as telemetry] [slopp.store.db :as db] [slopp.project.dev :as dev] [slopp.index.refs :as refs] [next.jdbc :as jdbc])
+            [slopp.ops :as ops] [slopp.ops.testrun :as testrun] [clojure.java.io :as io] [clojure.edn :as edn] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store :as store] [clojure.java.shell] [slopp.image.repl :as repl] [slopp.store.artifacts :as artifacts] [slopp.kernel.boot :as boot] [clojure.string :as str] [slopp.image :as image] [slopp.ops.engine :as engine] [slopp.project.capabilities :as capabilities] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.cljs :as cljs] [slopp.rules.webapp :as rules.webapp] [slopp.store.render :as store.render] [slopp.read.telemetry :as telemetry] [slopp.store.db :as db] [slopp.project.dev :as dev] [slopp.index.refs :as refs] [next.jdbc :as jdbc] [slopp.edit :as edit])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
 
@@ -2846,3 +2846,118 @@
         (swap! sess assoc :app-booting-since (constantly nil))
         (is (re-find #"none is running" (str (:app-note (ops/session-brief sess))))))
       (finally (ops/close! sess)))))
+
+(defn- protected-fixture
+  "A store where `human` wrote a.core/f and its test, then `bot` changed f —
+  plus the observed trace map linking the two. Returns [store tmap]."
+  []
+  (let [s (-> (store/empty-store)
+              (store/ingest 'a.core "(ns a.core)\n(defn f [x] x)" :agent "human")
+              (store/ingest 'a.core-test
+                                  (str "(ns a.core-test (:require [clojure.test :refer [deftest is]] [a.core :as c]))\n"
+                                       "(deftest f-is-identity (is (= 1 (c/f 1))))")
+                                  :agent "human"))
+        [s _] (store/replace-node s 'a.core 'f
+                                        (:node (edit/parse-form "(defn f [x] (inc x))"))
+                                        :agent "bot" :prompt "make f increment")]
+    [s {'a.core-test/f-is-identity #{'a.core/f}}]))
+
+(deftest a-test-covering-a-form-the-agent-changed-is-not-the-agents-to-edit
+  (let [[s tmap] (protected-fixture)
+        weaken {:action :replace :ns 'a.core-test :name 'f-is-identity
+                :source "(deftest f-is-identity (is true))"}
+        r (ops/protected-test-refusal s tmap "bot" "make f increment" [weaken])]
+    (is (string? r))
+    (is (re-find #"f-is-identity" r))
+    (is (re-find #"flag_test" r) "the refusal names the sanctioned exit")
+    (testing "a delete is the same edit"
+      (is (string? (ops/protected-test-refusal
+                    s tmap "bot" "" [{:action :delete :ns 'a.core-test :name 'f-is-identity}]))))
+    (testing "a subform patch is the same edit"
+      (is (string? (ops/protected-test-refusal
+                    s tmap "bot" "" [{:action :subform :ns 'a.core-test :name 'f-is-identity
+                                      :match "(= 1 (c/f 1))" :source "true"}]))))))
+
+(deftest a-test-the-agent-did-not-change-the-code-under-is-editable
+  (let [[s tmap] (protected-fixture)
+        step {:action :replace :ns 'a.core-test :name 'f-is-identity
+              :source "(deftest f-is-identity (is (= 2 (c/f 1))))"}]
+    (is (nil? (ops/protected-test-refusal s tmap "someone-else" "" [step]))
+        "another agent changed nothing this test covers")
+    (is (nil? (ops/protected-test-refusal s {} "bot" "" [step]))
+        "no observed coverage, nothing to protect")
+    (is (nil? (ops/protected-test-refusal
+               s tmap "bot" "" [{:action :replace :ns 'a.core :name 'f :source "(defn f [x] x)"}]))
+        "production forms are never protected")))
+
+(deftest a-test-written-this-episode-is-still-the-agents-own
+  (let [[s tmap] (protected-fixture)
+        s (store/append-form s 'a.core-test
+                                   (:node (edit/parse-form "(deftest f-increments (is (= 2 (c/f 1))))"))
+                                   :agent "bot" :prompt "spec for increment")
+        s (if (vector? s) (first s) s)
+        tmap (assoc tmap 'a.core-test/f-increments #{'a.core/f})]
+    (is (nil? (ops/protected-test-refusal
+               s tmap "bot" "" [{:action :replace :ns 'a.core-test :name 'f-increments
+                                 :source "(deftest f-increments (is (= 2 (c/f 1))) (is (= 3 (c/f 2))))"}])))))
+
+(deftest the-humans-ask-naming-the-test-lifts-the-protection
+  (let [[s tmap] (protected-fixture)
+        step {:action :replace :ns 'a.core-test :name 'f-is-identity
+              :source "(deftest f-is-identity (is (= 2 (c/f 1))))"}]
+    (is (nil? (ops/protected-test-refusal
+               s tmap "bot" "f now increments; update f-is-identity to match" [step])))))
+
+(deftest a-wire-shaped-step-is-guarded-like-a-symbol-one
+  ;; the wire sends strings and usually no :action; (#{nil} nil) is nil, so
+  ;; an actionless step once slipped past a set-membership test
+  (let [[s tmap] (protected-fixture)]
+    (is (string? (ops/protected-test-refusal
+                  s tmap "bot" nil [{:ns "a.core-test" :name "f-is-identity"
+                                     :source "(deftest f-is-identity (is true))"}])))
+    (is (string? (ops/protected-test-refusal
+                  s tmap "bot" nil [{:action "patch" :ns "a.core-test" :name "f-is-identity"}])))))
+
+(deftest an-endorsed-test-is-the-humans-and-only-their-ask-moves-it
+  (let [st     (-> (store/empty-store)
+                   (store/ingest 'en.core "(ns en.core)\n\n(defn f [x] x)\n")
+                   (store/ingest 'en.core-test
+                                 (str "(ns en.core-test)\n\n"
+                                      "(deftest ^{:endorsed \"pat: f is the identity\"} f-is-identity (is (= 1 (f 1))))\n\n"
+                                      "(deftest plain (is true))\n")))
+        edit   (fn [nm src] [{:action :replace :ns "en.core-test" :name nm :source src}])
+        refuse #(ops/protected-test-refusal st {} "agent-a" %1 %2)]
+    (testing "an endorsed test refuses an agent edit even with no coverage at stake"
+      (is (re-find #"ENDORSED" (str (refuse "tidy the tests" (edit "f-is-identity" "(deftest f-is-identity (is true))")))))
+      (is (re-find #"flag_test" (str (refuse "tidy the tests" [{:action :delete :ns "en.core-test" :name "f-is-identity"}])))))
+    (testing "an ask that names it is the human deciding"
+      (is (nil? (refuse "change f-is-identity to expect 2" (edit "f-is-identity" "(deftest f-is-identity (is true))")))))
+    (testing "only an ask that names the test may endorse it"
+      (is (re-find #"only the human endorses" (str (refuse "tidy" (edit "plain" "(deftest ^{:endorsed \"x\"} plain (is true))")))))
+      (is (re-find #"only the human endorses" (str (refuse "tidy" [{:action :add :ns "en.core-test"
+                                                                    :source "(deftest ^{:endorsed \"x\"} fresh (is true))"}]))))
+      (is (re-find #"only the human endorses" (str (refuse "tidy" [{:action :patch :ns "en.core-test" :name "plain"
+                                                                    :replace [{:match "plain" :source "^{:endorsed \"x\"} plain"}]}]))))
+      (is (nil? (refuse "endorse plain, it says what we mean" (edit "plain" "(deftest ^{:endorsed \"x\"} plain (is true))")))))
+    (testing "an ordinary test with nothing at stake stays editable"
+      (is (nil? (refuse "tidy" (edit "plain" "(deftest plain (is (= 1 1)))")))))))
+
+(deftest with-no-agent-there-is-no-episode-to-protect
+  (let [st (-> (store/empty-store)
+               (store/ingest 'na.core "(ns na.core)\n\n(defn f [x] x)\n")
+               (store/ingest 'na.core-test "(ns na.core-test)\n\n(deftest f-t (is (= 1 (f 1))))\n"))]
+    (is (nil? (ops/protected-test-refusal st '{na.core-test/f-t #{na.core/f}} nil "tidy"
+                                          [{:action :replace :ns "na.core-test" :name "f-t"
+                                            :source "(deftest f-t (is true))"}])))))
+
+(deftest one-change-may-not-weaken-a-test-and-edit-what-it-grades
+  (let [st (-> (store/empty-store)
+               (store/ingest 'oc.core "(ns oc.core)\n\n(defn f [x] x)\n")
+               (store/ingest 'oc.core-test "(ns oc.core-test)\n\n(deftest f-t (is (= 1 (f 1))))\n"))
+        tmap  '{oc.core-test/f-t #{oc.core/f}}
+        weaken {:action :replace :ns "oc.core-test" :name "f-t" :source "(deftest f-t (is true))"}
+        edit-f {:action :replace :ns "oc.core" :name "f" :source "(defn f [x] (inc x))"}]
+    (testing "the test and the code it grades, in one call, is refused"
+      (is (re-find #"flag_test" (str (ops/protected-test-refusal st tmap "agent-b" "tidy" [weaken edit-f])))))
+    (testing "the same test edit alone, with the code untouched, is not"
+      (is (nil? (ops/protected-test-refusal st tmap "agent-b" "tidy" [weaken]))))))

@@ -172,6 +172,17 @@
                 " one to an already-passing test skips that and nothing else"
                 " notices. key-not-returned catches the one silently-vacuous"
                 " shape; this asks the general question")}
+   {:rule :intent-mismatch :grain :done
+    :escape (str "change the form the ask names, or — if it was named as"
+                 " context — nothing: advisory, because only you know which.")
+    :teach (str "an ask this episode names a qualified ns/name that resolves to"
+                " a real form, and nothing in the episode changed it.")}
+   {:rule :mutants-survived :grain :done
+    :escape (str "add an assertion that fails on the surviving fault; an"
+                 " equivalent mutant (no input tells the two apart) needs nothing.")
+    :teach (str "a small deliberate fault in a function this episode changed (a"
+                " flipped comparison, a swapped and/or, an off-by-one literal)"
+                " left every test that runs it passing.")}
    {:rule :marker-why :grain :done
     :escape "write the reason into the marker — ^{:unused-ok \"why\"} discharges exactly as ^:unused-ok does — or accept it; advisory, never blocking"
     :teach (str "an escape marker on a changed form is a BARE keyword, so it says"

@@ -17,7 +17,7 @@
   Mostly `^:external`: a done-advisory's input is an episode, which needs a
   real session with a real baseline and real verification deltas behind it."
   (:require [clojure.test :refer [deftest testing is]]
-            [slopp.rules :as rules] [slopp.store :as store] [slopp.ops :as ops] [clojure.set :as set] [slopp.ops.external :as external] [slopp.rules.catalog :as catalog] [slopp.edit.http :as edit.http] [slopp.edit.gates :as gates] [slopp.project.capabilities :as capabilities] [clojure.string :as str] [slopp.rules.http :as rules.http] [slopp.store.fields :as fields] [rewrite-clj.parser :as p] [slopp.rules.rest :as rules.rest]))
+            [slopp.rules :as rules] [slopp.store :as store] [slopp.ops :as ops] [clojure.set :as set] [slopp.ops.external :as external] [slopp.rules.catalog :as catalog] [slopp.edit.http :as edit.http] [slopp.edit.gates :as gates] [slopp.project.capabilities :as capabilities] [clojure.string :as str] [slopp.rules.http :as rules.http] [slopp.store.fields :as fields] [rewrite-clj.parser :as p] [slopp.rules.rest :as rules.rest] [slopp.edit :as edit]))
 
 (deftest done-advisory-registry-and-severity
   (testing "the registry carries every done-time advisory with a key, severity, and check"
@@ -1451,3 +1451,59 @@
       (is (= (:marker-why findings) (:marker-why r))))
     (testing "verbose keeps everything"
       (is (= findings (rules/fold-standing-info findings :verbose? true))))))
+
+(deftest an-ask-that-names-a-form-nothing-changed-is-surfaced
+  (let [s0 (-> (store/empty-store)
+               (store/ingest 'im.core "(ns im.core)\n(defn f [x] x)\n(defn g [x] x)\n"))
+        s1 (store/record-delta s0 {:id "done-1" :op :done :ns '*session* :parent (:head s0) :at 1})
+        [s2 _] (store/replace-node s1 'im.core 'f
+                                         (:node (edit/parse-form "(defn f [x] (inc x))"))
+                                         :prompt "make im.core/f and im.core/g increment; see im.core/nope"
+                                         :agent "bot")
+        fid (:id (store/form-named s2 'im.core 'f))
+        rows (rules/intent-mismatches s2 [fid])]
+    (is (= [{:prompt "make im.core/f and im.core/g increment; see im.core/nope"
+             :untouched ['im.core/g]}]
+           rows)
+        "g is named and real and unchanged; f changed; nope does not exist")
+    (testing "an ask whose named forms all changed says nothing"
+      (let [[s3 _] (store/replace-node s2 'im.core 'g
+                                             (:node (edit/parse-form "(defn g [x] (inc x))"))
+                                             :prompt "and im.core/g" :agent "bot")
+            gid (:id (store/form-named s3 'im.core 'g))]
+        (is (empty? (rules/intent-mismatches s3 [fid gid])))))
+    (testing "a system delta is not an ask"
+      (let [[s3 _] (store/replace-node s1 'im.core 'f
+                                             (:node (edit/parse-form "(defn f [x] (inc x))"))
+                                             :prompt "auto: im.core/g" :system true)]
+        (is (empty? (rules/intent-mismatches s3 [fid])))))))
+
+(deftest the-red-first-rate-counts-tests-watched-red-before-their-done
+  (let [ds [{:op :ingest :ns 'a-test :sources {"t1" "(deftest t1 (is (= 1 1)))"}}
+            {:op :done}
+            {:op :replace :ns 'a-test :sources {"t1" "(deftest t1 (is (= 1 1)) (is (= 2 2)))"}}
+            {:op :done}
+            {:op :replace :ns 'a-test :sources {"t1" "(deftest t1 (is (= 1 1)) (is (= 2 2)) (is (= 3 3)))"}}
+            {:op :verify :result {:failures [{:test 'a-test/t1}]}}
+            {:op :done}
+            {:op :replace :ns 'a-test :sources {"t1" "(deftest t1 (is (= 1 1)))"}}
+            {:op :replace :ns 'a :sources {"f" "(defn f [] (is 1))"}}
+            {:op :done}
+            {:op :add :ns 'a-test :sources {"t2" "(deftest t2 (is true))"}}
+            {:op :observe :result {:failures [{:test 'a-test/t2}]}}
+            {:op :done}
+            {:op :add :ns 'a-test :sources {"t3" "(deftest t3 (is true))"}}
+            {:op :done}
+            {:op :verify :result {:failures [{:test 'a-test/t3}]}}]]
+    (testing "a changed test counts only when it GAINED assertions; red must come before its done"
+      (is (= {:n 2 :watched 1 :rate 0.5} (:changed (rules/red-first-rate ds)))))
+    (testing "a new test counts on its own line, and an :observe red counts as watched"
+      (is (= {:n 2 :watched 1 :rate 0.5} (:new (rules/red-first-rate ds)))))
+    (testing "no test written is no rate, not zero"
+      (is (nil? (:rate (:new (rules/red-first-rate []))))))))
+
+(deftest only-a-red-naming-the-test-makes-it-watched
+  (is (= {:n 1 :watched 0 :rate 0.0}
+         (:new (rules/red-first-rate [{:op :add :ns 'a-test :sources {"t" "(deftest t (is true))"}}
+                                      {:op :verify :result {:failures [{:test 'a-test/other}]}}
+                                      {:op :done}])))))

@@ -31,7 +31,33 @@
             [slopp.index.refs :as refs]
             [slopp.index :as index]
             [slopp.store.render :as store.render]
-            [slopp.store :as store] [slopp.ops.done :as done]))
+            [slopp.store :as store] [slopp.ops.done :as done] [slopp.store.db :as db]))
+
+(defn red-signal
+  "What the red index says about one form, for a review row. `reds-by-fid` is
+  {form-id distinct-test-count} (nil when there is no durable store — then say
+  nothing rather than zero); `recent` the form ids changed since the last
+  commit point; `traced` the form's observed covering-test count; `created`
+  the form ids CREATED in that window.
+
+  `:reds` is reported for every form the index can speak about. `:never-red`
+  is raised only where the claim is precise: an EXISTING form changed in
+  current work, that tests demonstrably exercise, which no test has ever failed
+  beside. Two exemptions, both measured or structural: an old form's quiet
+  history is absence of evidence, not a finding; and a form created in current
+  work cannot be credited at all, because its red-first red was recorded before
+  the form existed (`assertions-never-red` grades those). It stays a PROXY: a
+  behaviour-preserving refactor is also never red, which is why oracle strength
+  proper is mutation's question, not this flag's."
+  ([reds-by-fid recent fid traced] (red-signal reds-by-fid recent fid traced #{}))
+  ([reds-by-fid recent fid traced created]
+   (if (nil? reds-by-fid)
+     {}
+     (let [n (get reds-by-fid fid 0)]
+       (cond-> {:reds n}
+         (and (zero? n) (pos? traced) (contains? recent fid)
+              (not (contains? created fid)))
+         (assoc :never-red true))))))
 
 ^:reads (defn ^:export review-scan
   "Whole-codebase (or one-ns) REVIEW TRIAGE — the fileless store's answer
@@ -59,6 +85,19 @@
         nses  (if ns [(symbol (str ns))] (sort (keys (:namespaces st))))
         ;; retired: the graph owns the known-set
         tmap  (:test-map @session)
+        ;; the red index (form_reds), read ONCE: {form-id distinct-tests}. nil
+        ;; without a durable store, so rows say nothing rather than zero
+        recent (into #{} (mapcat (fn [d] (if (:form-id d) [(:form-id d)] (:form-ids d))))
+                     (:recent st))
+        created (into #{} (comp (filter #(#{:add :ingest} (:op %)))
+                                (mapcat (fn [d] (if (:form-id d) [(:form-id d)] (:form-ids d)))))
+                      (:recent st))
+        reds-by-fid (when-let [conn (:db @session)]
+                      (frequencies
+                       (map :form-id
+                            (db/reds-for conn (vec (for [nsx nses e (store/forms st nsx)
+                                                         :when (:name e)]
+                                                     (:id e)))))))
         rendered (into {} (map (fn [n] [n (store.render/render-ns st n)])) nses)
         ns-lint (into (sorted-map)
                       (for [[nsx src] rendered
@@ -151,6 +190,7 @@
                          traced   (let [ks (store/form-trace-keys nsx e)]
                                     ;; any name the form defines carries evidence (#129)
                                     (count (keep (fn [[t fs]] (when (some fs ks) t)) tmap)))
+                         rs       (red-signal reds-by-fid recent (:id e) traced created)
                          callers  (get blast q 0)
                          loc      (count (str/split-lines (n/string (:node e))))
                          lints    (get lint-by-form q 0)
@@ -234,7 +274,8 @@
                                     (>= loc 50)    (conj :large)
                                     (pos? lints)   (conj :lint)
                                     doc?           (conj :undocumented)
-                                    bang?          (conj :effectful))
+                                    bang?          (conj :effectful)
+                                    (:never-red rs) (conj :never-red))
                          risk     (+ (if untested 4 0)
                                      ;; 1, not untested's 4: a standing fact about
                                      ;; the platform is worth SEEING and is not a
@@ -246,11 +287,16 @@
                                      (cond (>= loc 50) 2 (>= loc 30) 1 :else 0)
                                      (min 2 lints)
                                      (if doc? 1 0)
-                                     (if bang? 1 0))]
+                                     (if bang? 1 0)
+                                     ;; 1: a covered form in current work whose
+                                     ;; tests have never failed beside it — the
+                                     ;; oracle may not constrain it
+                                     (if (:never-red rs) 1 0))]
                    :when (and (not skip?) (pos? risk))]
                (cond-> {:form q :risk risk :loc loc :callers callers
                         :covered traced :flags flags :evidence evidence}
-                 (= :static evidence) (assoc :hops hops)))
+                 (= :static evidence) (assoc :hops hops)
+                 (contains? rs :reds) (assoc :reds (:reds rs))))
         ranked (sort-by (juxt (comp - :risk) (comp - :callers) (comp str :form)) rows)]
     (cond-> {:reviewed (if ns (str ns) (str (count nses) " namespaces"))
              :forms    (reduce + 0 (map #(count (filter :name (store/forms st %))) nses))

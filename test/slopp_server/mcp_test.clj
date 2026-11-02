@@ -17,7 +17,7 @@
             [clojure.edn :as edn]
             [cheshire.core :as json]
             [slopp.ops :as ops]
-            [slopp-server.mcp :as mcp] [clojure.java.io :as io] [slopp.store :as store] [slopp.store.db :as db] [clojure.java.shell :as sh] [slopp.sync :as sync] [clojure.string :as str] [slopp-server.mcp.tools :as tools] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [rewrite-clj.node :as n] [slopp-server.mcp.smells :as smells] [slopp-server.api.server :as server] [slopp.read.history :as history] [slopp.ops.branch :as branch] [slopp.rules.webapp :as rules.webapp] [slopp.read.telemetry :as telemetry] [slopp.edit :as edit] [slopp.http :as http]))
+            [slopp-server.mcp :as mcp] [clojure.java.io :as io] [slopp.store :as store] [slopp.store.db :as db] [clojure.java.shell :as sh] [slopp.sync :as sync] [clojure.string :as str] [slopp-server.mcp.tools :as tools] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [rewrite-clj.node :as n] [slopp-server.mcp.smells :as smells] [slopp-server.api.server :as server] [slopp.read.history :as history] [slopp.ops.branch :as branch] [slopp.rules.webapp :as rules.webapp] [slopp.read.telemetry :as telemetry] [slopp.edit :as edit] [slopp.http :as http] [slopp.rules.mutate :as mutate]))
 
 (deftest ^:external protocol-handshake
   (let [sess (atom {})]
@@ -1990,12 +1990,14 @@
         "an MCP descriptor must carry no key the protocol does not define")
     (is (some #(= {:readOnlyHint true} (:annotations %)) tools/registry)
         "the annotation the marker exists to produce is still set"))
-  (testing "the classification, pinned — 37 at the refactor, 41 once verification joined"
+  (testing "the classification, pinned — 37 at the refactor, 41 once verification joined, 42 with mutate"
     ;; positive control: same answer, different home. Then 2026-09-24: the
     ;; verify ops qualify on the query_observe judgement — a verdict delta is
     ;; a journal record about the code, never code — and restart does not.
-    (is (= 41 (count tools/read-only-tools)))
-    (is (every? tools/read-only-tools ["screen" "test_run" "full_check" "draft_test" "review_scan"])
+    ;; 2026-11-02: mutate joins them; it hot-loads mutants into the image and
+    ;; restores each, and records a measurement row, never code.
+    (is (= 42 (count tools/read-only-tools)))
+    (is (every? tools/read-only-tools ["screen" "test_run" "full_check" "draft_test" "review_scan" "mutate"])
         "verification never modifies the store")
     (is (not (contains? tools/read-only-tools "restart"))
         "a rebuilt image is an effect")
@@ -2046,7 +2048,7 @@
     ;; op awaits the image itself), thread_list, thread_open, turn_begin and
     ;; turn_end stopped waiting for an oracle they never touch — measured as
     ;; a 10 s boot on every session's FIRST call
-    (is (= 33 (count tools/image-free-tools)))
+    (is (= 34 (count tools/image-free-tools)))
     (is (every? tools/image-free-tools ["explore" "thread_list" "thread_open" "turn_begin" "turn_end"]))
     (is (not (contains? tools/image-free-tools "thread_drop"))
         "a drop takes work off the image — conservative")
@@ -4455,6 +4457,9 @@
           (is (re-find #":closed \{:closed false" r) r)
           (is (not (re-find #":landed \"main\"" r)) r)))
       (testing "done takes commit too"
+        ;; f changed earlier this episode, so f-t is protected from the agent;
+        ;; the human's ask naming it is what lets the test move with the code
+        (swap! sess assoc :last-intent "f should triple; update f-t to expect 3")
         (call! sess "change" {:prompt "f triples, test agrees"
                               :tests [{:ns "oc.core" :name "f-t" :source "(deftest f-t (is (= 3 (f 1))))"}]
                               :impl  [{:ns "oc.core" :name "f" :source "(defn f \"F.\" [x] (* 3 x))"}]})
@@ -5004,3 +5009,84 @@
         (is (re-find #":commit \{:commit \"d[0-9a-f]+\"" r) r)
         (is (= "make f the identity" (:description (first (ops/query-commits sess))))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-change-may-not-rewrite-the-test-grading-it
+  ;; D-test-immutability: the measured failure is an agent editing the test
+  ;; that is red right now; prompting against it measured no effect.
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-protect-" (System/nanoTime))
+        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "harness-p"})]
+    (try
+      (call! sess "ns_create" {:ns "pt.core" :source "(ns pt.core)\n(defn f \"F.\" [x] x)\n"
+                               :prompt "the seed"})
+      (call! sess "ns_create" {:ns "pt.core-test"
+                               :source (str "(ns pt.core-test (:require [clojure.test :refer [deftest is]] [pt.core :as c]))\n"
+                                            "(deftest f-is-identity (is (= 1 (c/f 1))))\n")
+                               :prompt "the seed's test"})
+      (call! sess "done" {:label "seed"})
+      (call! sess "change" {:prompt "make f add zero"
+                            :impl [{:ns "pt.core" :name "f" :source "(defn f \"F.\" [x] (+ x 0))"}]})
+      (testing "a call that names no agent is attributed to the session's agent — the one guarded"
+        (is (= "harness-p"
+               (:agent (last (filter #(= :replace (:op %)) (:recent (:store @sess))))))))
+      (testing "the guard, given the live session as the write path reads it, refuses"
+        (is (string? (ops/protected-test-refusal
+                      (:store @sess) (:test-map @sess) (:agent-id @sess) (:last-intent @sess)
+                      [{:ns "pt.core-test" :name "f-is-identity"
+                        :source "(deftest f-is-identity (is true))"}]))))
+      (let [r (call! sess "change" {:prompt "loosen the test"
+                                    :tests [{:ns "pt.core-test" :name "f-is-identity"
+                                             :source "(deftest f-is-identity (is true))"}]
+                                    :impl [{:ns "pt.core" :name "f" :source "(defn f \"F.\" [x] (+ 0 x))"}]})]
+        (is (re-find #"flag_test" r) r)
+        (is (re-find #":phase :tests" r) r))
+      (testing "the test is unchanged in the store"
+        (is (re-find #"\(= 1 \(c/f 1\)\)"
+                     (call! sess "query_source" {:targets ["pt.core-test/f-is-identity"]}))))
+      (finally (ops/close! sess)
+               (sh/sh "rm" "-rf" dir)))))
+
+(deftest ^:external flag-test-records-the-agents-objection-for-the-human
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-flag-" (System/nanoTime))
+        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "harness-f"})]
+    (try
+      (call! sess "ns_create" {:ns "fl.core" :source "(ns fl.core)\n(defn f \"F.\" [x] x)\n" :prompt "seed"})
+      (call! sess "ns_create" {:ns "fl.core-test"
+                               :source (str "(ns fl.core-test (:require [clojure.test :refer [deftest is]] [fl.core :as c]))\n"
+                                            "(deftest f-is-identity (is (= 1 (c/f 1))))\n")
+                               :prompt "seed test"})
+      (let [r (call! sess "flag_test" {:ns "fl.core-test" :name "f-is-identity"
+                                       :reason "the ask says f increments"})]
+        (is (re-find #":flagged fl.core-test/f-is-identity" r) r))
+      (is (= ["the ask says f increments"]
+             (keep #(when (= :flag-test (:op %)) (:reason %)) (:recent (:store @sess)))))
+      (testing "an unknown test and an empty reason are refused"
+        (is (re-find #":error" (call! sess "flag_test" {:ns "fl.core-test" :name "nope" :reason "x"})))
+        (is (re-find #":error" (call! sess "flag_test" {:ns "fl.core-test" :name "f-is-identity" :reason ""}))))
+      (finally (ops/close! sess)
+               (sh/sh "rm" "-rf" dir)))))
+
+(deftest ^:external mutate-checks-what-is-owed-and-then-owes-nothing
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-mutate-" (System/nanoTime))
+        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "harness-m"})]
+    (try
+      (call! sess "ns_create" {:ns "mu.core" :source "(ns mu.core)\n(defn small? \"S.\" [x] (< x 10))\n" :prompt "seed"})
+      (call! sess "ns_create" {:ns "mu.core-test"
+                               :source (str "(ns mu.core-test (:require [clojure.test :refer [deftest is]] [mu.core :as c]))\n"
+                                            "(deftest small-is-a-boolean (is (boolean? (c/small? 3))))\n")
+                               :prompt "seed a test that watches without constraining"})
+      (call! sess "test_run" {:ns "mu.core-test"})
+      (testing "on demand over a namespace: the weak test lets the mutants survive"
+        (let [r (call! sess "mutate" {:ns "mu.core"})]
+          (is (re-find #"mutant\(s\) survived" r) r)
+          (is (re-find #"mu.core/small\?" r) r)))
+      (testing "a form a done could not reach is owed, checked once, and then no longer owed"
+        (let [st  (:store @sess)
+              fid (:id (store/form-named st 'mu.core 'small?))]
+          (mutate/record! (:db @sess) [{:fid fid :form 'mu.core/small? :sig (mutate/form-sig st fid)
+                                        :status :unchecked}])
+          (let [r (call! sess "mutate" {})]
+            (is (re-find #":owed 1" r) r)
+            (is (re-find #"mutant\(s\) survived" r) r))
+          (is (re-find #":owed 0" (call! sess "mutate" {})))))
+      (finally (ops/close! sess)
+               (sh/sh "rm" "-rf" dir)))))

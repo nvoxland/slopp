@@ -1988,14 +1988,20 @@
         (fn [session a _sym]
           (let [tests0 (wire-steps (or (:tests a) []))
                 impl0  (wire-steps (or (:impl a) []))
-                born   (create-leading-ns! session (into tests0 impl0) a)
+                guard  (ops/protected-test-refusal (:store @session) (:test-map @session)
+                                          (or (:agent a) (:agent-id @session))
+                                          (:last-intent @session)
+                                          (into tests0 impl0))
+                born   (if guard
+                         {:error guard}
+                         (create-leading-ns! session (into tests0 impl0) a))
                 keep?  (if (:error born) (constantly true) (set (:steps born)))
                 tests  (vec (filter keep? tests0))
                 impl   (vec (filter keep? impl0))]
             (if (or (:error born) (empty? impl))
               (cond
                 (:error born)
-                (text! {:error (:error born) :phase :create})
+                (text! {:error (:error born) :phase (if guard :tests :create)})
 
                 (seq (:created born))
                 ;; the blob WAS a namespace creation — create-ns! landed and
@@ -2745,6 +2751,9 @@
       "draft_test" (text! (ops/draft-test session (sym :ns) (sym :name)
                                                 :code (:code a)
                                                 :limit (or (:limit a) 5)))
+      "mutate" (text! (ops/mutation-run! session :ns (:ns a) :budget-ms (:budget_ms a)))
+      "flag_test" (text! (ops/flag-test! session :ns (:ns a) :name (:name a)
+                                        :reason (:reason a) :agent (:agent a)))
       "turn_begin" (text! (ops/turn-begin! session :agent (:agent a)
                                                  :intent (:intent a)
                                                  :user (:user a)))
@@ -2867,7 +2876,8 @@
                                     (select-keys tools/wire-keys)
                                     (summarize (:verbose a))))
       "edit_group" (text! (-> (ops/edit-group! session (wire-steps (:steps a))
-                                               :prompt (:prompt a) :agent (:agent a))
+                                               :prompt (:prompt a) :agent (:agent a)
+                                               :protect-tests true)
                               (held-after-write! session name a)
                               (finish-accepted! session a)
                               (attach-red-context! session)

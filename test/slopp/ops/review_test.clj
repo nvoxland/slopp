@@ -321,3 +321,18 @@
               about the suite that no per-row reading would ever add up to"
       (is (= '{:declared 1 :none 2 :observed 1 :off-platform 1 :static 3}
              (:evidence (review/review-scan sess :limit 100)))))))
+
+(deftest the-red-signal-is-precise-only-about-current-work
+  (let [reds {"f1" 2 "f2" 0}]
+    (is (= {:reds 2} (review/red-signal reds #{"f1"} "f1" 3))
+        "tests have gone red beside it: evidence, no flag")
+    (is (= {:reds 0 :never-red true} (review/red-signal reds #{"f2"} "f2" 3))
+        "changed since the commit point, covered, never seen a test fail")
+    (is (= {:reds 0} (review/red-signal reds #{} "f2" 3))
+        "an old form's quiet history is absence of evidence, not a finding")
+    (is (= {:reds 0} (review/red-signal reds #{"f2"} "f2" 0))
+        "no observed coverage is :untested's job, not this flag's")
+    (is (= {} (review/red-signal nil #{"f2"} "f2" 3))
+        "no durable store, no index: say nothing rather than zero")
+    (is (= {:reds 0} (review/red-signal reds #{"f2"} "f2" 3 #{"f2"}))
+        "a form CREATED in current work: its red-first red predates it, so the index cannot credit it")))

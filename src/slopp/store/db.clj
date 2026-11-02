@@ -2486,3 +2486,23 @@
   [conn]
   (and (nil? (jdbc/execute-one! conn ["SELECT 1 AS one FROM deltas LIMIT 1"]))
        (nil? (jdbc/execute-one! conn ["SELECT 1 AS one FROM elements LIMIT 1"]))))
+
+^:reads (defn ^:export reds-by-test
+  "The red index read by TEST: `{:test :n :forms}` for each of `tests` the index
+   has ever credited — `:n` the total red count across forms, `:forms` how many
+   forms it was credited beside. A test absent from the result has never been
+   observed failing on a change, which is weak evidence about its oracle, not
+   proof it is vacuous."
+  [conn tests]
+  (if (empty? tests)
+    []
+    (mapv (fn [r]
+            {:test  (symbol (or (:form_reds/test r) (:test r)))
+             :n     (or (:total r) (:form_reds/total r))
+             :forms (or (:forms r) (:form_reds/forms r))})
+          (jdbc/execute!
+           conn (into [(str "SELECT test, SUM(n) AS total, COUNT(form_id) AS forms
+                             FROM form_reds WHERE test IN ("
+                            (str/join "," (repeat (count tests) "?"))
+                            ") GROUP BY test ORDER BY total DESC")]
+                      (map str tests))))))

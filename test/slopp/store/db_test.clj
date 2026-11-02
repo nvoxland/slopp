@@ -1774,3 +1774,27 @@
       (finally (ops/close! sess)))
     (with-open [c (db/open! dir)]
       (is (false? (db/store-empty? c))))))
+
+(deftest ^:external the-red-index-answers-by-test-too
+  ;; "which tests have ever caught anything" is the same index read the other
+  ;; way: a test with no row has never been observed failing on a change
+  (let [dir  (temp-dir)
+        conn (db/open! dir)]
+    (try
+      (let [trunk (db/trunk-line-id! conn)
+            st0   (-> (store/empty-store)
+                      (store/ingest 'rt.core "(ns rt.core)\n(defn f [x] x)\n(defn g [x] x)\n"))
+            st1   (store/record-delta st0 {:id "done-1" :op :done :ns '*session*
+                                          :parent (:head st0) :at 1})
+            st2   (first (store/replace-node st1 'rt.core 'f (p/parse-string "(defn f [x] (inc x))")
+                                             :prompt "off by one"))
+            st3   (first (store/replace-node st2 'rt.core 'g (p/parse-string "(defn g [x] (inc x))")
+                                             :prompt "off by one too"))
+            st4   (store/record-verification st3 'rt.core
+                                             {:status :red :failures [{:test 'rt.core-test/t}]})]
+        (is (true? (db/append! conn st4 (store/deltas st4) ['rt.core] trunk nil)))
+        (is (= [{:test 'rt.core-test/t :n 2 :forms 2}]
+               (db/reds-by-test conn ['rt.core-test/t 'rt.core-test/never]))
+            "credited once per changed form; a test with no row is simply absent")
+        (is (= [] (db/reds-by-test conn []))))
+      (finally (.close conn)))))

@@ -2137,3 +2137,17 @@
             (let [k (str/join "." (take n segs))]
               (when (contains? rows k) [k (get rows k)])))
           (range (count segs) 0 -1))))
+
+(defn record-flag-test
+  "Append a :flag-test marker: `agent` believes the test `test-qsym` is wrong
+  and says why, for a human to decide (D-test-immutability's sanctioned exit —
+  the agent may not edit a test grading its own change, so the objection is
+  RECORDED instead). Session-scoped like every marker: it reloads no namespace.
+  Returns [store' delta]."
+  [store test-qsym reason & {:keys [agent]}]
+  (let [[did store'] (gen-id store "d")
+        delta (cond-> {:id did :parent (:head store)
+                       :op :flag-test :ns '*session* :at (now-ms)
+                       :test test-qsym :reason reason}
+                agent (assoc :agent agent))]
+    [(record-delta store' delta) delta]))

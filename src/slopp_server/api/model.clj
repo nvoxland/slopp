@@ -429,124 +429,6 @@
 
                 :else (recur seen' (into es new-es) (inc d))))))))))
 
-(defn ^:export form-view
-  "One form's page model, addressed by form ID — ids are stable across
-  edits and names are not, so the id is the permalink.
-
-  Built for COLD arrival from a link (Debugger Canvas called the failure
-  the \"lonely bubble\"): the breadcrumb says where this is, `:callers` and
-  `:callees` are backlink CARDS grouped by the `:via` that found each edge,
-  and both carry their own signature and doc INLINED rather than linked —
-  Code Bubbles measured two-thirds of its win as concurrent visibility, and
-  a link is not visibility. The two directions carry the SAME weight, because
-  that argument does not care which way an edge points.
-
-  `view` is the rendering FIDELITY (`:views` names the ones that exist).
-  It carries one value on purpose: a labeled notation is a live follow-up,
-  and adding the parameter later would mean every permalink already in the
-  wild silently meant \"whatever the default became\". An unknown fidelity
-  is nil — the same answer as an unknown id — never a quiet downgrade to
-  the one that happens to exist.
-
-  `depth` (2 or 3) adds `:graph`, the multi-hop NEIGHBOURHOOD — each node
-  once with an edge list, never a tree. It is ADDITIVE: at depth 1 the
-  response is what it always was, for the same reason the fidelity parameter
-  was introduced rather than defaulted into.
-
-  nil for an unknown id, so a page can 404 instead of rendering blank."
-  ([session form-id] (form-view session form-id nil))
-  ([session form-id view] (form-view session form-id view 1))
-  ([session form-id view depth]
-   (let [st (:store @session)
-         e  (store/form-by-id st form-id)]
-     (when (and e (:name e) (contains? fidelities (or view "clojure")))
-       (let [ns-sym  (store/ns-of-form-id st form-id)
-             nm      (:name e)
-             qsym    (symbol (str ns-sym) (str nm))
-             row     (fn [ns- var-]
-                       (let [e (store/form-named st ns- var-)]
-                         (cond-> {:form   (str (symbol (str ns-) (str var-)))
-                                  :ns     (str ns-)
-                                  :module (edit.modules/module-of ns-)}
-                           ;; ids are the permalink, so every edge on the page
-                           ;; is one — a name would break the moment it changes
-                           e (assoc :form-id (:id e)))))
-             callers (->> (refs/refs-to st qsym)
-                          (filter :from-var)
-                          (group-by :via)
-                          (sort-by (comp str key))
-                          (mapv (fn [[via rs]]
-                                  (let [by (sort-by (comp str first)
-                                                    (group-by (juxt :from-ns :from-var) rs))]
-                                    {;; a STRING: that is what the contract says, JSON has no keyword
-                                     ;; type, and a consumer generating a client from the schema is
-                                     ;; entitled to take it literally
-                                     :via   (name via)
-                                     :count (count by)
-                                     :forms (mapv (fn [[[fns fvar] us]]
-                                                    ;; the CARD, same as a
-                                                    ;; callee row: inlining
-                                                    ;; rather than linking is
-                                                    ;; what makes a cold page
-                                                    ;; answerable, and that
-                                                    ;; argument does not care
-                                                    ;; which way the edge points
-                                                    (merge (row fns fvar)
-                                                           {:calls (count (keep :arity us))}
-                                                           (dissoc (json-card
-                                                                    (orient/form-card session fns fvar))
-                                                                   :form)))
-                                                  by)}))))
-             callees (->> (refs/refs st)
-                          (filter #(= form-id (:from-form %)))
-                          (group-by (juxt :to-ns :to-name))
-                          (sort-by (comp str first))
-                          (mapv (fn [[[tns tnm] us]]
-                                  (merge (row tns tnm)
-                                         {:via   (name (:via (first us)))
-                                          :calls (count (keep :arity us))}
-                                         (dissoc (json-card (orient/form-card session tns tnm))
-                                                 :form)))))
-             graph   (neighbourhood session form-id depth)]
-         (cond-> (merge {:form-id form-id
-                         :form    (str qsym)
-                         :name    (str nm)
-                         :ns      (str ns-sym)
-                         :module  (edit.modules/module-of ns-sym)
-                         :view    (or view "clojure")
-                         :views   (vec (sort fidelities))
-                         :source  (n/string (:node e))
-                         :tokens  (tokens-of (:node e))
-                         :callers callers
-                         :callees callees
-                         ;; the tests that reach it BY NAME, observed runs
-                         ;; first — the names say what it is promised to do,
-                         ;; and `:via` says how each is known. Capped like
-                         ;; every list on a form page; `:count` keeps the rest
-                         ;; honest.
-                         ;; the DATA it touches: its namespaced keys, linked to
-                         ;; the dictionary, and a count of the plain ones
-                         :keys    (->> (refs/keyword-refs st)
-                                       (filter #(and (= form-id (:from-form %)) (namespace (:kw %))))
-                                       (map (fn [r] {:kw (subs (str (:kw r)) 1) :via (name (:via r))}))
-                                       distinct (sort-by (juxt :kw :via)) (take 30) vec)
-                         :tests   (let [cov (refs/covered-by st (:test-map @session) qsym)]
-                                    {:count (count cov)
-                                     :shown (->> cov
-                                                 (sort-by (fn [{:keys [via hops test]}]
-                                                            [(if (contains? via :observed) 0 1)
-                                                             (or hops 0) (str test)]))
-                                                 (take 8)
-                                                 (mapv (fn [{:keys [test via hops]}]
-                                                         (cond-> {:test (str test)
-                                                                  :via  (vec (sort (map name via)))}
-                                                           hops (assoc :hops hops)))))})
-                         :note    (str "edges come from a syntactic reader over the store, so this"
-                                       " is a floor, not a census — a call reached through a"
-                                       " binding or built at runtime is not here")}
-                        (dissoc (json-card (orient/form-card session ns-sym nm)) :form))
-           graph (assoc :graph graph)))))))
-
 (defn gaps-by-ns
   "`{ns-sym {:forms :no-doc :no-why :uncovered}}` over PRODUCTION namespaces —
   the counts a consumer needs to show where a page is about to be thin.
@@ -1215,3 +1097,133 @@ gaps    (gaps-by-ns st (:test-map @session))
                                         :form-id fid
                                         :via     (vec (sort (distinct (map (comp name :via) us))))}))}))
        :tests   (count (distinct (map :from-ns (filter #(test? (:from-ns %)) rs))))})))
+
+(defn- endorsed-test?
+  "True when deftest `q` carries `^{:endorsed …}`: a human read it and said
+  yes, which makes it the readable spec rather than one more agent-written
+  check."
+  [st q]
+  (boolean (some-> (store/form-named st (symbol (namespace q)) (symbol (name q)))
+                   store/form-name-meta
+                   :endorsed)))
+
+(defn ^:export form-view
+  "One form's page model, addressed by form ID — ids are stable across
+  edits and names are not, so the id is the permalink.
+
+  Built for COLD arrival from a link (Debugger Canvas called the failure
+  the \"lonely bubble\"): the breadcrumb says where this is, `:callers` and
+  `:callees` are backlink CARDS grouped by the `:via` that found each edge,
+  and both carry their own signature and doc INLINED rather than linked —
+  Code Bubbles measured two-thirds of its win as concurrent visibility, and
+  a link is not visibility. The two directions carry the SAME weight, because
+  that argument does not care which way an edge points.
+
+  `view` is the rendering FIDELITY (`:views` names the ones that exist).
+  It carries one value on purpose: a labeled notation is a live follow-up,
+  and adding the parameter later would mean every permalink already in the
+  wild silently meant \"whatever the default became\". An unknown fidelity
+  is nil — the same answer as an unknown id — never a quiet downgrade to
+  the one that happens to exist.
+
+  `depth` (2 or 3) adds `:graph`, the multi-hop NEIGHBOURHOOD — each node
+  once with an edge list, never a tree. It is ADDITIVE: at depth 1 the
+  response is what it always was, for the same reason the fidelity parameter
+  was introduced rather than defaulted into.
+
+  nil for an unknown id, so a page can 404 instead of rendering blank."
+  ([session form-id] (form-view session form-id nil))
+  ([session form-id view] (form-view session form-id view 1))
+  ([session form-id view depth]
+   (let [st (:store @session)
+         e  (store/form-by-id st form-id)]
+     (when (and e (:name e) (contains? fidelities (or view "clojure")))
+       (let [ns-sym  (store/ns-of-form-id st form-id)
+             nm      (:name e)
+             qsym    (symbol (str ns-sym) (str nm))
+             row     (fn [ns- var-]
+                       (let [e (store/form-named st ns- var-)]
+                         (cond-> {:form   (str (symbol (str ns-) (str var-)))
+                                  :ns     (str ns-)
+                                  :module (edit.modules/module-of ns-)}
+                           ;; ids are the permalink, so every edge on the page
+                           ;; is one — a name would break the moment it changes
+                           e (assoc :form-id (:id e)))))
+             callers (->> (refs/refs-to st qsym)
+                          (filter :from-var)
+                          (group-by :via)
+                          (sort-by (comp str key))
+                          (mapv (fn [[via rs]]
+                                  (let [by (sort-by (comp str first)
+                                                    (group-by (juxt :from-ns :from-var) rs))]
+                                    {;; a STRING: that is what the contract says, JSON has no keyword
+                                     ;; type, and a consumer generating a client from the schema is
+                                     ;; entitled to take it literally
+                                     :via   (name via)
+                                     :count (count by)
+                                     :forms (mapv (fn [[[fns fvar] us]]
+                                                    ;; the CARD, same as a
+                                                    ;; callee row: inlining
+                                                    ;; rather than linking is
+                                                    ;; what makes a cold page
+                                                    ;; answerable, and that
+                                                    ;; argument does not care
+                                                    ;; which way the edge points
+                                                    (merge (row fns fvar)
+                                                           {:calls (count (keep :arity us))}
+                                                           (dissoc (json-card
+                                                                    (orient/form-card session fns fvar))
+                                                                   :form)))
+                                                  by)}))))
+             callees (->> (refs/refs st)
+                          (filter #(= form-id (:from-form %)))
+                          (group-by (juxt :to-ns :to-name))
+                          (sort-by (comp str first))
+                          (mapv (fn [[[tns tnm] us]]
+                                  (merge (row tns tnm)
+                                         {:via   (name (:via (first us)))
+                                          :calls (count (keep :arity us))}
+                                         (dissoc (json-card (orient/form-card session tns tnm))
+                                                 :form)))))
+             graph   (neighbourhood session form-id depth)]
+         (cond-> (merge {:form-id form-id
+                         :form    (str qsym)
+                         :name    (str nm)
+                         :ns      (str ns-sym)
+                         :module  (edit.modules/module-of ns-sym)
+                         :view    (or view "clojure")
+                         :views   (vec (sort fidelities))
+                         :source  (n/string (:node e))
+                         :tokens  (tokens-of (:node e))
+                         :callers callers
+                         :callees callees
+                         ;; the tests that reach it BY NAME, observed runs
+                         ;; first — the names say what it is promised to do,
+                         ;; and `:via` says how each is known. Capped like
+                         ;; every list on a form page; `:count` keeps the rest
+                         ;; honest.
+                         ;; the DATA it touches: its namespaced keys, linked to
+                         ;; the dictionary, and a count of the plain ones
+                         :keys    (->> (refs/keyword-refs st)
+                                       (filter #(and (= form-id (:from-form %)) (namespace (:kw %))))
+                                       (map (fn [r] {:kw (subs (str (:kw r)) 1) :via (name (:via r))}))
+                                       distinct (sort-by (juxt :kw :via)) (take 30) vec)
+                         :tests   (let [cov      (refs/covered-by st (:test-map @session) qsym)
+                                          endorsed (count (filter #(endorsed-test? st (:test %)) cov))]
+                                      (cond-> {:count (count cov)
+                                               :shown (->> cov
+                                                           (sort-by (fn [{:keys [via hops test]}]
+                                                                      [(if (contains? via :observed) 0 1)
+                                                                       (or hops 0) (str test)]))
+                                                           (take 8)
+                                                           (mapv (fn [{:keys [test via hops]}]
+                                                                   (cond-> {:test (str test)
+                                                                            :via  (vec (sort (map name via)))}
+                                                                     hops (assoc :hops hops)
+                                                                     (endorsed-test? st test) (assoc :endorsed true)))))}
+                                        (pos? endorsed) (assoc :endorsed endorsed)))
+                         :note    (str "edges come from a syntactic reader over the store, so this"
+                                       " is a floor, not a census — a call reached through a"
+                                       " binding or built at runtime is not here")}
+                        (dissoc (json-card (orient/form-card session ns-sym nm)) :form))
+           graph (assoc :graph graph)))))))

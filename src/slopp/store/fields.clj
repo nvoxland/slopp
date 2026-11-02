@@ -46,7 +46,7 @@
   merge — telemetry able to stop everyone on a branch from landing would be a
   measurement doing harm."
   #{:verify :observe :done :merge :turn-begin :turn-end :commit :revert
-    :read-cost :otel})
+    :read-cost :otel :flag-test})
 
 (def silent-markers
   "The marker subset merge-logs skips without a note — verification and
@@ -421,4 +421,4 @@
   before the copy — a carried green would stand over code it never graded.
   Nor `:merge`: it records what another line consumed, scoped by `:from`, and
   a copy would read as this line's own causal state."
-  #{:commit :turn-begin :turn-end :read-cost :otel})
+  #{:commit :turn-begin :turn-end :read-cost :otel :flag-test})

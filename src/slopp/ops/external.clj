@@ -1806,6 +1806,12 @@ client-deps (merge (:client-deps st) (:client provided))
       ;; the world as it was when the verdict was earned. Serving an app is not
       ;; a write, and nothing else would ever refresh them.
       true                  (merge (currency-now session st))
+      ;; an instrument, not a verdict: how often the tests this store's agents
+      ;; wrote were watched fail before their episode closed. It never turns the
+      ;; check red; it is reported here so the share becomes a series
+      (:db @session)        (assoc :red-first (rules/red-first-rate
+                                               (db/line-deltas (:db @session)
+                                                               (db/trunk-line-id! (:db @session)))))
       ;; Verification stops at the boundary: everything above is an edge INSIDE
       ;; the store. A green here
       ;; says nothing about what LEAVES it, and reads as though it did — so

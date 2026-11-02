@@ -75,6 +75,8 @@
     :self-polices? true}
    {:marker :side-effect  :kind :declaration :discharges nil  :on :name
     :asks "what does requiring it register?"                 :self-polices? false}
+   {:marker :endorsed     :kind :declaration :discharges nil  :on :name
+    :asks "who endorsed this test, and what behaviour does it pin?" :self-polices? false}
    ;; waives nothing — it says "this deftest holds two derivations that must
    ;; agree", which slopp cannot derive. Eleven such checks exist and were
    ;; findable only by grepping `built-store`: that reaches the 8 STORE-derived

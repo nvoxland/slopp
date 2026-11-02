@@ -21,7 +21,7 @@
   (:require [slopp.store :as store]
             [slopp.rules.schema :as schema]
             [slopp.rules.keywords :as keywords]
-            [slopp.rules.breakage :as breakage] [slopp.edit.modules :as edit.modules] [rewrite-clj.node :as n] [clojure.string :as str] [slopp.rules.http :as rules.http] [slopp.rules.catalog :as catalog] [slopp.index.refs :as refs] [slopp.rules.shape :as shape] [rewrite-clj.parser :as p] [slopp.rules.markers :as markers] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.rest :as rules.rest] [slopp.project.capabilities :as capabilities] [slopp.rules.webapp :as rules.webapp] [slopp.index.crossings :as crossings] [slopp.store.db :as db]))
+            [slopp.rules.breakage :as breakage] [slopp.edit.modules :as edit.modules] [rewrite-clj.node :as n] [clojure.string :as str] [slopp.rules.http :as rules.http] [slopp.rules.catalog :as catalog] [slopp.index.refs :as refs] [slopp.rules.shape :as shape] [rewrite-clj.parser :as p] [slopp.rules.markers :as markers] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.rest :as rules.rest] [slopp.project.capabilities :as capabilities] [slopp.rules.webapp :as rules.webapp] [slopp.index.crossings :as crossings] [slopp.store.db :as db] [slopp.rules.mutate :as mutate]))
 
 (defn- changed-qsyms
   "The qualified symbols of the CHANGED forms this episode."
@@ -955,6 +955,109 @@
                          " and 404s on every refresh. If the key is your own,"
                          " put it in your own namespace.")}))))
 
+(defn fold-standing-info
+  "`findings` (rule key → rows) with every INFO-ONLY rule folded to
+  `{:info n :why <one> :rows \"full_check {verbose true}\"}`; `:verbose? true`
+  returns it untouched.
+
+  A rule whose every row is `:severity :info` cannot flip a verdict, and its
+  rows do not change from one check to the next — slopp-ui measured ~40
+  `http-dangling-route-refs` rows, half carrying the same 60-word `:why`,
+  reprinted by every `full_check` for two days and never once acted on. The
+  COUNT is what a reader acts on (40 became 41 after touching a view); the
+  rows are read once, when deciding whether the class matters, which is what
+  `verbose` is for. A rule with even one row that can flip the check keeps
+  every row: those are the ones a reader fixes by name.
+
+  Fold AFTER grading (`status-affecting-fired?` reads rows), never before."
+  [findings & {:keys [verbose?]}]
+  (if verbose?
+    findings
+    (into {}
+          (map (fn [[k rows]]
+                 (if (and (seq rows) (every? #(= :info (:severity %)) rows))
+                   [k (cond-> {:info (count rows)
+                               :rows "full_check {verbose true}"}
+                        (some :why rows) (assoc :why (some :why rows)))]
+                   [k rows])))
+          findings)))
+
+(defn intent-mismatches
+  "The asks of the current episode (the authored prompts on content deltas since
+  the last done) that NAME a form — a qualified `ns/name` resolving to a real
+  form — which nothing in the episode changed. One row per distinct ask:
+  `{:prompt :untouched [qsym …]}`. `changed` is the episode's changed form ids.
+
+  Qualified names only, on purpose: they are the one way a prompt names a form
+  unambiguously, so a match is a fact and not a guess. A bare word could be a
+  local, a concept or a different namespace's var."
+  [st* changed]
+  (let [ds       (:recent st*)
+        baseline (->> ds (filter #(= :done (:op %))) last :id)
+        after    (if baseline (rest (drop-while #(not= baseline (:id %)) ds)) ds)
+        asks     (distinct
+                  (for [d after
+                        :when (or (:form-id d) (seq (:form-ids d)))
+                        :when (not (:system d))
+                        :let [p (:prompt d)]
+                        :when (and (string? p) (not (str/blank? p)))]
+                    p))
+        touched  (into #{}
+                       (comp (keep (fn [fid]
+                                     (when-let [e (store/form-by-id st* fid)]
+                                       (when-let [nsx (store/ns-of-form-id st* fid)]
+                                         (store/form-trace-keys nsx e)))))
+                             cat)
+                       changed)
+        named    (fn [p]
+                   (distinct
+                    (for [[_ nsx nm] (re-seq #"([a-zA-Z][\w.\-]*)/([\w\-!?*<>=+]+)" p)
+                          :let [ns-sym (symbol nsx) nm-sym (symbol nm)]
+                          :when (store/form-named st* ns-sym nm-sym)]
+                      (symbol nsx nm))))]
+    (vec (for [p asks
+               :let [un (vec (remove touched (named p)))]
+               :when (seq un)]
+           {:prompt p :untouched un}))))
+
+(defn intent-mismatch-check
+  "Done-advisory: an ask this episode NAMES a form that nothing in the episode
+  changed — either the work is unfinished, or the form was context. The one
+  provenance signal with measured predictive value: an agent change whose
+  description does not match its diff is accepted far less often (28% vs 80%),
+  and nearly half of such mismatches claim work that was never done.
+  Advisory, because asks also name context (\"the callers of x/y\"); the author
+  knows which this is."
+  [_session st* changed]
+  (vec (for [{:keys [prompt untouched]} (intent-mismatches st* changed)]
+         {:teach (str "the ask \"" (if (> (count prompt) 90) (str (subs prompt 0 90) "…") prompt)
+                      "\" names " (str/join ", " untouched)
+                      ", which nothing in this episode changed — unfinished, or context?"
+                      " If it was meant to change, change it; if it was context, nothing to do.")
+          :untouched untouched})))
+
+(defn mutation-check!
+  "Done-advisory: mutation testing over the episode's changed functions. Each
+  is broken in up to five small ways in the image and its observed tests are
+  re-run; a fault every test still passes is a survivor — code the tests watch
+  without constraining. Bounded by a 10s budget, cheapest forms first; what
+  the budget did not reach is recorded as owed and reported as `:info` rather
+  than dropped. Measured before shipping over 49 episodes of this store: the
+  median episode costs 0.2-0.3s, and only wide UI episodes approach the budget.
+
+  A changed function with no in-image test is recorded but NOT reported here:
+  it fired on every untested function and turned clean dones into noise, which
+  teaches that findings are noise. `verify {op mutate}` and the false-green
+  instrument still count them."
+  [session st* changed]
+  (let [{:keys [image test-map db]} @session
+        ts (when image (mutate/targets st* test-map changed))]
+    (if (empty? ts)
+      []
+      (let [rs (mutate/mutate! image st* ts)]
+        (when db (mutate/record! db rs))
+        (mutate/findings (remove #(= :untested (:status %)) rs))))))
+
 (def done-advisories
   "The done-time advisory registry (D9 rule-registry — the done-grain sibling of
    `edit.modules/per-form-write-gates`): an ordered list of {:key :severity
@@ -1131,6 +1234,20 @@
     ;; whole finding, and it is what 100 of slopp's own 177 namespaces looked
     ;; like when this rule was written
     :fires-on "(ns rf.core)\n(defn f [] 1)\n"}
+   {:key :intent-mismatch :severity :advisory :applies-to :both :check #'intent-mismatch-check
+    :sweep (str "reads the authored asks on the episode's content deltas — a"
+                " whole-store sweep has no episode and no ask to compare")
+    :selftest-note (str "needs a prior done and an authored delta whose prompt"
+                        " names an unchanged form — a source-only fixture has no"
+                        " prompt; covered by rules-test/"
+                        "an-ask-that-names-a-form-nothing-changed-is-surfaced")}
+   {:key :mutants-survived :severity :advisory :applies-to :production :check #'mutation-check!
+    :sweep (str "mutates the episode's changed functions in the image under a"
+                " wall-time budget; a whole-store pass is `verify {op mutate}`"
+                " draining what earlier dones could not reach")
+    :selftest-note (str "needs a booted image with the fixture's tests loaded; covered"
+                        " by rules.mutate-test/"
+                        "mutants-the-tests-notice-die-and-the-rest-survive")}
    {:key :key-not-returned :severity :advisory :applies-to :both :check #'key-not-returned-check
     :sweep true
     ;; explicitly BOTH: a vacuous assertion does its worst damage in a test,
@@ -1543,29 +1660,44 @@
            :forms    (count ids)
            :findings (run-checks session st* ids run))))
 
-(defn fold-standing-info
-  "`findings` (rule key → rows) with every INFO-ONLY rule folded to
-  `{:info n :why <one> :rows \"full_check {verbose true}\"}`; `:verbose? true`
-  returns it untouched.
+(defn ^:export red-first-rate
+  "How often the tests written were watched FAIL before the episode that wrote
+  them closed, over `deltas` (a journal, oldest first). Two lines, because they
+  are different habits: `:changed` is deftests that GAINED assertions (the
+  shape [[assertions-never-red-check]] flags one at a time), `:new` is
+  deftests added. A test is watched when a `:verify` or `:observe` delta names
+  it failing after the write and before the next `:done`. Each line is `{:n
+  :watched :rate}`, the rate nil when nothing was written.
 
-  A rule whose every row is `:severity :info` cannot flip a verdict, and its
-  rows do not change from one check to the next — slopp-ui measured ~40
-  `http-dangling-route-refs` rows, half carrying the same 60-word `:why`,
-  reprinted by every `full_check` for two days and never once acted on. The
-  COUNT is what a reader acts on (40 became 41 after touching a view); the
-  rows are read once, when deciding whether the class matters, which is what
-  `verbose` is for. A rule with even one row that can flip the check keeps
-  every row: those are the ones a reader fixes by name.
-
-  Fold AFTER grading (`status-affecting-fired?` reads rows), never before."
-  [findings & {:keys [verbose?]}]
-  (if verbose?
-    findings
-    (into {}
-          (map (fn [[k rows]]
-                 (if (and (seq rows) (every? #(= :info (:severity %)) rows))
-                   [k (cond-> {:info (count rows)
-                               :rows "full_check {verbose true}"}
-                        (some :why rows) (assoc :why (some :why rows)))]
-                   [k rows])))
-          findings)))
+  A replace whose earlier source the journal does not carry (history before
+  a compaction) is skipped rather than guessed at: with no old version there
+  is no way to say whether assertions were added."
+  [deltas]
+  (let [ds     (vec deltas)
+        sx     (fn [s] (try (n/sexpr (p/parse-string s)) (catch Exception _ nil)))
+        red-in? (fn [i q]
+                  (boolean
+                   (some (fn [d] (and (contains? #{:verify :observe} (:op d))
+                                      (some #(= q (str (:test %))) (get-in d [:result :failures]))))
+                         (take-while #(not= :done (:op %)) (subvec ds (inc i))))))
+        rows   (loop [i 0 seen {} acc []]
+                 (if (= i (count ds))
+                   acc
+                   (let [d    (ds i)
+                         srcs (when (contains? #{:add :replace :ingest} (:op d)) (:sources d))
+                         new  (for [[fid src] srcs
+                                    :when (and (contains? #{:add :replace} (:op d))
+                                               (str/starts-with? src "(deftest"))
+                                    :let [nw   (sx src)
+                                          old  (some-> (get seen fid) sx)
+                                          kind (cond (= :add (:op d)) :new old :changed)]
+                                    :when (and nw kind
+                                               (or (= kind :new) (pos? (shape/assertions-added old nw))))]
+                                {:kind kind :red (red-in? i (str (:ns d) "/" (second nw)))})]
+                     (recur (inc i) (merge seen srcs) (into acc new)))))
+        tally  (fn [k]
+                 (let [rs (filter #(= k (:kind %)) rows)
+                       w  (count (filter :red rs))]
+                   {:n (count rs) :watched w
+                    :rate (when (seq rs) (/ (Math/round (* 1000.0 (/ w (count rs)))) 1000.0))}))]
+    {:changed (tally :changed) :new (tally :new)}))

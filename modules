@@ -33,7 +33,7 @@ slopp.http: slopp.lang slopp.rest (test) slopp.webapp (test)
 slopp.image: slopp.kernel slopp.store
 slopp.index: slopp.cache slopp.image slopp.store slopp-server.mcp (test) slopp.build (test) slopp.ops (test) slopp.read (test) slopp.rules (test)
 slopp.integration-tier: slopp.ops (test)
-slopp.lab: slopp-server.mcp slopp.ops slopp.read slopp.store
+slopp.lab: slopp-server.mcp slopp.ops slopp.read slopp.rules slopp.store
 slopp.lintgate: slopp.edit (test) slopp.index (test) slopp.store (test)
 slopp.merge: slopp.store (test)
 slopp.modules: slopp.edit (test) slopp.ops (test) slopp.project (test) slopp.read (test) slopp.rules (test) slopp.store (test)

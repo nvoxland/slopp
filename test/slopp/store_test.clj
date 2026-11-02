@@ -1014,3 +1014,17 @@
     (is (= ["a.b" :cljc] (store/governing-declaration st :module-platforms 'a.b)))
     (is (nil? (store/governing-declaration st :module-platforms 'a.x)))
     (is (nil? (store/governing-declaration st :module-tiers 'a.b.c)))))
+
+(deftest a-flagged-test-is-a-marker-that-reaches-main
+  (let [[st d] (store/record-flag-test (store/empty-store) 'a.core-test/f-is-identity
+                                       "the spec contradicts the ask" :agent "bot")]
+    (is (= :flag-test (:op d)))
+    (is (= 'a.core-test/f-is-identity (:test d)))
+    (is (= "the spec contradicts the ask" (:reason d)))
+    (is (= "bot" (:agent d)))
+    (is (= '*session* (:ns d)) "a marker reloads no namespace")
+    (is (= (:id d) (:head st)))
+    (is (contains? fields/markers :flag-test)
+        "registered, or merge-logs refuses the whole merge")
+    (is (contains? fields/travelling-markers :flag-test)
+        "it is a fact for the human, so it outlives the thread it was written on")))

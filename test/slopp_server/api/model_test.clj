@@ -911,3 +911,20 @@
     (is (= 1 (:tests v)) "test namespaces are counted, not listed")
     (is (nil? (model/key-view st "no/such")) "an unknown key is nil")
     (is (json-shaped? v))))
+
+(deftest the-form-card-says-which-tests-a-human-endorsed
+  (let [st   (-> (store/empty-store)
+                 (store/ingest 'demo.e.core "(ns demo.e.core)\n\n(defn hello [] 1)\n")
+                 (store/ingest 'demo.e.core-test
+                               (str "(ns demo.e.core-test (:require [clojure.test :refer [deftest is]] [demo.e.core :as c]))\n\n"
+                                    "(deftest ^{:endorsed \"pat: hello is one\"} hello-says-one (is (= 1 (c/hello))))\n\n"
+                                    "(deftest hello-is-a-number (is (number? (c/hello))))\n")))
+        sess (atom {:store st :test-map {'demo.e.core-test/hello-says-one #{'demo.e.core/hello}
+                                         'demo.e.core-test/hello-is-a-number #{'demo.e.core/hello}}})
+        t    (:tests (model/form-view sess (:id (store/form-named st 'demo.e.core 'hello))))]
+    (testing "endorsed vs agent-written, as a count beside the total"
+      (is (= 2 (:count t)))
+      (is (= 1 (:endorsed t))))
+    (testing "and on the test that carries it"
+      (is (= {"demo.e.core-test/hello-says-one" true "demo.e.core-test/hello-is-a-number" nil}
+             (into {} (map (juxt :test :endorsed)) (:shown t)))))))
