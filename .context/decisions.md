@@ -7890,6 +7890,57 @@ version guarded nobody because of it. Also worth knowing: the actionless wire
 step slipped past `(#{… nil} action)` — a set lookup of nil is nil even when nil
 is a member; use `contains?`.
 
+## D-mutation-at-done (2026-11-02, user-directed) — every done mutation-tests the changed functions under a wall-time budget, and what the budget did not reach is owed, not dropped
+
+**Decision.** `done` runs `:mutants-survived` (advisory) over the episode's
+changed production `defn`s: up to 5 one-token mutants each (comparison
+flips, and/or swap, if/when negation, inc/dec, ±, boolean flip, integer
++1), body only, hot-loaded into the image; the tests the trace map saw run
+the form re-run one at a time and stop at the first failure; the real form
+is re-loaded from the store value after every mutant. Default ON with a
+10s per-episode budget, cheapest forms (fewest covering tests) first.
+`slopp.rules.mutate` holds it; `verify {op mutate}` is the catch-up.
+
+**Why default-on, not opt-in (the bead said opt-in).** Measured over 49
+main episodes before building: 461 changed forms, 256 defns, 202 with an
+in-image observed test; in-image tests ~10ms each. Per episode, all
+mutants killed by the first test: median 0.2s, p95 1.9s; all surviving
+(worst case): median 0.3s, p90 37s, max 120s (a 29-form UI episode). The
+median episode is far inside 10s; only wide UI episodes need the budget.
+
+**Why the overrun is RECORDED.** A budget that silently stops reads as a
+clean result nobody earned. Each result is a measurement row (kind
+`mutation`, beside the journal so it never moves the head) keyed by form
+id + a hash of the form's source. The backlog is the forms whose latest
+row for their CURRENT version is `:unchecked`, so an edit or a delete
+retires the debt by itself.
+
+**Why the catch-up is a batch, and what it does NOT buy.** The user asked
+whether overlap between impacted-test graphs makes a grouped re-run
+cheaper. It does not: each mutant is a different program and needs its own
+test run, so shared tests cannot be shared across mutants (overlap actually
+blocks the one combining trick, running mutants of two forms together,
+which needs DISJOINT test sets to attribute a failure). The batch wins on
+dedup instead: one current version per form across all owed episodes, no
+deleted forms, and a larger budget (120s) off the done path.
+
+**Location by snippet, not line.** A survivor names the expression it sits
+in (`< → <= in (< x 10)`); a `:col` key was refused by the boundary rule
+that keeps file/line coordinates out of agent responses.
+
+**Known limits.** Equivalent mutants (no input distinguishes them) recur
+on every done that touches the form, with no discharge yet. A mutant that
+loops without checking interruption keeps its image thread after the
+per-mutant timeout. While a mutant is loaded, anything else using the same
+image sees it; there is no lock. Functions covered only by `^:external`
+tests are counted `:untested` — the in-image tier cannot run them.
+
+**`:untested` is not a done finding.** The first build reported it as an
+`:info` row per function; on slopp's own store that fired on every done
+that touched an untested function and broke two "a clean done says
+nothing" tests. `verify {op mutate}` and the false-green instrument still
+count these functions; the done advisory reports survivors only.
+
 ## D-endorsed-examples (2026-11-02, user-directed) — a human-endorsed test is the readable spec, and no agent episode edits it
 
 **Decision.** `^{:endorsed "who/why"}` on a deftest (one `marker-registry`
@@ -7905,6 +7956,16 @@ studies show humans judge generated code better through examples (TiCoder,
 ClarifyGPT). Cucumber's failure modes — written after the fact, nobody reads
 them, they bloat — are why this is a marker on ordinary tests, one behaviour
 each, never a second language.
+
+**Built 2026-11-02.** `ops/endorsement-refusal`, checked first inside
+`protected-test-refusal`. The marker is granted the same way an endorsed test
+is moved: only when the human's verbatim ask (`:last-intent`, from the prompt
+hook — never the agent's own write prompt) names the test. That is what makes
+endorsement a turn-level act of the human rather than a marker an agent could
+put on its own tests to lock its own oracle. A patch is checked by whether a
+replacement mentions `:endorsed`, since its resulting metadata is not known
+before it applies. The form card (`api.model/form-view`) carries `:endorsed n`
+beside `:count` and `:endorsed true` per shown test.
 
 ## D-review-marker (2026-11-02, user-directed) — "reviewed" and "claims" are stored marker ops, because nothing they attach to is mutable
 

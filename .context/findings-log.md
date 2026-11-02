@@ -3282,3 +3282,31 @@ is what outran the plugin's 30 s MCP connect timeout. Still open: a first
 attach that imports will still exceed 30 s on a store this size; the
 handshake could answer before the import, or the timeout could be raised in
 the plugin's `.mcp.json`.
+
+## 2026-11-02 — false-green and red-first baselines, the day mutation testing shipped
+
+**False green** (`slopp --main slopp.lab.falsegreen/-main`, last 50 trunk
+episodes, up to 5 planted defects per changed production `defn`, run against
+the tests `done` would run for it; 66s):
+
+| | |
+|---|---|
+| functions changed | 145 (94 with an in-image test, 29 with none, 22 with nothing to mutate) |
+| defects planted and run | 356 (+50 that could not be judged: no in-image test actually ran, or the mutant did not load) |
+| defects every test still passed | 120 — **33.7%** |
+| tested functions with at least one surviving defect | **56.4%** |
+| the same, counting untested functions as passing every defect | **66.7%** |
+
+So before any agent saw a `:mutants-survived` finding, a third of small
+deliberate faults in freshly changed code would have reached a green `done`.
+Some survivors are equivalent mutants (no input distinguishes them); on the
+first survivors reviewed by hand that was 4 of 13, so read 33.7% as an upper
+bound of the true miss rate, not the rate. Each run appends a `false-green`
+measurement row; this is the baseline to compare later runs against.
+
+**Red-first** (`rules/red-first-rate` over the trunk journal since its last
+compaction, now on every `full_check` as `:red-first`): of existing deftests
+that GAINED assertions, 14 of 27 (52%) were seen failing before their
+episode's `done`; of new deftests, 89 of 105 (85%). The earlier lifetime,
+write-grain figure (22 of 104 additions watched red) is not the same
+measure — different window and grain — and is not a "before".

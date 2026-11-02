@@ -144,6 +144,34 @@ standard.
 There is a middle gear too: `full_check {affected: true}` widens past the
 episode without paying for the entire store.
 
+## A green has to be earned by tests that would fail
+
+A passing test only counts if it would have failed on wrong code. `done`
+checks that in three ways.
+
+**It breaks the code on purpose.** Each function the episode changed gets up
+to five small faults -- `<` becomes `<=`, `and` becomes `or`, `10` becomes
+`11` -- loaded one at a time into the image, and the tests that run that
+function run again. A fault every test still passes is reported under
+`:mutants-survived`, with the fault and the expression it sits in: those tests
+run the code without constraining it. This is advice, not a gate, because some
+faults change nothing any input can see (an *equivalent mutant*). It spends at
+most about 10 seconds; the functions it did not reach are listed as
+`:unchecked` and recorded, and `verify {op mutate}` checks them later with a
+larger budget (`{ns X}` checks one namespace).
+
+On the day it shipped, a third of these planted faults in slopp's own recently
+changed code got past the tests `done` runs.
+
+**The test grading a change is not the agent's to edit.** A write that changes
+an existing test whose traced coverage reaches code the agent changed in this
+episode -- or is changing in the same call -- is refused. The agent records its
+objection with `flag_test`, and the person decides.
+
+**A test a person endorsed is the readable spec.** `^{:endorsed "who: what it
+pins"}` on a test says a human read it and agreed. No agent edits it or adds
+the marker; both need an ask from the person that names the test.
+
 ## Dead surface is a hard gate
 
 A public `defn` or `def` that nothing in the store calls is an error at `done`,

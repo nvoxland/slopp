@@ -124,11 +124,25 @@ elsewhere without moving (`help {topic "threads"}`).
   {op check}` it first: the red is the answer, and nothing lands.
 - **Assert the behaviour, not the fixture.** A repro can be too minimal; a
   test whose expected value was copied from the actual value is not a test.
+- **A test that runs your code must also fail when the code is wrong.**
+  `done` mutation-tests the functions you changed: it breaks each in up to
+  five small ways (`<` → `<=`, `and` → `or`, `10` → `11`) and re-runs the
+  tests that run it. `:mutants-survived` names each fault no test noticed and
+  the expression it sits in — add an assertion that fails on it. A mutant no
+  input can tell apart from the original (an equivalent mutant) needs
+  nothing. `done` spends at most about 10s on this; what it did not reach is
+  listed `:unchecked`, and `verify {op mutate}` checks it later (`{ns X}`
+  checks a whole namespace).
 - **A test grading your change is not yours to edit.** Changing a test whose
   traced coverage reaches a form you changed this episode is refused. If you
   believe it is wrong, `flag_test {ns name reason}` records that for the human
   (the `verify` family) — then say so in your reply. Tests you wrote this
   episode stay editable; an ask that names the test lifts the guard.
+- **An endorsed test is the human's.** `^{:endorsed "who: what it pins"}` on
+  a deftest says a human read it and said yes. No agent edits or deletes it,
+  whatever its coverage, and no agent adds or changes the marker: both need an
+  ask that names the test. When a behaviour matters to the person asking,
+  write one small test for it and ask them to endorse it by name.
 
 ## Reading a result
 

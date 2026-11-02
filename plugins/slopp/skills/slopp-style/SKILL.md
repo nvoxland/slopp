@@ -341,6 +341,10 @@ The main `slopp` skill has the mechanics; these are the shapes worth writing.
   `:pure` boundary fn with a `:=>` malli schema, the generative check at `done`
   is a free property — write the schema (§4). **Enforced today:** that check.
   Whether a pure fn has generated inputs is judgment; no gate yet.
+- **A test that never fails when the code is wrong is coverage, not a check.**
+  **Advisory:** `done` mutation-tests the functions you changed and reports
+  each surviving fault (`:mutants-survived`). Kill a survivor with an
+  assertion that fails on it; an equivalent mutant needs nothing.
 - **Literal-only inputs let an implementation special-case the test.** Generated
   inputs are the one measured defence. Judgment.
 - **Assert behaviour through the public boundary.** Do not mock the unit under
@@ -356,6 +360,13 @@ The main `slopp` skill has the mechanics; these are the shapes worth writing.
   the objection with `flag_test {ns name reason}` and tell the human in your
   reply. A test you created this episode stays yours, and an ask that names the
   test lifts the guard.
+
+- **A test a human endorsed is the readable spec.** One behaviour per test,
+  named as a sentence, small enough for the person who asked to read and say
+  yes to (`^{:endorsed "who: what it pins"}`). **Enforced:** no agent episode
+  edits an endorsed test or grants the marker; an ask naming the test does.
+  Write it before the code, never after the fact, and keep it to the
+  behaviours the asker cares about.
 
 ## Checkable vs. judgment — a quick map
 
@@ -390,6 +401,8 @@ cover, so drifting either way turns the suite red.
 | `?` / `*earmuffs*` predicate / dynamic-var naming | Judgment (no gate yet) |
 | Failing test seen red before green | **Advisory** — `done` flags `assertions-never-red` |
 | A test grading your change is not yours to edit | **Yes** — the write is refused; `flag_test` records the objection |
+| Tests fail when the code is wrong | **Advisory** — `done` mutation-tests changed functions (`:mutants-survived`, about 10s budget; `verify {op mutate}` for what it did not reach) |
+| An endorsed test is the human's | **Yes** — agent edits and self-endorsement are refused unless the ask names the test |
 | Pure boundary fn has generated inputs | Judgment (no gate yet) |
 | Tests assert behaviour, not the fixture | Judgment |
 
