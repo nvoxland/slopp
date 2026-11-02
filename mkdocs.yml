@@ -60,6 +60,7 @@ nav:
       - Verification: guide/verification.md
       - Done points and commit points: guide/done-and-commit-points.md
       - History and provenance: guide/history.md
+      - Browsing a store: guide/views.md
       - Modules and purity tiers: guide/modules-and-tiers.md
       - Branches and merging: guide/branches.md
       - Working with git: guide/git.md

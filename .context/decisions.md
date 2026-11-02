@@ -40,6 +40,31 @@ the change here (same commit).
   `read-string`; extended with the resolvers 2026-07-16 and the metadata
   mutators `alter-meta!`/`reset-meta!` 2026-07-18 — both amendments below).
   Keep data dynamism; constrain metaprogramming dynamism.
+- **D3.2 (user-directed, 2026-11-02) — the denylist has TWO criteria, and
+  security is the second.** A symbol is denylisted when it *defeats analysis*
+  (the original D3 reason) OR when it *makes the unsafe thing the short
+  thing* — the PHP lesson: a language's vulnerability profile follows its
+  defaults, not its authors, and models reproduce the shortest path (insecure
+  of two available methods chosen ~45% of the time; insecure-per-task rates
+  flat across model generations). Removal costs nothing in corpus terms;
+  every refusal NAMES THE REPLACEMENT, because CWE-specific feedback is the
+  one feedback shape measured to work (15%→1.1%) and generic "write secure
+  code" prompting measured null. The security holes, all open on 2026-11-02
+  (checked against the code): `#=` read-eval — `'#=(…)` and `#inst #=(…)`
+  pass `dialect-check` because its walk skips quoted forms and tagged
+  literals, and no loader binds `*read-eval*` false (kernel
+  `load-store!`, the image's nREPL load, and the server's `read-string` of
+  image-printed values); `clojure.java.shell/sh`, `Runtime/exec`,
+  `ProcessBuilder`, `ObjectInputStream` — `banned-sym?` matches only bare or
+  `clojure.core` names, so these are caught only by the tier gate, which never
+  fires in an undeclared (`:effects`) module, and `ObjectInputStream` nowhere.
+  Fix shape: `:eval` reader NODES refused structurally (inside quote and
+  tagged literals too); `*read-eval*` false in every loader (a kernel change,
+  so a jar rebuild); a `banned-ns` map and class-name set beside `banned-syms`
+  (the shape `pure-eval-refusal` already has for `query_store`). String-built
+  SQL is a done-time `:error` rule on the `direct-http` template, since it
+  needs two forms of context. D3 stays undialable; the rule catalog gets a
+  `:dialect` row that says so.
 - **D3.1 (user, 2026-08-06) — the reader-conditional ban STANDS everywhere,
   and the framework pays the cost that ban creates.** Revisited explicitly
   rather than silently, on slopp-ui's ask: a `:cljc` namespace targets two
@@ -670,6 +695,16 @@ is the FULL checkable menu; the sequenced roadmap is
   data deficit that pulls models toward imperative, non-idiomatic Clojure (Nubank
   MultiPL-E, Clojure/conj 2024) — is exactly what idiom-enforcing gates +
   REPL-first skills exist to counter.
+- **Amended 2026-11-02 — subtraction is free, addition is not.** Removing a
+  form costs the model nothing: it never needs to learn a replacement for a
+  thing that is refused. ADDING vocabulary (a macro, a niche wrapper, a new
+  marker) carries a measured penalty — niche frameworks produce worse model
+  output than popular ones, and grammar rules given in context barely help
+  where examples do. So a prune passes the three-question template alone; an
+  addition must also be the ONLY and the SHORTEST way to do its thing, prefer
+  core functions and plain data over new syntax, and be taught by an example
+  in the refusal or the skill. (Clojure itself: Nubank's MultiPL-E run was
+  internal; Clojure is otherwise absent from public benchmarks.)
 - **Agents are cheap where humans resent ceremony.** A carrier/annotation is the
   same keystroke count for a generator; only humans feel the tax — so the
   cost/benefit of "extra structure that aids analysis" flips relative to a
@@ -7815,3 +7850,105 @@ loaded and the store dir (`slopp.webdev.live/record-host!`). Best-effort: a
 record that fails to land leaves the image "not measured", never a broken
 app. The pushing code runs in the RUNNER, whose code is the jar, so this
 reaches a running `slopp dev` only after a jar rebuild and a runner restart.
+
+## D-test-immutability (2026-11-02, user-directed) — a test the episode is making pass is not the episode's to edit
+
+**Decision.** A write that edits a deftest which COVERS a form changed in the
+current episode, by the agent that changed it, is refused, naming the
+sanctioned exit: `flag_test {form reason}`, which records a delta with no
+source change that `review_scan` and the change screen surface for a human.
+The human decides; the agent does not weaken the assertion.
+
+**Why.** Agents game visible tests 46–76% of the time on inspectable impossible
+tasks; Claude-family models mostly by editing the test, which read-only tests
+stop. Prompting ("do not cheat") measured no effect; an explicit abort option
+cut cheating 54%→9% and an escalation channel 23.6%→5.3%. A mechanism with an
+exit, not an instruction.
+
+**Placement.** Registry gates (`slopp.edit.gates/per-form-write-gates`) see only
+a store value — no session, no trace map — so this is the second HARDWIRED
+write-path check, beside `isolation-refusal`, in `slopp.ops` where
+`engine/affected-tests` and the session's observed `:test-map` are in scope.
+Observed coverage, not static reach: the attack is editing the test that is
+red right now. A NEW deftest is never refused (red-first stays native), and a
+test with no observed coverage of an episode form is not touched.
+
+## D-endorsed-examples (2026-11-02, user-directed) — a human-endorsed test is the readable spec, and no agent episode edits it
+
+**Decision.** `^{:endorsed "who/why"}` on a deftest (one `marker-registry`
+entry, `:kind :declaration`) records that a human read it and said yes. An
+endorsed test refuses edits from every agent episode (the D-test-immutability
+check, widened to "endorsed OR covering"); it is changed by a human, or by an
+agent whose turn intent explicitly names the test. Views show endorsed vs
+agent-written coverage per form.
+
+**Why.** Between a natural-language ask and the code, executable examples are
+the one layer that is both exact and readable by the person who asked; small
+studies show humans judge generated code better through examples (TiCoder,
+ClarifyGPT). Cucumber's failure modes — written after the fact, nobody reads
+them, they bloat — are why this is a marker on ordinary tests, one behaviour
+each, never a second language.
+
+## D-review-marker (2026-11-02, user-directed) — "reviewed" and "claims" are stored marker ops, because nothing they attach to is mutable
+
+**Decision.** Two new marker ops registered in `slopp.store.fields/markers`:
+`:review` (a human opened a commit point's change screen and endorsed or
+flagged it; carries `:target` commit id, `:verdict`, `:note`) and `:claim`
+(an episode holds these form ids; carries `:forms`, `:agent`, released by the
+episode's done). Both travel through merges (`travelling-markers`).
+
+**Why.** Commit points are immutable (`store/record-commit`, `extra` only at
+mint) and episodes are inferred, never stored — so a later fact about either
+is a new delta, not a field. An unknown op makes `merge-logs` refuse, so both
+must be registered. The review record answers the comprehension finding
+(delegation without a verification act: 39% comprehension; generate then
+comprehend: 86%) as a record with visible absence, not a gate. The claim
+answers the parallel-work finding: decision conflict, not merge conflict, is
+what breaks parallel agents (16 agents overwriting one fix).
+
+## D-parse-edge (2026-11-02, user-directed) — external input arrives unverified, and only a parser may read it
+
+**Decision.** A port returns external input under the `:unverified/*` key
+namespace (`:unverified/body`, `:unverified/params`), never under its domain
+keys. A form that reads or destructures an `:unverified/*` key must carry
+`^{:parser "what it yields"}` (one `marker-registry` entry); a form in a
+`:pure` or `:reads` module may not read one at all. At runtime the value
+under an `:unverified/*` key throws on ordinary map access, so a sink that
+skips the parser fails on first use. The port's contract suite asserts both
+the fake and the real adapter emit `:unverified/*`. Opt-in per store first,
+on the purity-tier pattern (gates new writes only; no retro-break).
+
+**Why.** The parse edge must exist by default (an RLS-off default left 10% of
+1,645 generated apps exposed); "validate at the boundary" as advice is the
+thing models do not follow. Precedents read: `galdre/recognitum-prototype`
+(authorization concerns as data on the proven value) and
+`escherize/parsed-types` (an unparsed value is unusable by construction;
+checks run in written order pure → fetch → external and stop at the first
+failure; every error carries the fix as code). Borrowed: unusable-by-
+construction, ordered checks, fix-carrying errors, claims as data on the
+parsed value (D-parse-edge's follow-on, verified at done like a `:=>`
+schema). NOT borrowed: hidden proofs on a `deftype` (values stay transparent —
+D2's program-to-data), and an inferred check graph (implicit machinery a
+slice cannot see).
+
+**Why keys, not taint.** slopp's analysis is vars and calls
+(`index.derive`); there is no value-flow tracking. A key namespace is visible
+statically in every form that reads it (the attribute inventory already
+enumerates keyword literals), so the rule is syntactic, cheap, and honest
+about what it sees.
+
+## D-behaviour-axis amended (2026-11-02) — trust before overview
+
+Two rules join D-behaviour-axis. **Every view declares what it did not
+consult**: the change screen carries an absence block (changed forms with no
+observed test, `:system` deltas, forms the ask names that did not change),
+as the sequence lens already marks its cuts — the defence against confident
+views over incomplete data. **Risk is provenance as well as structure**:
+`review_scan` gains never-seen-red, intent/delta mismatch, escape markers,
+and endorsed-vs-agent-written coverage. And overview investment stops: the
+module map and treemap stay as overlays with table twins, but the reviewer
+evidence (architecture overview rated lowest; reviewers read every line
+anyway because agent confidence is uniform) says the next unit of effort on an
+overview is the lowest-value unit available. The labeled notation is
+superseded by these views (moved to the done record).
+

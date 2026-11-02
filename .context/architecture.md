@@ -2,6 +2,13 @@
 
 ## The stance (don't violate without a recorded decision)
 
+- **slopp is a verification record with a language attached** (2026-11-02).
+  What let humans stop reading assembly was not a deterministic translator but
+  one verified from outside and reproducible; an agent author has neither, so
+  the guarantee moves from the author to a per-change oracle the author cannot
+  edit. Every claim the system makes — green, intent, a view, a refusal, a
+  history entry — carries the evidence that would falsify it. Mechanisms, not
+  advice: where the research measured value it was always the former.
 - **The top-level form is THE unit** — of editing, CRDT/storage, hot-reload,
   verification, and provenance. One atom all the way down. Anything that
   splits those units apart (file-based edits, whole-project reloads) works

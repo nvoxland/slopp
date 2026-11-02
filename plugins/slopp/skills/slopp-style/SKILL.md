@@ -309,10 +309,13 @@ can't see.
 
 ## 8. Work REPL-first — and resist the imperative default
 
-Models (measured: Nubank's MultiPL-E, Clojure/conj 2024) drift toward imperative,
-non-idiomatic Clojure — a `doseq` + `atom` where a `map`/`reduce`/`reduce-kv` or a
-threading pipeline (`->`/`->>`) fits, or piling on complexity when a test goes red.
-Counter it deliberately:
+Nubank ran MultiPL-E internally (Clojure/conj 2024) and found Clojure behind
+Python and JavaScript; Clojure is otherwise unmeasured in public benchmarks. In
+functional languages generally, frontier models write imperative patterns most of
+the time (FPBench-style results: 80-94% of Haskell/OCaml/Scala output) — so the
+idiom has to be enforced, not expected. The usual miss is a `doseq` + `atom`
+where a `map`/`reduce`/`reduce-kv` or a threading pipeline (`->`/`->>`) fits, or
+piling on complexity when a test goes red. Counter it deliberately:
 
 - Reach for `reduce`/`map`/`into`/`transduce` and threading pipelines over
   loop-and-mutate. One linear pipeline is easy to read, edit one step at a time,
@@ -322,6 +325,35 @@ Counter it deliberately:
   oracle is ground truth — it's the single most-cited reason Clojure suits agents;
   use it instead of reasoning about what code "should" do.
 - When a test goes red, simplify toward the data transform — don't add machinery.
+
+## 9. Tests that constrain the code
+
+A test is the one place the code is held to something you did not just write.
+The main `slopp` skill has the mechanics; these are the shapes worth writing.
+
+- **Write the failing reproduction test first.** Of the test shapes measured on
+  agents, it has the strongest effect on correctness; a regression test written
+  after the fix adds little. Mechanics: `change {tests ...}` and `:red-first`.
+  **Advisory today:** `done` flags `assertions-never-red` when a test was never
+  seen failing.
+- **One property and one example per behaviour.** They catch different bugs (a
+  published study: about 81% detection combined, about 69% each alone). For a
+  `:pure` boundary fn with a `:=>` malli schema, the generative check at `done`
+  is a free property — write the schema (§4). **Enforced today:** that check.
+  Whether a pure fn has generated inputs is judgment; no gate yet.
+- **Literal-only inputs let an implementation special-case the test.** Generated
+  inputs are the one measured defence. Judgment.
+- **Assert behaviour through the public boundary.** Do not mock the unit under
+  test. Do not copy the actual value into the expected one — that test passes
+  for any implementation. Judgment.
+- **Name a test as a behaviour sentence** (`rejects-an-expired-token`). The
+  review screens render names as sentences, so the name is a claim a reader sees.
+- **Print and eval output you ran while working is not a test.** Only a
+  committed assertion is.
+- **A test you believe is wrong is not yours to weaken.** Do not edit the
+  assertion to make it pass. Tell the human, in your reply, which test and why.
+  (A sanctioned "flag this test" path is planned; until it exists, say it in your
+  reply.)
 
 ## Checkable vs. judgment — a quick map
 
@@ -354,6 +386,9 @@ cover, so drifting either way turns the suite red.
 | Return data over a bare `throw` at a boundary | **Advisory** — `done` flags a module-external fn throwing a freshly-constructed non-`ex-info` exception (`:bare-throw`) |
 | No ambient global mutable state | **Advisory** — `done` flags a global `(def _ (atom/ref/agent …))` (`:ambient-state`) |
 | `?` / `*earmuffs*` predicate / dynamic-var naming | Judgment (no gate yet) |
+| Failing test seen red before green | **Advisory** — `done` flags `assertions-never-red` |
+| Pure boundary fn has generated inputs | Judgment (no gate yet) |
+| Tests assert behaviour, not the fixture | Judgment |
 
 **Every "`done` flags" row above is EPISODE-scoped, and that is a real limit
 rather than an implementation detail.** Such a rule fires over the forms your
