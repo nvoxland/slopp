@@ -389,6 +389,8 @@ cover, so drifting either way turns the suite red.
 | Effectful fn is `!`-named | **Yes** (D6, write warning + `:suggest`) |
 | No macros / eval / dynamic-var action-at-a-distance | **Yes** (dialect gate) |
 | No `#=` read-time eval, anywhere — quoted, tagged, in metadata, even under `^:unsafe` | **Yes** (dialect gate) — the reader runs it before any gate or test sees the value; compute the value in code instead |
+| Shipped code starts a process only in its adapter | **Yes** (write gate `:process-launch`, production only) — `clojure.java.shell`, `ProcessBuilder` and `.exec` belong in ONE form marked `^{:adapter "process — which program, and how a test fakes it"}` that takes its arguments as a vector; never build a shell string (`sh -c` + `str` is command injection) |
+| No Java deserialization in shipped code | **Yes** (write gate `:java-deserialization`, production only) — `ObjectInputStream` runs code chosen by whoever wrote the bytes; read data with `clojure.edn/read-string` or a JSON reader. No marker discharges it; the per-store rules dial is the only escape |
 | Cross-module edge declared; no cycles; cohesion vs export | **Yes** (module gate at write) — plus `done`'s `:module-governance` and `full_check`'s `:module-violations`, both error-grade, because a RELOCATION rewrites callers without writing them through the gate |
 | Public surface documented | **Yes** (write advisory) |
 | Dead public surface removed | **Yes** (`done`/`commit_point` gate) |

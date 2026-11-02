@@ -29,6 +29,27 @@ contract. Mutating it at runtime would leave the store showing one contract
 while the live var carries another. `with-meta` and `vary-meta` return new
 values and stay legal; the cut is exactly the two in-place mutators.
 
+**`#=`, read-time eval.** The reader runs `#=(...)` while the source is being
+*read*, before any gate, test or reviewer sees the value. It is refused in
+every position -- bare, quoted, inside a tagged literal like `#inst`, in
+metadata -- and even in a form marked `^:unsafe`, because nobody can take on an
+obligation that has already run. Compute the value in code instead.
+
+**Starting a process, and Java deserialization, in shipped code.** These two
+are write gates rather than denylist names, because they need the namespace's
+aliases to see that `sh/sh` is `clojure.java.shell/sh`. Tests are exempt:
+they do not ship.
+
+- `clojure.java.shell`, `ProcessBuilder` and `Runtime`'s `.exec` belong in ONE
+  form marked `^{:adapter "process -- which program, and how a test fakes
+  it"}`, which takes the program and its arguments as a vector. Everything else
+  calls that form, or takes it as a parameter so a test can pass a fake. Never
+  build one shell string: `(sh "sh" "-c" (str ...))` is command injection.
+- `ObjectInputStream` runs code chosen by whoever wrote the bytes. Read data
+  as data with `clojure.edn/read-string` or a JSON reader. No marker discharges
+  this one; a store that truly must accept it turns the rule off in its rules
+  config, where every reader can see the choice.
+
 **Hand-written `(declare ...)`.** The pipeline owns form ordering: it moves
 definitions above their callers, and for genuine mutual recursion inserts a
 marked `^{:auto-declare "why"} (declare ...)` itself. A hand-written one is
@@ -65,6 +86,7 @@ source at all.
 | `^:unused-ok` | Deliberately uncalled public surface. Fails if the var *is* called. |
 | `^:reads` | This form only reads through an opaque dependency, so it needs no `!`. |
 | `^:unsafe` | Opt out of the dialect gate. |
+| `^{:adapter "port -- why"}` | This form IS the adapter for a port (`http`, `process`): the one place allowed to reach it directly. The first word names the port. |
 | `^:external` | On a test: it exercises IO, so it runs in its own JVM. |
 | `^:integration` | On a test: runs in-image with the rest. |
 | `^{:malli/schema ...}` | The form's boundary contract. Generatively checked at done. |

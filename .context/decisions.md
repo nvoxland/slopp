@@ -82,6 +82,26 @@ the change here (same commit).
   prints as `#=(…)` used to run in the SERVER), and every image launches with
   `-Dclojure.read.eval=false`, so a runtime `read-string` in an `^:unsafe`
   form gets the safe default.
+
+  **Process launch and Java deserialization, built 2026-11-02 (user's call
+  on scope).** Two per-form write gates in `slopp.edit.security`, also run
+  by the import path as `security-scan`: `:process-launch`
+  (`clojure.java.shell`, `ProcessBuilder`, `.exec`) and
+  `:java-deserialization` (`ObjectInputStream`). Measured first: 74 forms
+  used these names; 6 were production launches (git, the Clojure CLI), the
+  rest tests (mostly `rm -rf` cleanup). The user chose PRODUCTION ONLY —
+  tests do not ship, and D3.2's argument is about shipped defaults — with the
+  existing `:adapter` marker as the escape: `^{:adapter "process — …"}`, the
+  first word naming the port exactly as the HTTP rule reads it. So the
+  escape is precise, not the blanket `^:unsafe`, and it asks the right
+  question (which program; how does a test fake it). Deserialization has no
+  marker escape — no adapter makes it safe — only the per-store dial. This
+  does not break "a gate may only demand a port that EXISTS": the demand is
+  that the author make one of THEIR forms the adapter, which is always
+  satisfiable. Not matched as names in `banned-syms`, because a write gate
+  sees the namespace's aliases (`sh/sh`) and the dialect check does not.
+  The `:dialect` catalog row is still open (the catalog test requires every
+  row to come from a registry, and D3 is not in one).
 - **D3.1 (user, 2026-08-06) — the reader-conditional ban STANDS everywhere,
   and the framework pays the cost that ban creates.** Revisited explicitly
   rather than silently, on slopp-ui's ask: a `:cljc` namespace targets two

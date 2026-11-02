@@ -65,6 +65,14 @@ The check —
   file it loads, so no load-time switch can help (D3.2). Read-eval is off
   only where slopp reads DATA — the server reading image values, and every
   image JVM's root (`-Dclojure.read.eval=false`).
+- **Process launch and Java deserialization — write GATES, not denylist
+  entries** (`slopp.edit.security`, 2026-11-02). They need the namespace's
+  aliases to see `sh/sh` as `clojure.java.shell/sh`, which the per-form
+  dialect check does not have, so they are registered in
+  `edit.gates/per-form-write-gates` (`:rule/applies-to :production`) and the
+  import path runs `security-scan` beside `dialect-scan`. Escape for a launch:
+  `^{:adapter "process — …"}`; none for deserialization but the dial. See
+  D3.2 for the measurement and the scope decision.
 - **D7 — no hand-written `(declare …)`** (edit path only, `parse-form`): the
   pipeline OWNS form ordering and declares (auto-avoid-declare). A same-ns
   forward ref is resolved by reordering definitions above their callers, or —
