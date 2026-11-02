@@ -41,6 +41,6 @@ The shape of it:
 
 The design centre is a third-party application, not slopp's own endpoints.
 slopp's MCP transport and its per-project API are built on the same machinery,
-and so is the reviewer UI — which is a third-party application already: its own
-repo, its own store, and no way into slopp's. That is the dogfood, not the
-target.
+and so are slopp's own pages — the browser app every slopp server serves at
+`/p/<slug>`, an ordinary app over the same endpoints, contracts and generated
+client this guide describes. That is the dogfood, not the target.

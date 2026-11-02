@@ -33,8 +33,14 @@ conclusions, so the review reasons about findings, not source dumps.
    `:untested` (unreachable from any test in the call graph), `:off-platform`
    (`:cljs` — the JVM oracle cannot load it, so nothing could cover it), `:unused`
    (dead public surface), `:high-blast` (many callers), `:large`, `:lint`,
-   `:undocumented` (public), `:effectful` (`!`). Clean forms drop out; `:top` rows
-   carry `:form/:risk/:flags/:callers/:covered/:evidence`. `{ns "x.y"}` scopes it.
+   `:undocumented` (public), `:effectful` (`!`), `:never-red` (an existing form
+   changed since the last commit point, that tests run, which no test has ever
+   failed beside — the tests may not constrain it). Clean forms drop out; `:top`
+   rows carry `:form/:risk/:flags/:callers/:covered/:evidence`, plus `:reds`
+   (how many distinct tests have failed beside the form). `{ns "x.y"}` scopes it.
+   `:never-red` is a proxy: whether the tests would catch a wrong change is
+   mutation's question — `done` reports `:mutants-survived`, and
+   `verify {op mutate}` runs the pass over what earlier dones did not reach.
    Start at the top of the risk ranking, not the top of a file.
 
    **Read `:evidence` on the row, not just the flags.** A quiet row is not one
@@ -158,3 +164,9 @@ rows the gates can't see:
   findings rather than pasting sources: your report says what you concluded,
   the page lets them check it. The pages read the slopp server's live projects, so
   warranty counts are the real ones.
+- **For a finding about behaviour or structure, link the screen that shows it.**
+  A change to what a form does: `<pages>/store/form/<id>/sequence` (its calls,
+  in written order, a lane per module). A layering or dependency finding:
+  `<pages>/store/conformance` (every module edge against its declaration). A
+  question about what a module is for: its page, which lists the tests that
+  reach it as sentences, and its `/story` lens, the asks that shaped it.

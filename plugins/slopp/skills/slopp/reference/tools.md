@@ -24,13 +24,13 @@ own tools and take no `op`.
 | `depends` | query_flow (the call path between two forms or the reach around one, bodies on the way), query_depends, query_call, query_macroexpand |
 | `history` | query_history, query_changes, query_commits, query_git, query_branches, report, file_history |
 | `eval` | query_eval, query_observe, query_store |
-| `edit` | change, edit_comment, edit_revert, undo, episode_revert — the former write ops (edit_group, edit_subform, edit_delete_form, edit_add_form, edit_replace_form, intent) and query_batch are de-advertised dispatchable aliases: `change {impl […]}` is the group write, `explore {ops […]}` is the batch read |
+| `edit` | change, edit_comment, flag_test (the objection to a test you may not edit), edit_revert, undo, episode_revert — the former write ops (edit_group, edit_subform, edit_delete_form, edit_add_form, edit_replace_form, intent) and query_batch are de-advertised dispatchable aliases: `change {impl […]}` is the group write, `explore {ops […]}` is the batch read |
 | `refactor` | rename_sweep, edit_rename, edit_extract, edit_requalify, change_signature, edit_move_forms, module_extract, ns_rename, ns_realias, cleanup |
 | `declare` | ns_create, ns_delete, ns_add_require, ns_remove_require, module_dep, module_purity, module_role, module_platform, deps_add, deps_remove, deps_list, deps_pure, js_dep |
-| `verify` | test_run, full_check, restart, review_scan, draft_test, screen |
-| `build` | build, compile_client, generate_client |
+| `verify` | test_run, full_check, review_scan, draft_test, screen, mutate — every op reads the code and records a verdict, so the family carries the MCP readOnlyHint and a plan-mode client can run it unprompted |
+| `build` | build, compile_client, generate_client, restart (a rebuilt image is a build, not a read) |
 | `store` | store_health, store_doctor, store_compact, config, config_file, query_capabilities, query_rules, query_vocabulary, query_surface, query_rule_telemetry, query_cost |
-| `slopp` | git_push, git_clone, git_pull, git_conflicts, git_resolve, import_dir, branch_create, branch_switch, branch_merge, branch_delete, thread_list, thread_drop, merge_from, file_put, file_get, file_list, file_remove, turn_begin, turn_end, help |
+| `slopp` | git_push, git_clone, git_pull, git_conflicts, git_resolve, import_dir, branch_create, branch_switch, branch_merge, branch_delete, thread_list, thread_drop, thread_open, merge_from, file_put, file_get, file_list, file_remove, turn_begin, turn_end, help |
 | `done` | — |
 | `commit_point` | — |
 

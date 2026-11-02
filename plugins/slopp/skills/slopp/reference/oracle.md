@@ -47,7 +47,33 @@ answer questions; a page lets someone LOOK. The pages are the slopp server's own
 holds: a commit-point timeline, a per-commit-point change review (module →
 namespace → form, with each form's recorded ask, its line diff and its blast
 radius), form permalinks by ID with callers above and callees inlined below,
-and the namespace index. The root, `http://127.0.0.1:7357/`, is the picker.
+and the Code section. The root, `http://127.0.0.1:7357/`, is the picker.
+
+The Code section is built for understanding the code WITHOUT reading it, so
+point a person at the screen that answers their question rather than at a
+namespace:
+
+- **What can it do?** `<pages>/store` — the module map, and under it the
+  WAYS IN: every door the store declares (the process entry, HTTP routes,
+  commands, browser screens, `^:entry-point` forms), each linking to…
+- **What happens when X runs?** `<pages>/store/form/<id>/sequence` — the
+  calls in the order they are WRITTEN, depth first, a lane per module and an
+  indented list of steps. Static, and the page says so: a branch not taken
+  reads the same as one taken. `<pages>/store/flow?from=ns/a&to=ns/b` draws
+  the call path between any two forms the same way.
+- **What data does it pass around?** `<pages>/store/data` — the keys, ranked
+  by how far each travels; a key opens the forms that name it and the ones
+  that destructure it.
+- **Is it built as declared?** `<pages>/store/conformance` — every module
+  edge classed as declared and used, used but never declared, declared and
+  unused, or used only by tests, on the same map.
+- **Where is the weight, and what is it like?** `<pages>/store?overlay=…`
+  tints the map by size, effects, unwarranted, churn or risk, and
+  `<pages>/store/treemap` shows the code by size, tinted the same way.
+- **What does it promise, and why is it like this?** A namespace's or
+  module's page lists the tests that reach it as the sentences they are
+  named as; its `/story` lens lists the commit points that touched it with
+  the asks that shaped each.
 
 **The brief's other address is `:api`** — this project's own read API on
 the slopp server, `http://127.0.0.1:7357/api/projects/<slug>`. It serves

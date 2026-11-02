@@ -7855,7 +7855,7 @@ reaches a running `slopp dev` only after a jar rebuild and a runner restart.
 
 **Decision.** A write that edits a deftest which COVERS a form changed in the
 current episode, by the agent that changed it, is refused, naming the
-sanctioned exit: `flag_test {form reason}`, which records a delta with no
+sanctioned exit: `flag_test {ns name reason}`, which records a delta with no
 source change that `review_scan` and the change screen surface for a human.
 The human decides; the agent does not weaken the assertion.
 
