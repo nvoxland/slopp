@@ -2219,7 +2219,7 @@
         head  (when (seq? sexpr) (first sexpr))]
     (if (or (nil? sexpr) (= 'ns head))
       {:node node :requires [] :rewrites []}
-      (let [have     (edit/require-aliases store ns-sym)
+      (let [have     (store/require-aliases store ns-sym)
             alias-of (reduce (fn [m [a lib]] (if (= a lib) m (assoc m lib a))) {} have)
             full?    (into #{} (for [[a lib] have :when (and (= a lib) (nil? (alias-of lib)))] lib))
             taken    (into #{} (for [[a lib] have :when (not= a lib)] a))

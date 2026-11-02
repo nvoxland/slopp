@@ -16,7 +16,7 @@
   (:require [clojure.java.shell :as sh]
             [clojure.string :as str] [slopp.store.db :as db] [clojure.java.io :as io] [rewrite-clj.node :as n] [slopp.ops :as ops] [slopp.project.deps :as project.deps] [slopp.ops.done :as done] [slopp.read.history :as history] [slopp.read.modules :as read.modules] [slopp.rules :as rules] [slopp.ops.engine :as engine] [slopp.ops.testrun :as testrun] [slopp.build :as build] [slopp.edit :as edit] [slopp.edit.modules :as edit.modules] [slopp.index :as index] [slopp.store.render :as store.render] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.index.analyze :as analyze] [slopp.project.capabilities :as capabilities] [slopp.read.orient :as orient] [slopp.index.crossings :as crossings] [slopp.store.artifacts :as artifacts] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.edit.tiers :as tiers] [slopp.kernel.boot :as boot] [slopp.ops.branch :as branch] [slopp.edit.cli :as edit.cli] [slopp.rules.webapp :as rules.webapp] [slopp.store.fields :as fields]))
 
-^:reads (defn ^:export git-config-value
+^:reads (defn ^:export ^{:adapter "process — git config, read the way git itself resolves it"} git-config-value
   "`git config <k>` as git would resolve it in `dir` (local then global), or
   nil. The \"<git>\" fallback of the G5 author config."
   [dir k]

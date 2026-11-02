@@ -124,7 +124,7 @@
          :tok-out (quot (reduce + (map :out (conj sizes final))) 4)})
       (finally (ops/close! session)))))
 
-(defn- git-sha []
+(defn- ^{:adapter "process — git rev-parse, to label a benchmark row"} git-sha []
   (let [r (sh/sh "git" "rev-parse" "--short" "HEAD")]
     (if (zero? (:exit r))
       (str/trim (:out r))

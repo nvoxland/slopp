@@ -710,7 +710,8 @@
              (add-libs-code deps-map))]
       (when (:err r) r))))
 
-(defn ^:export ^{:live-handle true
+(defn ^:export ^{:adapter "process — the image JVM (clojure + nREPL); a test passes its own ::cmd to launch something else"
+        :live-handle true
         :malli/schema
         [:=> {:throws [[:map [:pid {:optional true} [:maybe :int]]]]}
               [:cat [:? [:map

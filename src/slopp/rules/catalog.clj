@@ -38,6 +38,13 @@
    {:rule :cli-direct-stdio :grain :form
     :escape "write to the INJECTED stream, (.write (:cli/out ctx) …), read from (:cli/in ctx), and RETURN an exit status instead of calling System/exit"
     :teach "a command body reaches for an AMBIENT stream or exits. A command writes its answer to the stream its context carries: *out* is a different stream that no test captures, no driver redirects and no fake stands in for, so the output escapes — and System/exit ends the process from inside business logic, so the launcher's own exit, a driver and a test never run. NOT a purity claim — printing is classified separately and a non-command may print freely (inert until cli.enabled)"}
+   {:rule :process-launch :grain :form
+    :escape "put the launch in ONE form marked ^{:adapter \"process — which program, and how a test fakes it\"} that takes its arguments as a VECTOR, and reach it through a parameter a test can replace"
+    :teach "production code starts a process (clojure.java.shell, ProcessBuilder, Runtime .exec) outside a declared process adapter. A process is a port like the network: the command line belongs in one reviewed place built from data, never a shell string, which is command injection. Tests are exempt; they do not ship. The adapter is the author's own marked form, so the demand needs no port slopp ships"}
+   {:rule :java-deserialization :grain :form
+    :escape "read data as data — clojure.edn/read-string or a JSON reader; if a store truly must accept Java serialization, dial :java-deserialization off in the rules config, where the choice is visible"
+    :teach "production code builds an ObjectInputStream. Java deserialization runs code chosen by whoever wrote the bytes (CWE-502), so no marker discharges it. Tests are exempt; they do not ship"}
+   
    {:rule :tier-refusal :grain :form
     :escape "module_purity {module tier :internal/:external}, or move the effect into an :external namespace (:internal may mutate in-process, e.g. a memo through slopp.cache)"
     :teach "a form's effect or non-determinism exceeds its module's declared purity tier"}

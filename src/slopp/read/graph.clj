@@ -284,11 +284,11 @@
 
           (contains? (:namespaces st) (symbol on))
           (let [target   (symbol on)
-                requires (vec (sort (distinct (vals (edit/require-aliases st target)))))]
+                requires (vec (sort (distinct (vals (store/require-aliases st target)))))]
             (if (= :dependencies direction)
               {:kind :namespace :on target :direction :dependencies
                :requires requires}
-              (let [req-set     (fn [nsx] (set (vals (edit/require-aliases st nsx))))
+              (let [req-set     (fn [nsx] (set (vals (store/require-aliases st nsx))))
                     required-by (vec (sort (filter #(and (not= % target)
                                                          (contains? (req-set %) target))
                                                    (keys (:namespaces st)))))

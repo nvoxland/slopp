@@ -256,27 +256,6 @@
     (catch Exception e
       {:error (str "remove-require failed: " (ex-message e))})))
 
-(defn require-aliases
-  "{alias full-ns} (plus identity entries for the full names) from `ns-sym`'s
-  ns-form :require clauses — the resolution context for gates that need to
-  know WHAT a form calls (isolation-refusal). :refer'd bare names are not
-  resolved — alias-style requires are the store convention."
-  [store ns-sym]
-  (let [ns-form (some #(let [s (try (n/sexpr (:node %)) (catch Exception _ nil))]
-                         (when (and (seq? s) (= 'ns (first s))) s))
-                      (store/elements store ns-sym))]
-    (into {}
-          (for [clause (drop 2 (or ns-form ()))
-                :when  (and (seq? clause) (= :require (first clause)))
-                spec   (rest clause)
-                :let   [[lib alias] (cond
-                                      (vector? spec) [(first spec)
-                                                      (second (drop-while #(not= :as %) spec))]
-                                      (symbol? spec) [spec nil])]
-                :when  lib
-                entry  (cond-> [[lib lib]] alias (conj [alias lib]))]
-            entry))))
-
 (defn missing-form-error
   "Q9: a 'no form named X' that TEACHES — names near-miss forms in the ns (or
   points at query_project) so the next call succeeds instead of guessing.
@@ -677,7 +656,7 @@
         ;; kondo emits no usage row for a namespace it cannot resolve — which
         ;; is exactly this case — so read the forms' own qualified symbols
         unreq    (for [ns-sym (distinct ns-syms)
-                       :let [have (set (vals (require-aliases store ns-sym)))
+                       :let [have (set (vals (store/require-aliases store ns-sym)))
                              walk (fn walk [x]
                                     (cond
                                       (and (seq? x) (= 'quote (first x))) []
@@ -1009,7 +988,7 @@
             (reduce (fn [acc [a lib]]
                       (if (= a lib) acc (update-in acc [(str a) lib] (fnil inc 0))))
                     acc
-                    (require-aliases store ns-sym)))
+                    (store/require-aliases store ns-sym)))
           {}
           (keys (:namespaces store))))
 
@@ -1364,8 +1343,8 @@
 
       collision collision
 
-      (isolation-refusal (require-aliases store ns-sym) node)
-      {:error (isolation-refusal (require-aliases store ns-sym) node)}
+      (isolation-refusal (store/require-aliases store ns-sym) node)
+      {:error (isolation-refusal (store/require-aliases store ns-sym) node)}
 
       :else
       (let [old (:node (store/form-named store ns-sym form-name))]

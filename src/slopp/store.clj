@@ -2151,3 +2151,24 @@
                        :test test-qsym :reason reason}
                 agent (assoc :agent agent))]
     [(record-delta store' delta) delta]))
+
+(defn require-aliases
+  "{alias full-ns} (plus identity entries for the full names) from `ns-sym`'s
+  ns-form :require clauses — the resolution context for gates that need to
+  know WHAT a form calls (isolation-refusal). :refer'd bare names are not
+  resolved — alias-style requires are the store convention."
+  [store ns-sym]
+  (let [ns-form (some #(let [s (try (n/sexpr (:node %)) (catch Exception _ nil))]
+                         (when (and (seq? s) (= 'ns (first s))) s))
+                      (elements store ns-sym))]
+    (into {}
+          (for [clause (drop 2 (or ns-form ()))
+                :when  (and (seq? clause) (= :require (first clause)))
+                spec   (rest clause)
+                :let   [[lib alias] (cond
+                                      (vector? spec) [(first spec)
+                                                      (second (drop-while #(not= :as %) spec))]
+                                      (symbol? spec) [spec nil])]
+                :when  lib
+                entry  (cond-> [[lib lib]] alias (conj [alias lib]))]
+            entry))))

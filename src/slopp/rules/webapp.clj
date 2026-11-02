@@ -21,7 +21,7 @@
   severity dial; `slopp.rules.http` is the server-side half, which judges
   routes, links and static mounts rather than pages."
   (:require [slopp.store :as store]
-            [slopp.project.capabilities :as capabilities] [clojure.string :as str] [slopp.edit.http :as edit.http] [slopp.index.analyze :as analyze] [slopp.store.render :as store.render] [slopp.edit :as edit] [slopp.http.router :as router] [slopp.index.refs :as refs]))
+            [slopp.project.capabilities :as capabilities] [clojure.string :as str] [slopp.edit.http :as edit.http] [slopp.index.analyze :as analyze] [slopp.store.render :as store.render] [slopp.http.router :as router] [slopp.index.refs :as refs]))
 
 (defn ^:export page-cljs-reach
   "The `:cljs` namespaces `ns-sym`'s require closure reaches, sorted — empty
@@ -405,7 +405,7 @@
   (vec (sort-by str
                 (distinct
                  (for [nsx  (remove store.render/test-ns? (keys (:namespaces st)))
-                       :let [aliases (edit/require-aliases st nsx)]
+                       :let [aliases (store/require-aliases st nsx)]
                        e    (store/forms st nsx)
                        :let [sx (try (store/form-sexpr (:node e))
                                      (catch Exception _ nil))]

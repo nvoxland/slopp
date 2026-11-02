@@ -19,7 +19,7 @@
   cherry/squint slot in as new methods without re-authoring a single form."
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
-            [slopp.store.render :as store.render] [slopp.build :as build] [slopp.ops.external :as external] [slopp.ops.testrun :as testrun] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.ops.engine :as engine] [clojure.java.io :as io] [slopp.edit :as edit] [slopp.store.artifacts :as artifacts] [slopp.http.client :as http.client] [slopp.edit.http :as edit.http] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http]))
+            [slopp.store.render :as store.render] [slopp.build :as build] [slopp.ops.external :as external] [slopp.ops.testrun :as testrun] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.ops.engine :as engine] [clojure.java.io :as io] [slopp.store.artifacts :as artifacts] [slopp.http.client :as http.client] [slopp.edit.http :as edit.http] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http]))
 
 (def result-marker
   "The line prefix the cljs compile runner prints its EDN summary behind, so the
@@ -146,7 +146,7 @@
   [store endpoint-ns raw]
   (cond
     (nil? raw)     {:kind :none}
-    (symbol? raw)  (let [aliases (edit/require-aliases store endpoint-ns)
+    (symbol? raw)  (let [aliases (store/require-aliases store endpoint-ns)
                          sns     (some-> (namespace raw) symbol)
                          full-ns (if sns (get aliases sns sns) endpoint-ns)
                          nm      (symbol (clojure.core/name raw))

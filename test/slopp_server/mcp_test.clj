@@ -5090,3 +5090,19 @@
           (is (re-find #":owed 0" (call! sess "mutate" {})))))
       (finally (ops/close! sess)
                (sh/sh "rm" "-rf" dir)))))
+
+(deftest ^:external a-process-launch-is-refused-on-both-doors-until-it-is-the-adapter
+  ;; D3.2's security half, end to end: the per-form gate on the edit door and
+  ;; the namespace scan on the import door, with the same escape on both.
+  (let [sess (external/open!)]
+    (try
+      (testing "the import door refuses a namespace that launches a process"
+        (let [r (call! sess "ns_create" {:ns "pl.core" :source "(ns pl.core (:require [clojure.java.shell :as sh]))\n(defn f \"F.\" [] (sh/sh \"ls\"))\n"})]
+          (is (re-find #"pl.core/f starts a process" r) r)))
+      (testing "the edit door refuses the same call, and the adapter marker lets it land"
+        (call! sess "ns_create" {:ns "pl.core" :source "(ns pl.core (:require [clojure.java.shell :as sh]))\n(defn f \"F.\" [] 1)\n"})
+        (let [r (call! sess "change" {:prompt "f lists" :impl [{:ns "pl.core" :name "f" :source "(defn f \"F.\" [] (sh/sh \"ls\"))"}]})]
+          (is (re-find #"starts a process" r) r))
+        (let [r (call! sess "change" {:prompt "f is the ls adapter" :impl [{:ns "pl.core" :name "f" :source "(defn ^{:adapter \"process — ls; a test passes a fake\"} f \"F.\" [] (sh/sh \"ls\"))"}]})]
+          (is (re-find #":ok true" r) r)))
+      (finally (ops/close! sess)))))

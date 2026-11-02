@@ -20,7 +20,7 @@
             [slopp.edit :as edit]
             [slopp.edit.refactor :as refactor]
             [slopp.index.normalize :as normalize]
-            [slopp.store.db :as db] [rewrite-clj.parser :as p] [slopp.read.history :as history] [slopp.project.deps :as project.deps] [slopp.ops.engine :as engine] [slopp.read.modules :as read.modules] [slopp.read.orient :as orient] [slopp.edit.modules :as edit.modules] [slopp.rules :as rules] [slopp.ops.done :as done] [slopp.rules.shape :as shape] [slopp.index.analyze :as analyze] [slopp.edit.lintgate :as lintgate] [slopp.project.capabilities :as capabilities] [clojure.edn :as edn] [slopp.store.fields :as fields] [slopp.index.refs :as refs] [slopp.read.telemetry :as telemetry] [slopp.store.artifacts :as artifacts] [clojure.java.io :as io] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.catalog :as catalog] [slopp.rules.webapp :as rules.webapp] [slopp.project.dev :as dev] [slopp.rules.mutate :as mutate]))
+            [slopp.store.db :as db] [rewrite-clj.parser :as p] [slopp.read.history :as history] [slopp.project.deps :as project.deps] [slopp.ops.engine :as engine] [slopp.read.modules :as read.modules] [slopp.read.orient :as orient] [slopp.edit.modules :as edit.modules] [slopp.rules :as rules] [slopp.ops.done :as done] [slopp.rules.shape :as shape] [slopp.index.analyze :as analyze] [slopp.edit.lintgate :as lintgate] [slopp.project.capabilities :as capabilities] [clojure.edn :as edn] [slopp.store.fields :as fields] [slopp.index.refs :as refs] [slopp.read.telemetry :as telemetry] [slopp.store.artifacts :as artifacts] [clojure.java.io :as io] [slopp.rules.currency :as rules.currency] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.catalog :as catalog] [slopp.rules.webapp :as rules.webapp] [slopp.project.dev :as dev] [slopp.rules.mutate :as mutate] [slopp.edit.security :as security]))
 
 ^{:auto-declare "mutual recursion: add-form!, add-require!, auto-require-retry, canonical-source!, create-ns!, edit-group!, edit-replace!, edit-subform!, prune-requires!, remove-require!, revert-form!"}
 (declare add-form! add-require! auto-require-retry canonical-source! create-ns! edit-group! edit-replace! edit-subform! prune-requires! remove-require! revert-form!)
@@ -168,6 +168,12 @@
                         (or (:store (edit/resolve-cold-load c ns-sym :agent agent)) c))
             load?     (store/jvm-loadable? base ns-sym)]
         (if-let [derr (or (edit/dialect-scan candidate ns-sym)
+                          ;; the security half of D3: shipped code starts a
+                          ;; process only in its adapter, and never reads Java
+                          ;; serialization. Skipped while adopting, like the
+                          ;; module scan: an import lands reality first.
+                          (when-not (:adopting? @session)
+                            (security/security-scan candidate ns-sym))
                           ;; bulk imports (clone) land reality first and derive
                           ;; the manifest after — the gate blocks DRIFT, not adoption
                           (when-not (:adopting? @session)
@@ -501,7 +507,7 @@
   (case action
     :replace (let [{:keys [node error]} (edit/parse-form source)
                    iso (when node
-                         (edit/isolation-refusal (edit/require-aliases st ns) node))
+                         (edit/isolation-refusal (store/require-aliases st ns) node))
                    nm' (some-> node store/form-symbol)
                    old (store/form-named st ns name)
                    old-node (:node old)
@@ -548,7 +554,7 @@
     :add     (let [{:keys [node error]} (edit/parse-form source)
                    nm (some-> node store/form-symbol)
                    iso (when node
-                         (edit/isolation-refusal (edit/require-aliases st ns) node))]
+                         (edit/isolation-refusal (store/require-aliases st ns) node))]
                (cond
                  error {:error error}
                  iso   {:error iso}
@@ -4869,7 +4875,7 @@
                 heads   (fn [nsx]
                           (cond-> #{(str ns-sym "/" nm)}
                             (= nsx ns-sym) (conj (str nm))
-                            true (into (for [[alias lib] (edit/require-aliases st nsx)
+                            true (into (for [[alias lib] (store/require-aliases st nsx)
                                              :when (= (symbol (str lib)) ns-sym)]
                                          (str alias "/" nm)))))
                 rewrite (fn [src nsx target?]
@@ -5944,7 +5950,7 @@
             nm (some-> node store/form-symbol)
             iso (when node
                   (edit/isolation-refusal
-                   (edit/require-aliases (:store @session) ns-sym) node))]
+                   (store/require-aliases (:store @session) ns-sym) node))]
         (cond
           error {:error error}
 

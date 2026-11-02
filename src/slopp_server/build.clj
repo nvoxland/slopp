@@ -94,7 +94,7 @@
   (boolean (some (fn [d] (let [f (io/file d tool)] (and (.isFile f) (.canExecute f))))
                  (str/split (or (System/getenv "PATH") "") (re-pattern java.io.File/pathSeparator)))))
 
-^:unsafe (defn- run-in!
+^:unsafe (defn- ^{:adapter "process — the build's own commands (the Clojure CLI), run in a directory with output streamed; the build tests run it for real"} run-in!
   "Run `cmd` (a vector) with `dir` as its working directory, its output
   flowing straight to this process's own — a native-image compile takes
   minutes and the reader wants to watch it — and answer `{:exit}`. The shape

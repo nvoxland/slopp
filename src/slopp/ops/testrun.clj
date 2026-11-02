@@ -278,7 +278,7 @@
               (catch java.lang.IllegalStateException _ nil))))))  ; not a child of ours
     nil))
 
-(defn ^:export run-cmd!
+(defn ^:export ^{:adapter "process — a test-runner command, killed with everything it spawned at the timeout"} run-cmd!
   "Run `cmd` (a seq of strings) in `dir`, sh-shaped {:exit :out :err}, killed
   at `timeout-ms` WITH EVERYTHING IT SPAWNED (`reap!`): :exit 124 and no
   parseable summary, which the shard-death retry treats honestly as a dead

@@ -21,7 +21,7 @@
   []
   (str (Files/createTempDirectory "slopp-deps-cp" (make-array FileAttribute 0))))
 
-(defn- spath
+(defn- ^{:adapter "process — the Clojure CLI's -Spath, resolving a dependency classpath"} spath
   "The resolved classpath entries for `deps` (a lib→coord map), as a set."
   [deps dir]
   (let [r (sh/sh repl/clojure-bin "-Spath" "-Sdeps" (pr-str {:deps deps})
