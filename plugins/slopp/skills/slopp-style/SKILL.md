@@ -351,9 +351,11 @@ The main `slopp` skill has the mechanics; these are the shapes worth writing.
 - **Print and eval output you ran while working is not a test.** Only a
   committed assertion is.
 - **A test you believe is wrong is not yours to weaken.** Do not edit the
-  assertion to make it pass. Tell the human, in your reply, which test and why.
-  (A sanctioned "flag this test" path is planned; until it exists, say it in your
-  reply.)
+  assertion to make it pass. **Enforced:** a write that edits a test whose
+  observed coverage reaches a form you changed this episode is refused; record
+  the objection with `flag_test {ns name reason}` and tell the human in your
+  reply. A test you created this episode stays yours, and an ask that names the
+  test lifts the guard.
 
 ## Checkable vs. judgment — a quick map
 
@@ -387,6 +389,7 @@ cover, so drifting either way turns the suite red.
 | No ambient global mutable state | **Advisory** — `done` flags a global `(def _ (atom/ref/agent …))` (`:ambient-state`) |
 | `?` / `*earmuffs*` predicate / dynamic-var naming | Judgment (no gate yet) |
 | Failing test seen red before green | **Advisory** — `done` flags `assertions-never-red` |
+| A test grading your change is not yours to edit | **Yes** — the write is refused; `flag_test` records the objection |
 | Pure boundary fn has generated inputs | Judgment (no gate yet) |
 | Tests assert behaviour, not the fixture | Judgment |
 

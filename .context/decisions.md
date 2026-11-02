@@ -7873,6 +7873,23 @@ Observed coverage, not static reach: the attack is editing the test that is
 red right now. A NEW deftest is never refused (red-first stays native), and a
 test with no observed coverage of an episode form is not touched.
 
+**Built 2026-11-02, and what it does not cover.** `slopp.ops/protected-test-refusal`
+(pure) runs at the top of `change` — before any namespace is created — and in
+`edit_group`, through `edit-group!`'s `:protect-tests`; rename sweeps, undo,
+episode revert and sync stay unguarded because they rewrite tests
+mechanically. `flag_test` records a `:flag-test` marker (registered, and
+travelling, so a rebase-land carries it to main). Three limits, all chosen or
+measured: (1) `accept` — the declared, recorded move of a literal expectation
+— stays open in v1; it is visible in the result and belongs in review's risk
+ranking, not behind a refusal. (2) Coverage is OBSERVED, and the tracer records
+calls, not reads of a `def`: a test asserting on a data definition is not
+protected (met on the first day — a pinned tool count moved with no refusal).
+(3) The agent is the one the write path resolves, `(or agent (:agent-id
+@session))`; the bare argument is nil when a call names none, and an early
+version guarded nobody because of it. Also worth knowing: the actionless wire
+step slipped past `(#{… nil} action)` — a set lookup of nil is nil even when nil
+is a member; use `contains?`.
+
 ## D-endorsed-examples (2026-11-02, user-directed) — a human-endorsed test is the readable spec, and no agent episode edits it
 
 **Decision.** `^{:endorsed "who/why"}` on a deftest (one `marker-registry`

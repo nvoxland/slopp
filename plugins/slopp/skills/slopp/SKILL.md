@@ -124,6 +124,11 @@ elsewhere without moving (`help {topic "threads"}`).
   {op check}` it first: the red is the answer, and nothing lands.
 - **Assert the behaviour, not the fixture.** A repro can be too minimal; a
   test whose expected value was copied from the actual value is not a test.
+- **A test grading your change is not yours to edit.** Changing a test whose
+  traced coverage reaches a form you changed this episode is refused. If you
+  believe it is wrong, `flag_test {ns name reason}` records that for the human
+  (the `verify` family) — then say so in your reply. Tests you wrote this
+  episode stay editable; an ask that names the test lifts the guard.
 
 ## Reading a result
 
