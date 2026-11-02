@@ -65,6 +65,23 @@ the change here (same commit).
   SQL is a done-time `:error` rule on the `direct-http` template, since it
   needs two forms of context. D3 stays undialable; the rule catalog gets a
   `:dialect` row that says so.
+
+  **Built 2026-11-02, and one part of the fix shape was wrong.** `#=` is
+  refused over the PARSED nodes (rewrite-clj keeps it as an `:eval` node
+  wherever it sits: quoted, tagged, in metadata), even in an `^:unsafe` form,
+  because nobody can discharge an obligation the reader runs before anyone
+  sees it. "`*read-eval*` false in every loader" does NOT hold up: Clojure's
+  `Compiler.load` binds read-eval back to true for every file it loads, so
+  `load-string`, `load-file` and `require` all ignore an outer binding —
+  measured, `(binding [*read-eval* false] (load-string "'#=(+ 1 2)"))` is 3.
+  Nor is it needed: the kernel and the image load store code to RUN it, so a
+  `#=` there runs nothing a plain `def` in the same store could not. The
+  write gate is the defence for code, and the kernel is unchanged (no jar
+  rebuild). Read-eval matters where slopp reads DATA: the server now reads
+  image-printed values with it off (`image.repl/read-printed` — a value that
+  prints as `#=(…)` used to run in the SERVER), and every image launches with
+  `-Dclojure.read.eval=false`, so a runtime `read-string` in an `^:unsafe`
+  form gets the safe default.
 - **D3.1 (user, 2026-08-06) — the reader-conditional ban STANDS everywhere,
   and the framework pays the cost that ban creates.** Revisited explicitly
   rather than silently, on slopp-ui's ask: a `:cljc` namespace targets two

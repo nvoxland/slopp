@@ -388,6 +388,7 @@ cover, so drifting either way turns the suite red.
 |---|---|
 | Effectful fn is `!`-named | **Yes** (D6, write warning + `:suggest`) |
 | No macros / eval / dynamic-var action-at-a-distance | **Yes** (dialect gate) |
+| No `#=` read-time eval, anywhere — quoted, tagged, in metadata, even under `^:unsafe` | **Yes** (dialect gate) — the reader runs it before any gate or test sees the value; compute the value in code instead |
 | Cross-module edge declared; no cycles; cohesion vs export | **Yes** (module gate at write) — plus `done`'s `:module-governance` and `full_check`'s `:module-violations`, both error-grade, because a RELOCATION rewrites callers without writing them through the gate |
 | Public surface documented | **Yes** (write advisory) |
 | Dead public surface removed | **Yes** (`done`/`commit_point` gate) |

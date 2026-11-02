@@ -55,6 +55,16 @@ The check —
     `banned-syms`/`effectful-leaves` do) or, cleaner, compare head names as
     STRINGS (`(= "defmacro" (str (first s)))`) so no banned symbol appears in
     source. See `ideas/logs/dogfooding-agent-frictions.md` P6.
+- **`#=` (read-time eval) — refused structurally, in every position, even
+  under `^:unsafe`** (`edit/read-eval-refusal`, 2026-11-02). The symbol walk
+  above prunes quoted forms and tagged literals as data, and `#=` is the one
+  thing that executes from INSIDE data, so it is found over the parsed nodes
+  (rewrite-clj's `:eval` node), not the sexpr. Before this, `'#=(…)`, `#inst
+  #=(…)` and an `^:unsafe` form with `#=` all passed. This gate is the only
+  defence for stored code: Clojure's loader binds read-eval true for every
+  file it loads, so no load-time switch can help (D3.2). Read-eval is off
+  only where slopp reads DATA — the server reading image values, and every
+  image JVM's root (`-Dclojure.read.eval=false`).
 - **D7 — no hand-written `(declare …)`** (edit path only, `parse-form`): the
   pipeline OWNS form ordering and declares (auto-avoid-declare). A same-ns
   forward ref is resolved by reordering definitions above their callers, or —
