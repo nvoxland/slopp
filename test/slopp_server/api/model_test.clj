@@ -946,3 +946,24 @@
         cv  (model/change-view (atom {:store st}) "c1" "c2")]
     (is (= {:forms 2 :namespaces 2 :modules 2} (:spread cv)) (pr-str (:spread cv)))
     (is (json-shaped? cv))))
+
+(deftest a-change-range-shows-the-ask-made-in-that-range
+  ;; zrs.6: :why came from the form's NEWEST ask, so the first range's screen
+  ;; showed an intent that belonged to the second range's change
+  (let [s0  (store/ingest (store/empty-store) 'zr.core "(ns zr.core)\n\n(defn f [x] (inc x))\n")
+        f   (:id (store/form-named s0 'zr.core 'f))
+        st  (reduce store/record-delta
+                    (assoc s0 :deltas [] :head nil :line-pos 0 :prompts {} :last-write {})
+                    [{:id "c1" :op :commit :status :green :at 1784900000000 :description "base"}
+                     {:id "d1" :op :replace :ns 'zr.core :form-id f :prompt "make f add one"
+                      :sources {f "(defn f [x] (+ x 1))"}}
+                     {:id "d1s" :op :replace :ns 'zr.core :form-id f :prompt "normalize" :system true
+                      :sources {f "(defn f [x] (+ x 1))"}}
+                     {:id "c2" :op :commit :status :green :at 1784900060000 :description "first"}
+                     {:id "d2" :op :replace :ns 'zr.core :form-id f :prompt "make f add two"
+                      :sources {f "(defn f [x] (+ x 2))"}}
+                     {:id "c3" :op :commit :status :green :at 1784900120000 :description "second"}])
+        why (fn [from to] (-> (model/change-view (atom {:store st}) from to)
+                              :modules first :namespaces first :forms first :why))]
+    (is (= "make f add one" (why "c1" "c2")) "and housekeeping in the range does not replace the author's ask")
+    (is (= "make f add two" (why "c2" "c3")))))

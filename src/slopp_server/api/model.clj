@@ -23,67 +23,6 @@
             [slopp.read.history :as history] [slopp.edit.modules :as edit.modules] [slopp.index.refs :as refs] [slopp.read.orient :as orient] [rewrite-clj.node :as n] [clojure.string :as str]
             [slopp.read.modules :as read.modules] [slopp.edit.tiers :as tiers] [slopp.store.render :as store.render] [slopp.read.graph :as graph]))
 
-(defn ^:export change-view
-  "What changed between two commit-points, grouped module → namespace → form
-  with a count at every rung so a collapsed row still says how much is
-  under it. `from`/`to` are commit-point delta ids — exactly the pair
-  `timeline` hands over in each row's `:range`.
-
-  Two rungs, not three: wave 1 made components REAL namespace prefixes, so
-  a component IS a module and `module-of` answers both.
-
-  Per form: the recorded ask, the LINE diff (never whole sources — a
-  reviewer reads changes), and how many distinct forms call it now. The
-  caller count spans every `:via` the graph records, and the graph is a
-  syntactic reader, so it is a floor rather than a census."
-  [session from to]
-  (let [st  (:store @session)
-        ids (into #{} (map :id) (store/deltas st))]
-    ;; a range arrives from a URL, so both ends are user input. "Nothing
-    ;; changed here" and "that is not a range" are different answers, and
-    ;; only the second one is a 404.
-    (when (and (contains? ids from) (contains? ids to))
-      (let [ch        (history/query-changes session :from from :to to)
-            by-target (refs/refs-by-target st)
-            prompts   (store/prompt-by-form st)
-            rows      (for [{:keys [form form-id status was now]} (:forms ch)
-                            :let [ns-sym (symbol (namespace form))]]
-                        (cond-> {:form    (str form)
-                                 :form-id form-id
-                                 ;; keyword VALUES become strings here, for the same
-                                 ;; reason `:form` is `(str form)`: a key round-trips
-                                 ;; symmetrically through JSON and a value does not.
-                                 ;; `diff-lines` keeps its keywords — it also feeds
-                                 ;; the agent-facing text renderer, and shaping for
-                                 ;; the wire is this layer's job, not its producer's.
-                                 :status  (name status)
-                                 :ns      (str ns-sym)
-                                 :module  (edit.modules/module-of ns-sym)
-                                 :diff    (mapv (fn [[k text]] [(name k) text])
-                                                (history/diff-lines was now))
-                                 :callers (count (distinct (map (juxt :from-ns :from-var)
-                                                                (get by-target form []))))}
-                          (get prompts form-id) (assoc :why (get prompts form-id))))]
-        {:from    from
-         :to      to
-         :count   (count rows)
-         :spread  (edit.modules/spread (map #(symbol (:ns %)) rows))
-         :modules (->> rows
-                       (group-by :module)
-                       (sort-by key)
-                       (mapv (fn [[m rs]]
-                               {:module     m
-                                :count      (count rs)
-                                :namespaces (->> rs
-                                                 (group-by :ns)
-                                                 (sort-by key)
-                                                 (mapv (fn [[n fs]]
-                                                         {:ns    n
-                                                          :count (count fs)
-                                                          :forms (vec (sort-by :form
-                                                                               (map #(dissoc % :ns :module) fs)))})))})))
-         :arc     (vec (:verification-arc ch))}))))
-
 (defn- json-card
   "A `form-card` as JSON-shaped data. Two fields cannot survive the trip:
   `:form` is a qualified symbol and `:sig` is a vector of symbols, and both
@@ -1228,3 +1167,82 @@ gaps    (gaps-by-ns st (:test-map @session))
                                        " binding or built at runtime is not here")}
                         (dissoc (json-card (orient/form-card session ns-sym nm)) :form))
            graph (assoc :graph graph)))))))
+
+(defn- range-prompts
+  "`{form-id ask}` for the asks that changed each form INSIDE the range
+  (`from`, `to`]: the latest authored delta there that names the form. Same
+  rules as `store/prompt-by-form` — both `:form-id` and `:form-ids` count, a
+  `:system` delta never replaces an author's ask, no `:prompt` adds nothing —
+  but bounded by the range, because the form's NEWEST ask can belong to a
+  later change and a reviewer reading this range would be shown its intent."
+  [st from to]
+  (let [after   (rest (drop-while #(not= from (:id %)) (store/deltas st)))
+        [a b]   (split-with #(not= to (:id %)) after)]
+    (reduce (fn [m d]
+              (if (and (:prompt d) (not (:system d)))
+                (reduce #(assoc %1 %2 (:prompt d)) m
+                        (cond-> (vec (:form-ids d)) (:form-id d) (conj (:form-id d))))
+                m))
+            {} (concat a (take 1 b)))))
+
+(defn ^:export change-view
+  "What changed between two commit-points, grouped module → namespace → form
+  with a count at every rung so a collapsed row still says how much is
+  under it. `from`/`to` are commit-point delta ids — exactly the pair
+  `timeline` hands over in each row's `:range`.
+
+  Two rungs, not three: wave 1 made components REAL namespace prefixes, so
+  a component IS a module and `module-of` answers both.
+
+  Per form: the ask that changed it IN THIS RANGE (not its newest one, which
+  can belong to a later change), the LINE diff (never whole sources — a
+  reviewer reads changes), and how many distinct forms call it now. The
+  caller count spans every `:via` the graph records, and the graph is a
+  syntactic reader, so it is a floor rather than a census."
+  [session from to]
+  (let [st  (:store @session)
+        ids (into #{} (map :id) (store/deltas st))]
+    ;; a range arrives from a URL, so both ends are user input. "Nothing
+    ;; changed here" and "that is not a range" are different answers, and
+    ;; only the second one is a 404.
+    (when (and (contains? ids from) (contains? ids to))
+      (let [ch        (history/query-changes session :from from :to to)
+            by-target (refs/refs-by-target st)
+            prompts   (range-prompts st from to)
+            rows      (for [{:keys [form form-id status was now]} (:forms ch)
+                            :let [ns-sym (symbol (namespace form))]]
+                        (cond-> {:form    (str form)
+                                 :form-id form-id
+                                 ;; keyword VALUES become strings here, for the same
+                                 ;; reason `:form` is `(str form)`: a key round-trips
+                                 ;; symmetrically through JSON and a value does not.
+                                 ;; `diff-lines` keeps its keywords — it also feeds
+                                 ;; the agent-facing text renderer, and shaping for
+                                 ;; the wire is this layer's job, not its producer's.
+                                 :status  (name status)
+                                 :ns      (str ns-sym)
+                                 :module  (edit.modules/module-of ns-sym)
+                                 :diff    (mapv (fn [[k text]] [(name k) text])
+                                                (history/diff-lines was now))
+                                 :callers (count (distinct (map (juxt :from-ns :from-var)
+                                                                (get by-target form []))))}
+                          (get prompts form-id) (assoc :why (get prompts form-id))))]
+        {:from    from
+         :to      to
+         :count   (count rows)
+         :spread  (edit.modules/spread (map #(symbol (:ns %)) rows))
+         :modules (->> rows
+                       (group-by :module)
+                       (sort-by key)
+                       (mapv (fn [[m rs]]
+                               {:module     m
+                                :count      (count rs)
+                                :namespaces (->> rs
+                                                 (group-by :ns)
+                                                 (sort-by key)
+                                                 (mapv (fn [[n fs]]
+                                                         {:ns    n
+                                                          :count (count fs)
+                                                          :forms (vec (sort-by :form
+                                                                               (map #(dissoc % :ns :module) fs)))})))})))
+         :arc     (vec (:verification-arc ch))}))))
