@@ -235,11 +235,18 @@
   failed restore is a finding too, since the image may still hold the mutant.
   What the budget did not reach, and changed functions with no in-image test,
   are one formless `:info` finding each: neither is a fault in the code, but
-  reporting nothing would read as a clean result nobody earned."
+  reporting nothing would read as a clean result nobody earned.
+
+  A mutant that ran past the per-mutant limit is one more formless `:info`
+  finding. The timeout counts as a kill, but the run is only cancelled: a
+  mutant that loops without checking for interruption keeps its thread in the
+  image, costing CPU under every later run until the image restarts. Nothing
+  can stop that thread from outside, so the result says so and names the fix."
   [results]
   (let [by       (group-by :status results)
         owed     (mapv :form (:unchecked by))
         untested (mapv :form (:untested by))
+        timed    (filterv #(pos? (:timeout % 0)) results)
         names    (fn [xs] (str (str/join ", " (take 5 xs)) (when (> (count xs) 5) ", …")))]
     (vec (concat
           (for [{:keys [form survivors]} (:survived by)]
@@ -259,6 +266,16 @@
              :teach (str "the real form could not be re-loaded after a mutant (" error
                          "), so the image may still hold the mutant. `restart` rebuilds"
                          " it from the store.")})
+          (when (seq timed)
+            [{:severity  :info
+              :timed-out (mapv :form timed)
+              :teach     (str (reduce + (map :timeout timed)) " mutant(s) ran past the"
+                              " per-mutant limit and count as killed: "
+                              (names (map :form timed))
+                              ". Each run was cancelled, but a mutant that loops without"
+                              " checking for interruption keeps its thread in the image and"
+                              " slows every later run. `build {op restart}` rebuilds the"
+                              " image from the store and clears it.")}])
           (when (seq owed)
             [{:severity  :info
               :unchecked owed

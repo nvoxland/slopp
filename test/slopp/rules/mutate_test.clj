@@ -181,3 +181,24 @@
       (is (= :discharged (:status all)) "every survivor named: nothing left to report"))
     (is (re-find #":equivalent-mutants" (:teach (first (mutate/findings [(out 'eq.core/g)]))))
         "and the finding names the way to say it")))
+
+(deftest a-timed-out-mutant-says-its-thread-may-still-run
+  ;; A run past the per-mutant limit is cancelled, and counts as a kill: the
+  ;; fault changed behaviour enough to stop the tests finishing. But a mutant
+  ;; that loops without checking for interruption keeps its thread in the
+  ;; image, burning CPU under every later verification. Nothing can stop that
+  ;; thread from outside, so the honest result is to say it and name the fix.
+  (let [fs  (mutate/findings [{:form 'a/f :status :killed :timeout 2}
+                              {:form 'a/g :status :killed :timeout 0}
+                              {:form 'a/h :status :survived :timeout 1
+                               :survivors [{:mutation "< → <=" :at "(< x 10)" :tests '[a-test/t]}]}])
+        tim (first (filter :timed-out fs))]
+    (testing "one formless :info finding names every form with a timed-out mutant"
+      (is (= '[a/f a/h] (:timed-out tim)))
+      (is (= :info (:severity tim)))
+      (is (nil? (:form tim))))
+    (testing "it says the thread may still run and that restart clears it"
+      (is (str/includes? (:teach tim) "3 mutant(s)"))
+      (is (str/includes? (:teach tim) "restart")))
+    (testing "no timeout, no finding"
+      (is (not-any? :timed-out (mutate/findings [{:form 'a/g :status :killed :timeout 0}]))))))
