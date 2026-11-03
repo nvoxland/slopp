@@ -718,3 +718,23 @@
     (is (nil? (:origin-id (first marks))))
     (is (empty? (:conflicts r)))
     (is (contains? (set (:applied r)) (:id (last sfx))) "delivered all the same")))
+
+(deftest a-replayed-delta-keeps-system-and-group
+  ;; 5u7.8: the replay rebuilt each delta through the store's write fns with
+  ;; only :prompt and :agent, so a merged auto-require arrived as authored
+  (let [b      (base)
+        ours   (replace! b 'a "(defn a [x] (+ x 1))")
+        theirs (-> b
+                   (store/replace-node 'm.core 'b (p/parse-string "(defn b [x] (+ x 2))")
+                                       :prompt "normalize" :agent "them" :system true :group "g-theirs")
+                   first
+                   (store/append-form 'm.core (p/parse-string "(defn d [x] (* x 4))")
+                                      :prompt "new fn" :agent "them" :group "g-theirs")
+                   first)
+        r      (merge/merge-logs ours theirs)
+        merged (filter :merged-from (store/deltas (:store r)))
+        by-op  (group-by :op merged)]
+    (is (empty? (:conflicts r)))
+    (is (true? (:system (first (by-op :replace)))) "housekeeping stays housekeeping")
+    (is (= #{"g-theirs"} (set (map :group merged))) "one group stays one group")
+    (is (not (:system (first (by-op :add)))) "and an authored add stays authored")))

@@ -37,8 +37,14 @@
     [(store/record-delta store' delta) delta]))
 
 (defn ^:export tag-merged
-  "Mark the just-appended delta as a replay of THEIR delta `their-id` — it is
-  their work, not ours, and later merges must treat it that way.
+  "Mark the just-appended delta as a replay of THEIR delta — it is their
+  work, not ours, and later merges must treat it that way. `their` is their
+  delta, or just its id.
+
+  Given the delta, the fields the replay through the store's write fns would
+  otherwise DROP ride along too: `:system` (a housekeeping change, which
+  arrived looking like an authored ask) and `:group` (the multi-form change
+  it belonged to, which arrived as unrelated singletons).
 
   Tagged wherever the value holds that delta: `:pending` (what `try-commit!`
   sends to the journal — the copy that MATTERS, since a merge is judged
@@ -46,10 +52,12 @@
   the value carries the list. Tagging only the list, as this once did, left
   the journal's copy untagged and every iterated merge replaying the same
   work again."
-  [store their-id]
-  (let [tag (fn [ds] (if (seq ds)
-                       (conj (pop ds) (assoc (peek ds) :merged-from their-id))
-                       ds))]
+  [store their]
+  (let [their-id (if (map? their) (:id their) their)
+        carry    (when (map? their) (select-keys their [:system :group]))
+        tag      (fn [ds] (if (seq ds)
+                            (conj (pop ds) (merge (assoc (peek ds) :merged-from their-id) carry))
+                            ds))]
     (cond-> store
       (:pending store) (update :pending tag)
       (:recent store)  (update :recent tag)
@@ -463,7 +471,7 @@
                       (if-let [[st' d'] (store/append-form st ns-sym node
                                                      :prompt (:prompt d)
                                                      :agent (:agent d))]
-                        (done (tag-merged st' (:id d))
+                        (done (tag-merged st' d)
                               (assoc idmap fid (:form-id d'))
                               (inc merged) conflicts notes
                               (conj changed (:form-id d')) new-nses
@@ -535,7 +543,7 @@
                                                      :prompt (:prompt d)
                                                      :agent (:agent d)))]
                         (if rr
-                          (done (tag-merged (first rr) (:id d)) idmap (inc merged)
+                          (done (tag-merged (first rr) d) idmap (inc merged)
                                 conflicts notes (conj changed fid) new-nses
                                 (conj applied (:id d)))
                           (done st idmap merged conflicts
@@ -575,7 +583,7 @@
                       (let [[st' _] (store/remove-form st ns-sym (:name cur)
                                                  :prompt (:prompt d)
                                                  :agent (:agent d))]
-                        (done (tag-merged st' (:id d)) idmap (inc merged)
+                        (done (tag-merged st' d) idmap (inc merged)
                               conflicts notes changed new-nses
                               (conj applied (:id d))))))
 
@@ -605,7 +613,7 @@
                                                      :prompt (:prompt d)
                                                      :agent (:agent d)
                                                      :extra (select-keys d [:old :new]))]
-                        (done (tag-merged st' (:id d)) idmap (inc merged)
+                        (done (tag-merged st' d) idmap (inc merged)
                               conflicts notes (into changed (keys changeset))
                               new-nses (conj applied (:id d))))))
 
