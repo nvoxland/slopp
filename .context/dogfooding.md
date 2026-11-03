@@ -54,6 +54,11 @@ this is user testing in the literal sense.
 
 ## THE benchmark: neutral-spec cohort evals (user decision, 2026-07-12)
 
+**No headless `claude -p` runs (user decision, 2026-11-03).** An agent working on
+slopp never launches `claude -p` cohorts, for evals or anything else. A cohort
+runs some other way, chosen with the user (in-session subagents, or the user
+runs it). The eval-history pilot that prompted this used 42 such runs.
+
 A list of MCP calls is not a benchmark. What differentiates slopp from a
 conventional agent is measured ONLY by: the SAME end-user spec (observable
 behavior + an I/O contract; zero implementation details — no namespaces, no
