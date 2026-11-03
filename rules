@@ -1,5 +1,4 @@
 ambient-state: error
 bare-throw: error
 breaking-changes: error
-facet-by-var: off
 key-typos: error

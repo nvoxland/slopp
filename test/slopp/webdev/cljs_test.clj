@@ -1592,3 +1592,24 @@
     (is (false? (cljs/auto-compile? (put (put base "capabilities" "http.enabled" "true")
                                         "client" "auto-compile" "false")))
         "opting out is a setting, and it wins")))
+
+(deftest a-facet-typed-endpoint-hands-the-client-its-fields-and-its-view
+  (let [st (-> (store/empty-store)
+               (store/ingest 'shop.order
+                             (str "(ns shop.order)\n"
+                                  "(def ^{:facet \"an order\"} Order {:facet/fields {:shop/id :int"
+                                  " :shop/card {:schema :string :secret true} :shop/note {:schema :string :optional true}}"
+                                  " :facet/views {:public [:shop/id :shop/card]}})\n"))
+               (store/ingest 'shop.api
+                             (str "(ns shop.api (:require [shop.order :as order]))\n"
+                                  "(defn ^{:http/method :post :rest/path \"/api/orders\" :http/auth :public"
+                                  " :rest/request #'order/Order :rest/response #'order/Order :facet/view :public}"
+                                  " create! \"Create.\" [r] r)\n")))
+        w  (first (:wrappers (cljs/client-wrapper-specs st)))]
+    (is (= {:kind :inline :schema [:map {:closed true} [:shop/card :string] [:shop/id :int]
+                                   [:shop/note {:optional true} :string]]}
+           (:request w))
+        "what the caller sends: every field, closed, as the port parses it")
+    (is (= {:kind :inline :schema [:map {:closed true} [:shop/card :string] [:shop/id :int]]}
+           (:response w))
+        "what the caller receives: the view, a secret arriving as its redaction text")))

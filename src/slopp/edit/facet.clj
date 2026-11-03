@@ -261,3 +261,28 @@
             (str ns-sym "/" nm " is a " port " adapter, so data from outside arrives here."
                  " Hand it out as (facet/raw rows :db/orders), so nothing reads it until a"
                  " facet parses it.")))))))
+
+(defn ^:export schema-form
+  "The closed malli schema facet declaration `decl` (written in `ns-sym`)
+  describes, built as DATA from its source — what a generated client validates
+  against, where the facet's own namespace may not ship. A field schema naming
+  another facet stands for that facet's fields. With `view`, only that view's
+  fields, and a secret field typed `:string`: at the exit it leaves as its
+  redaction text."
+  ([store ns-sym decl] (schema-form store ns-sym decl nil))
+  ([store ns-sym decl view]
+   (let [aliases (store/require-aliases store ns-sym)
+         nest    (fn nest [s]
+                   (cond (symbol? s)
+                         (let [[n nm] (resolve-sym aliases ns-sym s)
+                               sx     (some-> (store/form-named store n nm) facet-sexpr)]
+                           (if sx (schema-form store n (last sx)) s))
+                         (vector? s) (mapv nest s)
+                         :else s))
+         shown   (when view (set (get-in decl [:facet/views view])))]
+     (into [:map {:closed true}]
+           (for [[k v] (sort-by key (:facet/fields decl))
+                 :when (or (nil? shown) (shown k))
+                 :let [{:keys [schema optional secret]} (if (and (map? v) (contains? v :schema)) v {:schema v})
+                       s (if (and view secret) :string (nest schema))]]
+             (if optional [k {:optional true} s] [k s]))))))

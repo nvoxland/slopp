@@ -19,7 +19,7 @@
   cherry/squint slot in as new methods without re-authoring a single form."
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
-            [slopp.store.render :as store.render] [slopp.build :as build] [slopp.ops.external :as external] [slopp.ops.testrun :as testrun] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.ops.engine :as engine] [clojure.java.io :as io] [slopp.store.artifacts :as artifacts] [slopp.http.client :as http.client] [slopp.edit.http :as edit.http] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http]))
+            [slopp.store.render :as store.render] [slopp.build :as build] [slopp.ops.external :as external] [slopp.ops.testrun :as testrun] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.ops.engine :as engine] [clojure.java.io :as io] [slopp.store.artifacts :as artifacts] [slopp.http.client :as http.client] [slopp.edit.http :as edit.http] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http] [slopp.edit.facet :as edit.facet]))
 
 (def result-marker
   "The line prefix the cljs compile runner prints its EDN summary behind, so the
@@ -140,25 +140,39 @@
    {:kind :var :sym <fq> :ns <schema-ns>} when it lives in a :cljc namespace so
    it compiles into BOTH the server oracle and the client bundle; a var that
    can't ship to the client is tagged instead: {:kind :not-cljc …} (wrong
-   platform) or {:kind :missing …} (no such var). An inline malli form (vector
-   or keyword) → {:kind :inline :schema raw}; nil → {:kind :none}. Alias
+   platform) or {:kind :missing …} (no such var). A FACET given by var,
+   `#'order/Order`, is inlined as the schema its declaration describes — every
+   field for a request, the route's `view` for a response — built from source,
+   so the facet's own namespace need not ship. An inline malli form (vector or
+   keyword) → {:kind :inline :schema raw}; nil → {:kind :none}. Alias
    resolution uses the ENDPOINT ns's requires (edit/require-aliases)."
-  [store endpoint-ns raw]
-  (cond
-    (nil? raw)     {:kind :none}
-    (symbol? raw)  (let [aliases (store/require-aliases store endpoint-ns)
-                         sns     (some-> (namespace raw) symbol)
-                         full-ns (if sns (get aliases sns sns) endpoint-ns)
-                         nm      (symbol (clojure.core/name raw))
-                         fq      (symbol (str full-ns) (str nm))]
-                     (cond
-                       (nil? (store/form-named store full-ns nm))
-                       {:kind :missing :sym fq :ns full-ns}
-                       (not= :cljc (store/platform-for store full-ns))
-                       {:kind :not-cljc :sym fq :ns full-ns
-                        :platform (store/platform-for store full-ns)}
-                       :else {:kind :var :sym fq :ns full-ns}))
-    :else          {:kind :inline :schema raw}))
+  ([store endpoint-ns raw] (resolve-schema-ref store endpoint-ns raw nil))
+  ([store endpoint-ns raw view]
+   (cond
+     (nil? raw)     {:kind :none}
+     (and (seq? raw) (= 'var (first raw)) (symbol? (second raw)))
+     (let [aliases (store/require-aliases store endpoint-ns)
+           sym     (second raw)
+           sns     (some-> (namespace sym) symbol)
+           full-ns (if sns (get aliases sns sns) endpoint-ns)
+           nm      (symbol (clojure.core/name sym))
+           sx      (some-> (store/form-named store full-ns nm) edit.facet/facet-sexpr)]
+       (if sx
+         {:kind :inline :schema (edit.facet/schema-form store full-ns (last sx) view)}
+         {:kind :missing :sym (symbol (str full-ns) (str nm)) :ns full-ns}))
+     (symbol? raw)  (let [aliases (store/require-aliases store endpoint-ns)
+                          sns     (some-> (namespace raw) symbol)
+                          full-ns (if sns (get aliases sns sns) endpoint-ns)
+                          nm      (symbol (clojure.core/name raw))
+                          fq      (symbol (str full-ns) (str nm))]
+                      (cond
+                        (nil? (store/form-named store full-ns nm))
+                        {:kind :missing :sym fq :ns full-ns}
+                        (not= :cljc (store/platform-for store full-ns))
+                        {:kind :not-cljc :sym fq :ns full-ns
+                         :platform (store/platform-for store full-ns)}
+                        :else {:kind :var :sym fq :ns full-ns}))
+     :else          {:kind :inline :schema raw})))
 
 (defn ^:private schema-form
   "The cljs code for a resolved schema ref: the fully-qualified var symbol (a
@@ -1142,7 +1156,7 @@
        (let [endpoint (symbol (str ns) (str name))
              method   (:http/method meta)
              req      (resolve-schema-ref store ns (:rest/request meta))
-             resp     (resolve-schema-ref store ns (:rest/response meta))
+             resp     (resolve-schema-ref store ns (:rest/response meta) (:facet/view meta))
              bad      (vals (into {} (map (juxt :sym identity))
                                  (filter (comp #{:not-cljc :missing} :kind) [req resp])))]
          (if (seq bad)
