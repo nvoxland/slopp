@@ -2212,7 +2212,9 @@
   wrapped form quotes it and quoted data is inert to the observe gate. What
   was repaired rides the result as a leading `;; repaired …` line, so the
   accepted shape is learned for free. A call whose op is not read-only runs
-  under the session's lock, so writes on one session never interleave."
+  under the session's lock, so writes on one session never interleave; so
+  does any op that uses the image, so none runs against a mutant or a
+  half-loaded write. Store-only reads stay concurrent."
   [session {:keys [name arguments] :as req}]
   (let [{n' :name a' :arguments repaired :repaired} (tools/remap-arguments name arguments)
         [a' repaired] (if (and (#{"query_eval" "check"} n') (:ns a') (string? (:code a'))
@@ -2225,7 +2227,11 @@
                          (assoc (or repaired {}) :ns-bound (str (:ns a')))]
                         [a' repaired])
         r (let [s' (view-session! session n' a')
-                r  (if (contains? tools/read-only-tools n')
+                r  (if (and (contains? tools/read-only-tools n')
+                          ;; an IMAGE user takes its turn too: `mutate` is
+                          ;; read-only yet loads mutants, and a test run or
+                          ;; eval beside it would answer against one
+                          (contains? tools/image-free-tools n'))
                      (call-op-1! s' (assoc req :name n' :arguments a'))
                      ;; WRITES take turns on a session: two agents sharing one
                      ;; (a parent and its subagent) once interleaved, and a land

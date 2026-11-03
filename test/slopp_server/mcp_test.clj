@@ -5223,3 +5223,24 @@
         (is (< read-ms 400) (str "a read does not wait for the lock: " read-ms "ms"))
         (is (>= write-ms 300) (str "a write waits for the writer before it: " write-ms "ms")))
       (finally (ops/close! sess)))))
+
+(deftest ^:external image-users-take-turns-and-store-reads-do-not
+  ;; v35: `verify {op mutate}` is read-only but loads mutants into the image;
+  ;; a test run or eval beside it saw the mutant. Every op that uses the
+  ;; image takes the session's turn; a read that never touches it does not
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "im.core" :source "(ns im.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n"})
+      (let [held (promise)
+            hold (future (locking sess (deliver held true) (Thread/sleep 600)))
+            _    @held
+            t0   (System/currentTimeMillis)
+            _    (call! sess "query_source" {:targets ["im.core/f"]})
+            store-ms (- (System/currentTimeMillis) t0)
+            t1   (System/currentTimeMillis)
+            _    (call! sess "query_eval" {:code "(+ 1 1)"})
+            image-ms (- (System/currentTimeMillis) t1)]
+        @hold
+        (is (< store-ms 400) (str "a store read does not wait: " store-ms "ms"))
+        (is (>= image-ms 300) (str "an image read waits its turn: " image-ms "ms")))
+      (finally (ops/close! sess)))))
