@@ -8053,7 +8053,7 @@ the timeline rows carry `:review`, unreviewed first, and the model counts
 `:unreviewed`. **Not yet usable in a real server:** slopp's own server is
 started with no `:http/auth-config`, so no request resolves an identity and
 every POST is a 401. Choosing how a person signs in to the local UI is open
-(slopp-review-auth bead).
+(slopp-nnt).
 
 ## D-deps-allow (2026-11-02) — a new dependency needs the human's word
 
