@@ -1042,3 +1042,19 @@
     (is (= "considered a macro; opaque" (:rejected d2)))
     (is (= "kept a shim; dead weight" (:rejected d3)))
     (is (not (contains? d4 :rejected)) "absent unless given")))
+
+(deftest a-review-is-a-marker-that-reaches-main
+  (let [[st d] (store/record-review (store/empty-store) "d7" :endorsed :by "nathan" :note "read the diff")]
+    (is (= :review (:op d)))
+    (is (= "d7" (:target d)))
+    (is (= :endorsed (:verdict d)))
+    (is (= "nathan" (:by d)))
+    (is (= "read the diff" (:note d)))
+    (is (= '*session* (:ns d)) "a marker reloads no namespace")
+    (is (= (:id d) (:head st)))
+    (is (contains? fields/markers :review)
+        "registered, or merge-logs refuses the whole merge")
+    (is (contains? fields/travelling-markers :review)
+        "a review is a fact about a commit point, so it outlives the thread it was written on")
+    (is (nil? (:note (second (store/record-review (store/empty-store) "d7" :flagged :by "n"))))
+        "no note is no key")))

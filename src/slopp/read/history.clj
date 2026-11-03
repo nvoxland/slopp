@@ -1107,3 +1107,19 @@
           (= "text" (some-> format name))
           (render-form-history-text (symbol (str ns-sym) (str nm)) versions)
           :else versions)))))
+
+(defn ^:export latest-reviews
+  "`{commit-point-id {:verdict :by :at :note}}` — the LATEST `:review` marker
+  for each target in the store's delta log (the log is oldest first, so a
+  later review overwrites an earlier one). `:at` is formatted like a commit
+  point's; `:verdict` stays a keyword and `:note` is absent when none was
+  given. Pure, so the reviewer timeline can fold it without opening the db."
+  [store]
+  (reduce (fn [m d]
+            (if (= :review (:op d))
+              (assoc m (:target d)
+                     (cond-> {:verdict (:verdict d) :by (:by d) :at (human-time (:at d))}
+                       (:note d) (assoc :note (:note d))))
+              m))
+          {}
+          (store/deltas store)))

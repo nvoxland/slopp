@@ -2175,3 +2175,19 @@
                 :when  lib
                 entry  (cond-> [[lib lib]] alias (conj [alias lib]))]
             entry))))
+
+(defn record-review
+  "Append a `:review` marker: a HUMAN (`by`) looked at the commit point `target`
+  (its delta id) and `verdict` it `:endorsed` or `:flagged`, with an optional
+  `note`. A commit point is immutable, so \"someone reviewed this\" is a new
+  no-content marker rather than a field on it; the latest review of a target
+  is the one that counts. Session-scoped like every marker: it reloads no
+  namespace. Returns [store' delta]."
+  [store target verdict & {:keys [by note]}]
+  (let [[did store'] (gen-id store "d")
+        delta (cond-> {:id did :parent (:head store)
+                       :op :review :ns '*session* :at (now-ms)
+                       :target target :verdict verdict}
+                by   (assoc :by by)
+                note (assoc :note note))]
+    [(record-delta store' delta) delta]))

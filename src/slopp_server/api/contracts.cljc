@@ -113,9 +113,9 @@
   [:tuple :string :string])
 
 (def timeline
-  "`GET /api/timeline` — commit-points newest first, plus the working set."
+  "`GET /api/timeline` — commit-points, unreviewed first, plus the working set."
   [:map
-   [:commit-points {:doc "commit-points, NEWEST FIRST — render in the order given"}
+   [:commit-points {:doc "commit-points, UNREVIEWED FIRST then reviewed, newest first within each group — render in the order given"}
     [:sequential [:map
                   [:commit {:doc (str "the commit-point's delta id, e.g. d24976 — this"
                                       " store's own address for it, not a git sha")} :string]
@@ -140,7 +140,17 @@
                          :doc (str "the git sha this commit-point was projected to. Present"
                                    " only for commit-points whose DELTA carries one — this"
                                    " model is a pure fold and never opens the projection"
-                                   " to go looking")} :string]]]]
+                                   " to go looking")} :string]
+                  [:review {:optional true
+                            :doc (str "the LATEST human review of this commit-point. Absent"
+                                      " means nobody has reviewed it — and unreviewed ones are"
+                                      " listed FIRST, so this array is not purely newest-first")}
+                   [:map
+                    [:verdict {:doc "endorsed or flagged"} :string]
+                    [:by {:doc "who reviewed it"} :string]
+                    [:at {:doc "when, formatted like :at"} :string]
+                    [:note {:optional true :doc "why, when they said"} :string]]]]]]
+   [:unreviewed {:doc "how many commit-points no human has reviewed — the absence the page says once"} :int]
    [:working {:doc (str "the work since the newest commit-point — what is written and"
                         " NOT yet committed. This is the field with no counterpart"
                         " in a git-shaped timeline: it is uncommitted work that is"
@@ -1216,3 +1226,19 @@
    [:total {:doc "how many keys matched before the limit"} :int]
    [:shown {:doc "how many are in :keys"} :int]
    [:key {:optional true :doc "the key asked for with ?key=, and every form that touches it"} [:map [:kw {:doc "the key's name, without its colon"} :string] [:modules {:doc "the production modules whose forms touch it"} [:sequential [:map [:module {:doc "the module"} :string] [:forms {:doc "its forms that touch the key"} [:sequential [:map [:form {:doc "ns/name"} :string] [:form-id {:doc "its stable address"} :string] [:via {:doc "how: literal names it, destructuring reads it"} [:sequential :string]]]]]]]] [:tests {:doc "how many test namespaces touch it — counted, not listed"} :int]]]])
+
+(def ^:export review-request
+  "`POST /api/projects/:slug/review` — what a caller SENDS: which commit point, the verdict, an optional note. The reviewer's name is NOT here: the server takes it from the authenticated identity, so a caller cannot sign as someone else."
+  [:map
+   [:slug {:doc "the project slug — interpolated into the PATH"} :string]
+   [:target {:doc "the commit point's delta id, as the timeline's :commit lists it"} :string]
+   [:verdict {:doc "endorsed (a person read it and agrees) or flagged (a person read it and objects)"}
+    [:enum "endorsed" "flagged"]]
+   [:note {:optional true :doc "why, in a sentence"} :string]])
+
+(def ^:export review-response
+  "`POST /api/projects/:slug/review` — what was recorded."
+  [:map
+   [:target {:doc "the commit point reviewed"} :string]
+   [:verdict {:doc "endorsed or flagged"} :string]
+   [:by {:doc "the reviewer, from the request's identity"} :string]])

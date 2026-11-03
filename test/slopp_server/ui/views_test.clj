@@ -5502,3 +5502,14 @@
                                              :assertions 2}]})]
     (is (re-find #"\(is \(= 3 \(rate 2\.5\)\)\)" (text v)))
     (is (re-find #"2 assertions" (text v)))))
+
+(deftest the-timeline-says-who-reviewed-a-commit-point-and-how-many-nobody-did
+  (let [html (pr-str (views/timeline-main
+                      {:unreviewed 1
+                       :commit-points [{:commit "d9" :description "newer" :at "2026-11-02 10:00" :status "green"}
+                                       {:commit "d4" :description "older" :at "2026-11-01 10:00" :status "green"
+                                        :review {:verdict "endorsed" :by "nathan" :at "2026-11-02 11:00"}}]}))]
+    (is (re-find #"reviewed: endorsed by nathan" html)
+        "a reviewed row names the verdict and who gave it")
+    (is (re-find #"1 not reviewed" html)
+        "the absence is said in words, once")))

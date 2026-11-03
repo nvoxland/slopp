@@ -5664,6 +5664,38 @@
          " key \"" lib "\" value \"who checked it, and where\"}, which also needs"
          " their ask to name it.")))
 
+(defn review-commit!
+  "Record that a human reviewed the commit point `target` (its delta id):
+  `verdict` is `:endorsed` or `:flagged`, `:by` names the reviewer, `:note` is
+  optional. NOT a tool: no MCP or CLI op calls this — the record's whole value
+  is that a person, not an agent, looked, so only the authenticated HTTP
+  endpoint does, with `:by` from the request's identity. Refuses (as
+  `{:error …}`, writing nothing) a verdict other than those two, a missing
+  reviewer, and a target that is not a commit point in this store. A record
+  with visible absence, never a gate: nothing refuses an unreviewed commit
+  point."
+  [session target verdict & {:keys [by note]}]
+  (let [rows (history/commit-point-rows
+              (:store @(with-history session :ops [:commit])))
+        ok?  (some #(or (= target (:commit %)) (= target (:origin-id %))) rows)]
+    (cond
+      (not (contains? #{:endorsed :flagged} verdict))
+      {:error (str "review needs a verdict of endorsed or flagged, got " (pr-str verdict))}
+
+      (str/blank? by)
+      {:error "review needs a reviewer (:by) — the identity the request resolved"}
+
+      (not ok?)
+      {:error (str "no commit point " (pr-str target) " in this store — a review names a"
+                   " commit point's id, as the timeline lists it")}
+
+      :else
+      (do (engine/commit-appended!
+           session
+           #(first (store/record-review % target verdict :by by :note note))
+           [])
+          {:reviewed target :verdict verdict :by by}))))
+
 (defn create-ns!
   "F4: bring a brand-new namespace into being — two modes:
    - **scaffold** (`:requires`, clause strings like \"[clojure.string :as str]\"):

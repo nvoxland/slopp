@@ -46,13 +46,17 @@
       (if (<= (count s) line-cap) s (str (subs s 0 line-cap) "…")))))
 
 (defn ^:export timeline
-  "The reviewer landing model: commit-points newest first, each carrying the
-  `from..to` range that addresses its own change screen, plus the WORKING
-  SET — what has been written since the newest commit-point.
+  "The reviewer landing model: commit-points, each carrying the `from..to`
+  range that addresses its own change screen, plus the WORKING SET — what has
+  been written since the newest commit-point.
 
-  The range is computed here rather than in the page so a template stays a
-  template: a commit-point's range runs from the commit-point BEFORE it, and the
-  oldest commit-point has no `:range` at all rather than an empty one.
+  Order: commit-points a human has NOT reviewed come first, then the reviewed
+  ones; within each group newest first. Absence of a review is the signal, so
+  it leads. A reviewed row carries `:review {:verdict :by :at :note}`, the
+  LATEST review recorded for it (`:verdict` a string — a keyword value reaches
+  a consumer as a string and nothing converts it back). A row's `:range` is
+  computed here, before the reorder, from the commit-point before it in TIME:
+  the oldest has no `:range` at all rather than an empty one.
 
   Deliberately not `query-changes`: this page shows counts and recorded
   asks, never sources, and `query-changes` reconstructs the before/after
@@ -62,32 +66,35 @@
   `query-commits`: this namespace is :pure and query-commits opens the db
   to join the git projection's pinned shas. The cost is exactly that —
   `:sha` appears only for commit-points whose DELTA carries one. The fold
-  needs the value's `:deltas` to hold the `:commit` markers and nothing
-  more (`slopp.ops/with-history` with `:ops [:commit]`); the working set
-  is the RECENT window the value always carries — everything since the
-  newest commit-point plus the done that earned it, and the content filter
-  drops that marker."
+  needs the value's `:deltas` to hold the `:commit` and `:review` markers and
+  nothing more (`slopp.ops/with-history` with `:ops [:commit :review]`); the
+  working set is the RECENT window the value always carries — everything since
+  the newest commit-point plus the done that earned it, and the content filter
+  drops those markers."
   [session]
   (let [st         (:store @session)
         rows       (history/commit-point-rows st :titles-only true)
-        commit-points (vec (map-indexed
-                         (fn [i row]
-                           (let [prev (:commit (nth rows (inc i) nil))]
-                             (cond-> (-> (select-keys row [:commit :description :more-lines
-                                                           :status :at :agent :sha])
-                                         (update :description snip)
-                                         ;; a keyword VALUE reaches a consumer as a
-                                         ;; string and nothing converts it back — the
-                                         ;; same reason `:form` is `(str form)` and not
-                                         ;; a symbol. Keys are symmetric; values are not.
-                                         (update :status #(some-> % name)))
-                               prev (assoc :range (str prev ".." (:commit row))))))
-                         rows))
+        reviews    (history/latest-reviews st)
+        commit-points (->> rows
+                           (map-indexed
+                            (fn [i row]
+                              (let [prev (:commit (nth rows (inc i) nil))
+                                    rv   (or (get reviews (:commit row))
+                                             (get reviews (:origin-id row)))]
+                                (cond-> (-> (select-keys row [:commit :description :more-lines
+                                                              :status :at :agent :sha])
+                                            (update :description snip)
+                                            (update :status #(some-> % name)))
+                                  prev (assoc :range (str prev ".." (:commit row)))
+                                  rv   (assoc :review (update rv :verdict name))))))
+                           (sort-by #(if (:review %) 1 0))
+                           vec)
         last-commit (:commit (first rows))
         mine       (filter #(contains? history/content-ops (:op %)) (:recent st))
         asks       (vec (keep :prompt mine))
         shown      8]
     {:commit-points commit-points
+     :unreviewed (count (remove :review commit-points))
      :working (cond-> {:since      (or last-commit :log-start)
                        :forms      (count (distinct (mapcat history/delta-fids mine)))
                        :namespaces (vec (distinct (keep #(some-> (:ns %) str) mine)))

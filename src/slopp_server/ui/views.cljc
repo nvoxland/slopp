@@ -743,7 +743,7 @@
   this concept from `milestone` on 2026-09-02 and the wire followed; a
   hyphenated key rendered as a heading would wear the transport on the
   outside."
-  [{:keys [commit-points working]}]
+  [{:keys [commit-points working unreviewed]}]
   [:div
    [:h1 "review"]
    ;; an endpoint CAN answer with nothing, and this pane used to THROW on it:
@@ -772,6 +772,11 @@
    (when (seq commit-points)
      [:section
       [:h2 "commit points"]
+      ;; the ABSENCE of a human review, said once and in words: unreviewed
+      ;; commit points are listed first, and a count of them is the line a
+      ;; reviewer scans for
+      (when (pos? (or unreviewed 0))
+        [:p [:small (str unreviewed " not reviewed")]])
       (into [:ol]
             (for [m commit-points]
               [:li
@@ -793,7 +798,10 @@
                 (when (= "red" (:status m))
                   " · recorded red")
                 (when-let [n (:more-lines m)]
-                  (str " · " (plural n "more line")))]]))])])
+                  (str " · " (plural n "more line")))
+                ;; absence of a review is the signal, so it is SAID in words
+                (when-let [rv (:review m)]
+                  (str " · reviewed: " (:verdict rv) " by " (:by rv)))]]))])])
 
 (defn spine-view
   "The path a form sits on: root caller at the top, leaf callee at the bottom.

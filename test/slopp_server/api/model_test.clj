@@ -1004,3 +1004,43 @@
              :assertions 2}]
            (:test-specs v)))
     (is (json-shaped? v))))
+
+(deftest a-reviewed-commit-point-carries-its-review-and-unreviewed-ones-come-first
+  (let [st (assoc (store/empty-store)
+                  :deltas
+                  [{:id "d1" :op :add :ns 'demo.core :form-id "f1"}
+                   {:id "d2" :op :commit :target "d1" :status :green :at 1784900000000 :description "first"}
+                   {:id "d3" :op :add :ns 'demo.core :form-id "f2"}
+                   {:id "d4" :op :commit :target "d3" :status :green :at 1784900060000 :description "second"}
+                   {:id "d5" :op :review :target "d4" :verdict :flagged :by "alice" :at 1784900070000}
+                   {:id "d6" :op :review :target "d4" :verdict :endorsed :by "bob" :note "fixed" :at 1784900080000}
+                   {:id "d7" :op :add :ns 'demo.core :form-id "f3"}
+                   {:id "d8" :op :commit :target "d7" :status :green :at 1784900090000 :description "third"}])
+        tl (model/timeline (atom {:store st}))
+        rows (:commit-points tl)]
+    (testing "unreviewed commit points come first, newest first within each group"
+      (is (= ["d8" "d2" "d4"] (mapv :commit rows))))
+    (testing "a reviewed row carries the LATEST review, as JSON-shaped data"
+      (let [r (:review (last rows))]
+        (is (= "endorsed" (:verdict r)))
+        (is (= "bob" (:by r)))
+        (is (= "fixed" (:note r)))
+        (is (string? (:at r)))))
+    (testing "an unreviewed row has no :review key at all"
+      (is (not-any? #(contains? % :review) (take 2 rows))))
+    (testing "the range still addresses the commit point before it in TIME"
+      (is (= "d4..d8" (:range (first rows))))
+      (is (= "d2..d4" (:range (last rows)))))
+    (is (json-shaped? tl) (pr-str tl))))
+
+(deftest the-timeline-counts-the-commit-points-nobody-reviewed
+  (let [st (assoc (store/empty-store)
+                  :deltas
+                  [{:id "d1" :op :add :ns 'demo.core :form-id "f1"}
+                   {:id "d2" :op :commit :target "d1" :status :green :at 1784900000000 :description "first"}
+                   {:id "d3" :op :add :ns 'demo.core :form-id "f2"}
+                   {:id "d4" :op :commit :target "d3" :status :green :at 1784900060000 :description "second"}
+                   {:id "d5" :op :review :target "d4" :verdict :endorsed :by "bob" :at 1784900080000}])
+        tl (model/timeline (atom {:store st}))]
+    (is (= 1 (:unreviewed tl)))
+    (is (json-shaped? tl) (pr-str tl))))
