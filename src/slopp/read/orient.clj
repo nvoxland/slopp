@@ -1070,95 +1070,6 @@
   read anyway costs the same rent carried as fetched, and one turn less."
   {:max-chars 9000 :max-nses 6 :max-total 22000})
 
-(defn ^:export bundle
-  "The ASK BUNDLE with its ledger half: `{:text \"…\" :sent [[form-id hash] …]}`.
-  `:text` is `orient-map` rendered as ONE plain-text block sized for prompt
-  injection — a header that orients and names the reads that answer a
-  task (`query_flow` for how forms connect, `targets` for bodies), the
-  ranked rows as one-line cards with their `:via` and `:v`, full sources
-  for at most `sources` seed rows, and the SMALLEST namespaces the ask
-  names by word sent WHOLE (`:whole-ns?`; caps in `whole-ns-caps`) —
-  smallest first, never mention order, which dropped exactly the ones the
-  model then read by hand. The cap is the diet: measured, the sources
-  section was 85% of the bundle, and the injected text rides EVERY later
-  request of the session as context rent — rows past the cap stay cards,
-  in rank order. The whole section was retired one afternoon on principle
-  and restored the same evening on measurement: cards-then-fetch cost 24
-  and 29 turns where whole cost 19. Forms sent whole are dropped from the
-  cards. `:sent` is the form versions whose text was emitted, for the
-  caller to stash toward the session's form ledger — the bundle, the write
-  results and the reads share one ledger. A blank ask is the plain ranking,
-  never an error — same stance as the search endpoint."
-  [session ask & {:keys [tokens sources cli? versions? whole-ns?]
-                  :or {tokens 1100 sources 2 versions? true whole-ns? true}}]
-  (let [st      (:store @session)
-        m       (orient-map session :ask (str ask) :tokens tokens)
-        {:keys [max-chars max-nses max-total]} whole-ns-caps
-        wholes  (when whole-ns?
-                  (->> (:ns-seeds m)
-                       (map (fn [nsx] [nsx (store.render/render-ns st nsx)]))
-                       (filter (fn [[_ src]] (and (pos? (count src)) (<= (count src) max-chars))))
-                       (sort-by (fn [[_ src]] (count src)))
-                       (reduce (fn [{:keys [acc total]} [nsx src]]
-                                 (if (and (< (count acc) max-nses) (<= (+ total (count src)) max-total))
-                                   {:acc (conj acc [nsx src]) :total (+ total (count src))}
-                                   {:acc acc :total total}))
-                               {:acc [] :total 0})
-                       :acc))
-        whole?  (into #{} (map first) wholes)
-        in-whole? (fn [q] (whole? (symbol (namespace q))))
-        withs   (vec (take sources (filter #(and (:source %) (not (in-whole? (:form %)))) (:rows m))))
-        keep?   (into #{} (map :form) withs)
-        cards   (into [] (comp (remove (comp keep? :form))
-                               (remove (comp in-whole? :form))
-                               (map #(dissoc % :source)))
-                      (:rows m))
-        v-of    (fn [q] (form-version session (symbol (namespace q)) (symbol (name q))))
-        line    (fn [{:keys [form sig doc via]}]
-                  (str "  " form
-                       (when sig (str " " (pr-str sig)))
-                       (when (seq (str doc)) (str " — " (snip doc 70)))
-                       "  [" via "]"
-                       (when-let [v (and versions? (v-of form))] (str " :v " (pr-str v)))))
-        sent    (vec (concat
-                      (for [r withs
-                            :let [q (:form r)
-                                  e (store/form-named st (symbol (namespace q))
-                                                      (symbol (name q)))]
-                            :when e]
-                        [(:id e) (hash (:source r))])
-                      (for [[nsx _] wholes
-                            e (store/forms st nsx)]
-                        [(:id e) (hash (n/string (:node e)))])))]
-    {:sent sent
-     :text (str "[slopp] " (count (:namespaces st)) (if cli? " namespaces; live store — drive it" " namespaces; live store — work")
-                (if cli?
-                  (str " with the slopp CLI — fast, routed to this running server:"
-                       " slopp <op> '{…json…}' · slopp add <ns> <<'EOF' …forms… EOF ·"
-                       " slopp replace <ns/name> <<'EOF' · slopp change --prompt '…'"
-                       " <<'EOF' with ;;;tests <ns> / ;;;impl <ns> sections ·"
-                       " slopp done '{}' when a unit is finished. There are NO MCP tools"
-                       " for this store — the shell IS the interface, so never"
-                       " search for tools. Every write"
-                       " verifies itself and reports.")
-                  " through the slopp tools (the store is the source, not the files).")
-                " The forms below are ranked for THIS ask; their sources, when"
-                " present, are current — no need to re-read them. How they connect:"
-                " query_flow {from to} or {on reach} (bodies on the way); the bodies"
-                " you will edit: query_source {targets [\"ns/name\" …]}.\n"
-                (when (seq (:seeds m))
-                  (str "seeds: " (str/join " " (:seeds m)) "\n"))
-                (when (seq cards)
-                  (str (str/join "\n" (map line cards)) "\n"))
-                (when (seq withs)
-                  (str "--- the forms the ask names, in full ---\n"
-                       (str/join "\n\n" (map #(str ";; " (:form %) " [" (:via %) "]\n" (:source %))
-                                             withs))
-                       "\n"))
-                (when (seq wholes)
-                  (str "--- the namespaces the ask names, whole — current, no need to read them ---\n"
-                       (str/join "\n\n" (map (fn [[nsx src]] (str ";; " nsx "\n" src)) wholes)))))}))
-
 (defn ^:export read-hint
   "The one line a namespace read ends with, whichever shape it took: `lead`
   says what this answer is (\"whole, small.\" or \"cards, not bodies.\"), the
@@ -1207,3 +1118,121 @@
              :forms (mapv card forms)
              :hint (read-hint "cards, not bodies.")}
       example (assoc :example example))))
+
+(defn- an-ask
+  "`p`, a recorded prompt, cut to a line — or nil when it says nothing a
+  reader can use: absent, blank, or an import placeholder (\"imported from
+  git ...\"), which records where code came from, not why it is that way."
+  [p]
+  (when (and (string? p) (seq (str/trim p))
+             (not (str/starts-with? p "imported from git")))
+    (snip p 120)))
+
+(defn ^:export bundle
+  "The ASK BUNDLE with its ledger half: `{:text \"…\" :sent [[form-id hash] …]}`.
+  `:text` is `orient-map` rendered as ONE plain-text block sized for prompt
+  injection — a header that orients and names the reads that answer a
+  task (`query_flow` for how forms connect, `targets` for bodies), the
+  ranked rows as one-line cards with their `:via` and `:v`, full sources
+  for at most `sources` seed rows, and the SMALLEST namespaces the ask
+  names by word sent WHOLE (`:whole-ns?`; caps in `whole-ns-caps`) —
+  smallest first, never mention order, which dropped exactly the ones the
+  model then read by hand. The cap is the diet: measured, the sources
+  section was 85% of the bundle, and the injected text rides EVERY later
+  request of the session as context rent — rows past the cap stay cards,
+  in rank order. The whole section was retired one afternoon on principle
+  and restored the same evening on measurement: cards-then-fetch cost 24
+  and 29 turns where whole cost 19. Forms sent whole are dropped from the
+  cards. `:sent` is the form versions whose text was emitted, for the
+  caller to stash toward the session's form ledger — the bundle, the write
+  results and the reads share one ledger. A blank ask is the plain ranking,
+  never an error — same stance as the search endpoint.
+
+  Every form shown, as a card, a source or part of a whole namespace,
+  carries the ask that last changed it ([[an-ask]]), cut to a line. The
+  reason a form is the way it is often lives only there, and measured,
+  agents who never saw it broke what it protected."
+  [session ask & {:keys [tokens sources cli? versions? whole-ns?]
+                  :or {tokens 1100 sources 2 versions? true whole-ns? true}}]
+  (let [st      (:store @session)
+        m       (orient-map session :ask (str ask) :tokens tokens)
+        {:keys [max-chars max-nses max-total]} whole-ns-caps
+        wholes  (when whole-ns?
+                  (->> (:ns-seeds m)
+                       (map (fn [nsx] [nsx (store.render/render-ns st nsx)]))
+                       (filter (fn [[_ src]] (and (pos? (count src)) (<= (count src) max-chars))))
+                       (sort-by (fn [[_ src]] (count src)))
+                       (reduce (fn [{:keys [acc total]} [nsx src]]
+                                 (if (and (< (count acc) max-nses) (<= (+ total (count src)) max-total))
+                                   {:acc (conj acc [nsx src]) :total (+ total (count src))}
+                                   {:acc acc :total total}))
+                               {:acc [] :total 0})
+                       :acc))
+        whole?  (into #{} (map first) wholes)
+        in-whole? (fn [q] (whole? (symbol (namespace q))))
+        withs   (vec (take sources (filter #(and (:source %) (not (in-whole? (:form %)))) (:rows m))))
+        keep?   (into #{} (map :form) withs)
+        cards   (into [] (comp (remove (comp keep? :form))
+                               (remove (comp in-whole? :form))
+                               (map #(dissoc % :source)))
+                      (:rows m))
+        ask-of  (fn [q] (some->> (store/form-named st (symbol (namespace q)) (symbol (name q)))
+                                 :id (get (:prompts st)) an-ask))
+        v-of    (fn [q] (form-version session (symbol (namespace q)) (symbol (name q))))
+        line    (fn [{:keys [form sig doc via]}]
+                  (str "  " form
+                       (when sig (str " " (pr-str sig)))
+                       (when (seq (str doc)) (str " — " (snip doc 70)))
+                       "  [" via "]"
+                       (when-let [v (and versions? (v-of form))] (str " :v " (pr-str v)))
+                       (when-let [a (ask-of form)] (str " asked: " (pr-str a)))))
+        ns-asks (fn [nsx]
+                  (keep (fn [e]
+                          (when-let [a (and (:name e) (an-ask (get (:prompts st) (:id e))))]
+                            (str ";; asked of " nsx "/" (:name e) ": " (pr-str a))))
+                        (store/forms st nsx)))
+        sent    (vec (concat
+                      (for [r withs
+                            :let [q (:form r)
+                                  e (store/form-named st (symbol (namespace q))
+                                                      (symbol (name q)))]
+                            :when e]
+                        [(:id e) (hash (:source r))])
+                      (for [[nsx _] wholes
+                            e (store/forms st nsx)]
+                        [(:id e) (hash (n/string (:node e)))])))]
+    {:sent sent
+     :text (str "[slopp] " (count (:namespaces st)) (if cli? " namespaces; live store — drive it" " namespaces; live store — work")
+                (if cli?
+                  (str " with the slopp CLI — fast, routed to this running server:"
+                       " slopp <op> '{…json…}' · slopp add <ns> <<'EOF' …forms… EOF ·"
+                       " slopp replace <ns/name> <<'EOF' · slopp change --prompt '…'"
+                       " <<'EOF' with ;;;tests <ns> / ;;;impl <ns> sections ·"
+                       " slopp done '{}' when a unit is finished. There are NO MCP tools"
+                       " for this store — the shell IS the interface, so never"
+                       " search for tools. Every write"
+                       " verifies itself and reports.")
+                  " through the slopp tools (the store is the source, not the files).")
+                " The forms below are ranked for THIS ask; their sources, when"
+                " present, are current — no need to re-read them. How they connect:"
+                " query_flow {from to} or {on reach} (bodies on the way); the bodies"
+                " you will edit: query_source {targets [\"ns/name\" …]}.\n"
+                (when (seq (:seeds m))
+                  (str "seeds: " (str/join " " (:seeds m)) "\n"))
+                (when (seq cards)
+                  (str (str/join "\n" (map line cards)) "\n"))
+                (when (seq withs)
+                  (str "--- the forms the ask names, in full ---\n"
+                       (str/join "\n\n" (map #(str ";; " (:form %) " [" (:via %) "]\n"
+                                                   (when-let [a (ask-of (:form %))]
+                                                     (str ";; asked: " (pr-str a) "\n"))
+                                                   (:source %))
+                                             withs))
+                       "\n"))
+                (when (seq wholes)
+                  (str "--- the namespaces the ask names, whole — current, no need to read them ---\n"
+                       (str/join "\n\n" (map (fn [[nsx src]]
+                                               (str ";; " nsx "\n" src
+                                                    (when-let [as (seq (ns-asks nsx))]
+                                                      (str "\n" (str/join "\n" as)))))
+                                             wholes)))))}))

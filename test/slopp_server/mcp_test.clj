@@ -5272,3 +5272,44 @@
               "said once")
           (finally (ops/close! a) (ops/close! b))))
       (finally (sh/sh "rm" "-rf" dir)))))
+
+(deftest ^:external a-source-read-carries-the-ask-that-last-changed-the-form
+  ;; Measured 2026-11-03 (eval-history pilot): ten agents read a form with
+  ;; query_source, none saw the recorded reason for its comma handling, and
+  ;; all ten broke it. orient carried the reason; the read agents take did not.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "wy.core" :source "(ns wy.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n"
+                              :prompt "start"})
+      (call! sess "change" {:prompt "keep commas: the Swedish export writes 12,50"
+                            :impl [{:ns "wy.core" :name "f" :source "(defn ^:unused-ok f \"F.\" [x] (str x))"}]})
+      (let [r (call! sess "query_source" {:targets ["wy.core/f"] :resend true})]
+        (is (re-find #"\(str x\)" r) r)
+        (is (re-find #":why \"keep commas: the Swedish export writes 12,50" r) r))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-write-over-an-earlier-ask-repeats-it
+  ;; The moment an agent is about to undo a recorded reason is the write that
+  ;; replaces the form. The pilot's agents never read the reason; this line
+  ;; puts it in front of them at that moment. Their own earlier asks in the
+  ;; same session are not news, so they are not repeated.
+  (let [dir (str (System/getProperty "java.io.tmpdir") "/slopp-ask-" (System/nanoTime))]
+    (try
+      (let [setup (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "setup"})]
+        (try
+          (ops/ingest! setup 'ea.core "(ns ea.core)\n\n(defn ^:unused-ok f \"F.\" [x] (inc x))\n" :agent "setup")
+          (call! setup "change" {:prompt "keep commas: the Swedish export writes 12,50"
+                                 :impl [{:ns "ea.core" :name "f" :source "(defn ^:unused-ok f \"F.\" [x] (str x))"}]})
+          (is (= "main" (:landed (branch/land-thread! setup))) "fixture: the reasoned change reached main")
+          (finally (ops/close! setup))))
+      (let [b (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-b"})
+            w (fn [p body] (call! b "change" {:prompt p :impl [{:ns "ea.core" :name "f" :source body}]}))]
+        (try
+          (let [r (w "strip commas" "(defn ^:unused-ok f \"F.\" [x] (str x \"!\"))")]
+            (is (re-find #"(?m)^;; .*ea.core/f" r) r)
+            (is (str/includes? r "keep commas: the Swedish export writes 12,50") r)
+            (is (str/includes? r ":status :green") "said, not refused"))
+          (is (not (str/includes? (w "again" "(defn ^:unused-ok f \"F.\" [x] (str x \"?\"))") "Swedish"))
+              "the session's own earlier ask is not news")
+          (finally (ops/close! b))))
+      (finally (sh/sh "rm" "-rf" dir)))))

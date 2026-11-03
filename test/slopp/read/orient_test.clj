@@ -986,3 +986,23 @@
             (every? #(number? (:forms %)) (:changes r)))
         "the per-form rows aggregated or went; the asks did not")
     (is (string? (:note r)) (pr-str (keys r)))))
+
+(deftest the-bundle-carries-the-ask-that-shaped-each-form
+  ;; The bundle is the first thing an agent reads for an ask, and the reason
+  ;; a form is the way it is often lives only in the ask that last changed
+  ;; it. Measured: agents who never saw that ask broke what it protected.
+  (let [st   (-> (store/empty-store)
+                 (store/ingest 'wy.money "(ns wy.money)\n(defn parse-amount \"P.\" [s] s)\n"
+                               :prompt "keep commas: the Swedish export writes 12,50")
+                 (store/ingest 'wy.other "(ns wy.other)\n(defn g \"G.\" [s] s)\n"
+                               :prompt "imported from git abc123 (/tmp/x)"))
+        sess (atom {:store st :test-map {}})]
+    (testing "a namespace sent whole carries its forms' asks"
+      (let [txt (:text (orient/bundle sess "money parse-amount"))]
+        (is (re-find #"Swedish" txt) txt)))
+    (testing "so does a card or a seed source, when nothing is sent whole"
+      (let [txt (:text (orient/bundle sess "money parse-amount" :whole-ns? false))]
+        (is (re-find #"Swedish" txt) txt)))
+    (testing "an import placeholder is not an ask"
+      (let [txt (:text (orient/bundle sess "other g" :whole-ns? false))]
+        (is (not (re-find #"imported from git" txt)) txt)))))

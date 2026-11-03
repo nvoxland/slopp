@@ -1023,11 +1023,28 @@
   Why: `told!` stubs a whole payload the same call already returned and
   knows nothing about forms, so orient → slice → query_source of one form
   sent its text three times, and the read after the agent's own write sent
-  back what the agent had typed. eval10 measured reads at 52% of all output."
+  back what the agent had typed. eval10 measured reads at 52% of all output.
+
+  The same pass gives every such row the ASK that last changed the form, as
+  `:why`, unless the row already says why (orient's rows do). A source read
+  is the read an agent takes right before it edits, and the reason a form is
+  the way it is often lives in that ask and nowhere in the code: measured,
+  ten agents read a form whose comma handling had a recorded reason, none
+  saw it, and all ten broke it. It rides on a referenced row too, since the
+  ledger holding the source says nothing about whether the reason was read."
   [session x]
-  (let [row (fn [m ns-sym nm]
+  (let [st  (:store @session)
+        why (fn [m ns-sym nm]
+              (if (contains? m :why)
+                m
+                (if-let [p (some->> (store/form-named st ns-sym nm) :id
+                                    (get (:prompts st)) str not-empty)]
+                  (assoc m :why (orient/snip p 200))
+                  m)))
+        row (fn [m ns-sym nm]
               (let [s (:source m)
-                    v (when (string? s) (orient/form-version session ns-sym nm))]
+                    v (when (string? s) (orient/form-version session ns-sym nm))
+                    m (why m ns-sym nm)]
                 (cond
                   (nil? v)                    m
                   (not= (second v) (hash s))  m
@@ -1048,83 +1065,6 @@
                     (vector? (:forms x)) (update :forms #(mapv one %))
                     (map? (:target x))   (update :target one))
       :else       x)))
-
-(defn- told!
-  "Knowledge-differential reads: the session keeps a hash of every
-  cacheable VIEW it has sent, SCOPED TO THE CURRENT ASK; an identical
-  re-read within that ask returns a tiny :unchanged stub instead of the
-  payload. Re-fetching becomes FREE, so agents never carry views in
-  context 'just in case' — the whole don't-hoard stance depends on cheap
-  re-asks, and reads are 52% of all output. Any store change alters the
-  payload, so staleness is impossible by construction.
-
-  **The ask scope is the correction, and it is about WHOSE knowledge this
-  is.** The record lives in the SERVER session, which lasts for the
-  process; the claim it makes is about the READER, which resets on
-  `/clear`, on automatic compaction, and for every subagent. Unscoped, the
-  two diverged and the stub said \"you already know\" to a context that had
-  never seen it — measured twice, once mid-plan after a clear and once
-  mid-build after an automatic compact. Not staleness: WITHHOLDING, with
-  absence-of-payload wearing absence-of-change's clothes.
-
-  The ASK is the boundary and the TURN is not: turns rotate on the
-  write-tool gate, so a read-only planning ask never rotates one — and that
-  is precisely where this was first hit. `absorb-pending-intent!` bumps
-  `::ask` for every prompt the hook records, read-only included.
-
-  `:detail` is the escape for the case the scope cannot cover: a subagent
-  shares the session and runs inside the parent's ask, so it can be told
-  \"you already know\" about something it has never seen. The payload is
-  spooled and the id named, which is the same door `query_detail` already
-  opens for trimmed responses — previously the only way to a read-only
-  tool's withheld payload was a write-capable tool that prompts for
-  permission in plan mode.
-
-  `resend: true` is the reader's own escape, WITHIN an ask: compaction
-  replaces the transcript with a summary MID-ASK, invisibly to this wire,
-  and source text is exactly what a summary drops — so every claim above
-  about what the reader holds can be false and the server cannot know.
-  Only the reader knows it is reading a summary of itself. resend bypasses
-  the stub AND the form-ledger references for THIS call and records
-  nothing new; the dedup stays the default everywhere else."
-  [session tool a payload]
-  (if (:resend a)
-    payload
-    (let [;; the FORM ledger first: a source the ask already holds at this
-          ;; version leaves as a reference, whichever view carries it
-          payload (dedupe-sources! session payload)
-          k [tool (select-keys a [:ns :name :targets :since :detail :depth
-                                  :limit :contains :full :at :collapse :format
-                                  :on :direction :from :to :reach])]
-          h     [(get @session ::ask 0) (hash payload)]
-          p-str (pr-str payload)
-          stub  {:already-sent true
-                 :view (str tool (when (:ns a) (str " " (:ns a)))
-                            (when (:name a) (str "/" (:name a))))
-                 :note (str "already sent in this ask — about what YOU received,"
-                            " NOT whether the store changed (an outline does not"
-                            " move when a body does). query_detail {:detail}"
-                            " re-opens it.")}]
-      (if (and (= h (get-in @session [::told k]))
-               ;; a stub bigger than what it withholds is not a saving, it is a
-               ;; round trip for nothing. This was a constant (130 chars) chosen
-               ;; when the stub was one short sentence; the note then grew and
-               ;; the floor did not, so small views started costing MORE to
-               ;; withhold than to send. Measuring the actual stub cannot drift
-               ;; out of step with the stub the way a number written down
-               ;; elsewhere can. The id is a representative one — they are all
-               ;; the same length — because it cannot be minted before the
-               ;; decision to spool.
-               (< (count (pr-str (assoc stub :detail "s00000000000")))
-                  (count p-str)))
-        (let [id (spool! session p-str)]
-          ;; a stub is a withholding, not a saving, until nobody opens it —
-          ;; recorded through the same channel as a trim so one fold can ask
-          ;; both paths the question
-          (note-response! {:stub? true :spooled id})
-          (assoc stub :detail id))
-        (do (swap! session assoc-in [::told k] h)
-            payload)))))
 
 (defn- ledger-written!
   "After a write whose FULL source the agent sent landed (`edit_add_form`,
@@ -2202,20 +2142,172 @@
   "Every handler-map entry (Q4) — call-tool checks here first."
   (merge env-handlers! file-handlers! sync-handlers! change-handlers!))
 
-(defn- with-overlap-note!
+(defn- with-whys
+  "`x` with every row that carries a form's source (or a reference to it)
+  given the ASK that last changed that form, as `:why`, unless the row already
+  says why (orient's rows do). Walks the shapes [[dedupe-sources!]] walks.
+
+  A source read is the read an agent takes right before it edits, and the
+  reason a form is the way it is often lives in that ask and nowhere in the
+  code. Measured: ten agents read a form whose comma handling had a recorded
+  reason, none saw it, and all ten broke it. orient carried the reason; the
+  read they took did not. It rides whether or not the source itself is
+  resent, because holding the text says nothing about having read the reason."
+  [session x]
+  (let [st   (:store @session)
+        row  (fn [m ns-sym nm]
+               (if (contains? m :why)
+                 m
+                 (if-let [p (some->> (store/form-named st ns-sym nm) :id
+                                     (get (:prompts st)) str not-empty)]
+                   (assoc m :why (orient/snip p 200))
+                   m)))
+        src? (fn [m] (or (contains? m :source) (:source-already-sent m)))
+        one  (fn [m]
+               (cond
+                 (not (map? m)) m
+                 (and (:ns m) (:name m) (src? m))
+                 (row m (symbol (str (:ns m))) (symbol (str (:name m))))
+                 (and (symbol? (:form m)) (namespace (:form m)) (src? m))
+                 (row m (symbol (namespace (:form m))) (symbol (name (:form m))))
+                 :else m))]
+    (cond
+      (vector? x) (mapv one x)
+      (map? x)    (cond-> (one x)
+                    (vector? (:rows x))  (update :rows #(mapv one %))
+                    (vector? (:forms x)) (update :forms #(mapv one %))
+                    (map? (:target x))   (update :target one))
+      :else       x)))
+
+(defn- told!
+  "Knowledge-differential reads: the session keeps a hash of every
+  cacheable VIEW it has sent, SCOPED TO THE CURRENT ASK; an identical
+  re-read within that ask returns a tiny :unchanged stub instead of the
+  payload. Re-fetching becomes FREE, so agents never carry views in
+  context 'just in case' — the whole don't-hoard stance depends on cheap
+  re-asks, and reads are 52% of all output. Any store change alters the
+  payload, so staleness is impossible by construction.
+
+  **The ask scope is the correction, and it is about WHOSE knowledge this
+  is.** The record lives in the SERVER session, which lasts for the
+  process; the claim it makes is about the READER, which resets on
+  `/clear`, on automatic compaction, and for every subagent. Unscoped, the
+  two diverged and the stub said \"you already know\" to a context that had
+  never seen it — measured twice, once mid-plan after a clear and once
+  mid-build after an automatic compact. Not staleness: WITHHOLDING, with
+  absence-of-payload wearing absence-of-change's clothes.
+
+  The ASK is the boundary and the TURN is not: turns rotate on the
+  write-tool gate, so a read-only planning ask never rotates one — and that
+  is precisely where this was first hit. `absorb-pending-intent!` bumps
+  `::ask` for every prompt the hook records, read-only included.
+
+  `:detail` is the escape for the case the scope cannot cover: a subagent
+  shares the session and runs inside the parent's ask, so it can be told
+  \"you already know\" about something it has never seen. The payload is
+  spooled and the id named, which is the same door `query_detail` already
+  opens for trimmed responses — previously the only way to a read-only
+  tool's withheld payload was a write-capable tool that prompts for
+  permission in plan mode.
+
+  `resend: true` is the reader's own escape, WITHIN an ask: compaction
+  replaces the transcript with a summary MID-ASK, invisibly to this wire,
+  and source text is exactly what a summary drops — so every claim above
+  about what the reader holds can be false and the server cannot know.
+  Only the reader knows it is reading a summary of itself. resend bypasses
+  the stub AND the form-ledger references for THIS call and records
+  nothing new; the dedup stays the default everywhere else.
+
+  On both paths every source row also gets the ask that last changed its
+  form ([[with-whys]]): the reason is not a thing the reader can be assumed
+  to hold."
+  [session tool a payload]
+  (if (:resend a)
+    (with-whys session payload)
+    (let [;; the FORM ledger first: a source the ask already holds at this
+          ;; version leaves as a reference, whichever view carries it
+          payload (with-whys session (dedupe-sources! session payload))
+          k [tool (select-keys a [:ns :name :targets :since :detail :depth
+                                  :limit :contains :full :at :collapse :format
+                                  :on :direction :from :to :reach])]
+          h     [(get @session ::ask 0) (hash payload)]
+          p-str (pr-str payload)
+          stub  {:already-sent true
+                 :view (str tool (when (:ns a) (str " " (:ns a)))
+                            (when (:name a) (str "/" (:name a))))
+                 :note (str "already sent in this ask — about what YOU received,"
+                            " NOT whether the store changed (an outline does not"
+                            " move when a body does). query_detail {:detail}"
+                            " re-opens it.")}]
+      (if (and (= h (get-in @session [::told k]))
+               ;; a stub bigger than what it withholds is not a saving, it is a
+               ;; round trip for nothing. This was a constant (130 chars) chosen
+               ;; when the stub was one short sentence; the note then grew and
+               ;; the floor did not, so small views started costing MORE to
+               ;; withhold than to send. Measuring the actual stub cannot drift
+               ;; out of step with the stub the way a number written down
+               ;; elsewhere can. The id is a representative one — they are all
+               ;; the same length — because it cannot be minted before the
+               ;; decision to spool.
+               (< (count (pr-str (assoc stub :detail "s00000000000")))
+                  (count p-str)))
+        (let [id (spool! session p-str)]
+          ;; a stub is a withholding, not a saving, until nobody opens it —
+          ;; recorded through the same channel as a trim so one fold can ask
+          ;; both paths the question
+          (note-response! {:stub? true :spooled id})
+          (assoc stub :detail id))
+        (do (swap! session assoc-in [::told k] h)
+            payload)))))
+
+(defn- earlier-asks-note!
+  "A one-line note naming the forms this write REPLACED whose previous ask
+  came from somewhere else, with that ask, or nil. `st0` is the store before
+  the write. The asks this session itself wrote are kept on the session and
+  never repeated, and an import placeholder (\"imported from git ...\") is not
+  an ask anybody made.
+
+  The write that replaces a form is the moment an agent can undo the reason
+  the form had. Measured: ten agents changed a form whose recorded ask said
+  why its comma handling existed, none read it, and all ten broke it."
+  [session st0]
+  (let [st1  (:store @session)
+        p0   (:prompts st0)
+        p1   (:prompts st1)
+        own  (::own-asks @session #{})
+        new  (for [[fid now] p1 :when (not= now (get p0 fid))] [fid now])
+        hits (for [[fid _] new
+                   :let [was (get p0 fid)
+                         e   (store/form-by-id st1 fid)]
+                   :when (and e (string? was) (seq was) (not (own was))
+                              (not (str/starts-with? was "imported from git")))]
+               [(symbol (str (store/ns-of-form-id st1 fid)) (str (or (:name e) fid))) was])]
+    (swap! session update ::own-asks (fnil into #{}) (map second new))
+    (when (seq hits)
+      (str "you replaced form(s) an earlier ask shaped: "
+           (str/join "; " (for [[f was] hits] (str f " (asked: \"" (orient/snip was 200) "\")")))
+           ". Check your change keeps what that ask wanted, or tell the user it no longer does."))))
+
+(defn- with-write-notes!
   "Run `call` (a no-argument fn returning a tool result) and, when it MOVED
-  this session's head, lead the answer with the parallel-work warning: forms
-  this thread and another open thread both hold un-landed
-  (`branch/overlap-note!`, which says each overlap once). Gated on the head
-  so a read pays nothing; asking the journal rather than a list of write
+  this session's head, lead the answer with what the write should know:
+  forms this thread and another open thread both hold un-landed
+  (`branch/overlap-note!`, which says each overlap once), and forms it
+  replaced that an earlier ask shaped ([[earlier-asks-note!]]). Gated on the
+  head so a read pays nothing; asking the journal rather than a list of write
   tool names, because such a list has missed a write tool before."
   [session call]
-  (let [h0 (:head (:store @session))
-        r  (call)]
-    (if-let [note (when (not= h0 (:head (:store @session)))
-                    (try (branch/overlap-note! session) (catch Exception _ nil)))]
-      (update-in r [:content 0 :text] #(str ";; " note "\n" %))
-      r)))
+  (let [st0 (:store @session)
+        r   (call)]
+    (if (= (:head st0) (:head (:store @session)))
+      r
+      (let [notes (keep #(try (% ) (catch Exception _ nil))
+                        [#(branch/overlap-note! session)
+                         #(earlier-asks-note! session st0)])]
+        (if (seq notes)
+          (update-in r [:content 0 :text]
+                     #(str (str/join "" (map (fn [n] (str ";; " n "\n")) notes)) %))
+          r)))))
 
 (defn- call-op!
   "THE dispatch seam every route crosses — family dispatch, the bare `--call`
@@ -2300,7 +2392,7 @@
                           ;; that shape a response know those, and none of them
                           ;; is on the path back to here.
                           *response-facts* facts]
-                  (try (with-overlap-note! session #(call-tool! session params))
+                  (try (with-write-notes! session #(call-tool! session params))
                        (catch Exception e
                          (assoc (text! (str "error: " (ex-message e)))
                                 :isError true))))
