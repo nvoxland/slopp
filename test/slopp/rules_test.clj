@@ -1534,3 +1534,34 @@
                                       "(def ^{:facet \"a\"} A {:facet/fields {:x/a :int}"
                                       " :facet/checks {:ok {:doc \"d\" :fn #'ok? :sources [:db/x]}}})\n"))
                nil))))
+
+(deftest a-loosened-facet-reds-done-unless-it-says-why
+  (let [old-src "(def ^{:facet \"a\"} A {:facet/fields {:x/a :int} :facet/checks {:ok {:doc \"d\" :fn #'ok?}}})"
+        check   (fn [def-src]
+                  (let [st  (store/ingest (store/empty-store) 'rf.core
+                                          (str "(ns rf.core)\n(defn ok? [o] true)\n" def-src "\n"))
+                        fid (:id (last (store/forms st 'rf.core)))]
+                    (rules/facet-weakening-check nil (assoc st :baselines [{:done "d0" :sources {fid old-src}}]) [fid])))]
+    (is (re-find #"check :ok was removed"
+                 (str (:teach (first (check "(def ^{:facet \"a\"} A {:facet/fields {:x/a :int}})"))))))
+    (is (empty? (check old-src)) "unchanged is not weaker")
+    (is (empty? (check "(def ^{:facet \"a\" :weakening-ok \"the owner agreed: ok? moved to the port\"} A {:facet/fields {:x/a :int}})"))
+        "a loosening that says why is the author's call")
+    (is (some #{:facet-weakening} (map :key rules/done-advisories)))))
+
+(deftest undeclared-travel-and-key-ownership-are-asked-again-at-done
+  (let [st  (-> (store/empty-store)
+                (store/ingest 'shop.order "(ns shop.order)\n(def ^{:facet \"an order\"} Order {:facet/fields {:shop/id :int}})\n")
+                (store/ingest 'ship.label "(ns ship.label)\n(defn f [m] [(:shop/id m) (:ship/to m) (:http/method m)])\n")
+                (store/ingest 'pay.card "(ns pay.card)\n(defn g [m] (:ship/to m))\n"))
+        fid (:id (last (store/forms st 'ship.label)))
+        travel (rules/undeclared-travel-check nil st [fid])
+        owned  (rules/facet-key-ownership-check nil st [fid])]
+    (is (= 1 (count travel)))
+    (is (re-find #":ship/to" (:teach (first travel))) "crosses two modules and nobody owns it")
+    (is (not (re-find #":shop/id|:http/method" (:teach (first travel))))
+        "an owned key is not travelling undeclared, and marker vocabulary is not data")
+    (is (re-find #"shop.order/Order" (str (:teach (first owned))))
+        "a form written before its key's facet existed is found at done")
+    (is (empty? (rules/undeclared-travel-check nil (store/ingest (store/empty-store) 'pay.card "(ns pay.card)\n(defn g [m] (:ship/to m))\n") nil))
+        "a store with no production facet is not asked")))

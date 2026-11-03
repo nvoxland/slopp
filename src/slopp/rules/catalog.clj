@@ -311,7 +311,16 @@
     :teach "an adapter for an inbound data port (db, jdbc, sql, file, queue) in a store with a facet hands data out without marking it raw. Data from outside arrives as raw until a facet parses it"}
    {:rule :facet-fields :grain :done
     :escape "none but the dial: write each field as a malli schema, or as {:schema s :optional true :secret true}"
-    :teach "parse validates against the schema a facet's fields describe; a field malli cannot build throws at the port instead of answering the sender"}])
+    :teach "parse validates against the schema a facet's fields describe; a field malli cannot build throws at the port instead of answering the sender"}
+   {:rule :facet-weakening :grain :done
+    :escape "^{:weakening-ok \"who agreed, and why it is safe\"} on the facet def"
+    :teach "a check removed, a check moved out of parse, a field dropped, a secret made plain, a field made optional or a view widened changes what every port lets through; the facet def is data, so test immutability cannot protect it"}
+   {:rule :undeclared-travel :grain :done
+    :escape "declare a facet that owns the key, or leave it: advisory"
+    :teach "a namespaced data key used in two or more modules with no owner is a value's contract that exists only as code agreeing on it"}
+   {:rule :facet-key-ownership-sweep :grain :done
+    :escape "as facet-key-ownership: parse where the value arrives, declare :rest/request #'Facet, or move the logic into a declared tier"
+    :teach "a form written before its key's facet was declared is a violation no write looks at again"}])
 
 (defn ^:export rule-rows
   "The rule catalog with each rule's DECLARED default `:severity` merged in from

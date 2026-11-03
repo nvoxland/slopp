@@ -286,3 +286,33 @@
                  :let [{:keys [schema optional secret]} (if (and (map? v) (contains? v :schema)) v {:schema v})
                        s (if (and view secret) :string (nest schema))]]
              (if optional [k {:optional true} s] [k s]))))))
+
+(defn ^:export weakenings
+  "How facet declaration `new` is weaker than `old`, as sentences: a check
+  removed, a check moved out of `parse` by declaring `:sources`, a field
+  dropped (its key loses its owner), a secret field made plain, a field made
+  optional, a view that shows more. A new field or check is a stronger
+  contract and says nothing."
+  [old new]
+  (let [spec (fn [v] (if (and (map? v) (contains? v :schema)) v {:schema v}))
+        of   (:facet/fields old) nf (:facet/fields new)
+        oc   (:facet/checks old) nc (:facet/checks new)]
+    (vec (concat
+          (for [k (sort (keys oc)) :when (not (contains? nc k))]
+            (str "check " k " was removed"))
+          (for [k (sort (keys oc))
+                :when (and (contains? nc k) (not (:sources (get oc k))) (:sources (get nc k)))]
+            (str "check " k " now declares :sources, so parse no longer runs it"))
+          (for [k (sort (keys of)) :when (not (contains? nf k))]
+            (str "field " k " was dropped, so the key has no owner"))
+          (for [k (sort (keys of))
+                :when (contains? nf k)
+                :let [o (spec (get of k)) n (spec (get nf k))]
+                s [(when (and (:secret o) (not (:secret n))) (str "field " k " is no longer secret"))
+                   (when (and (not (:optional o)) (:optional n)) (str "field " k " became optional"))]
+                :when s]
+            s)
+          (for [[v ks] (sort-by key (:facet/views old))
+                :let [added (remove (set ks) (get-in new [:facet/views v]))]
+                :when (seq added)]
+            (str "view " v " now also shows " (vec added)))))))

@@ -1136,6 +1136,76 @@
             r    (first (repl/eval! (:image @session) code))]
         (if (vector? r) r [])))))
 
+(defn facet-weakening-check
+  "Done-advisory (`:error`): a changed facet def is WEAKER than it was at the
+  last done — `edit.facet/weakenings` names how. A facet is the contract its
+  values are checked against, so loosening it changes what every port lets
+  through, and the facet def is data: the test-immutability tracer cannot
+  see it. `^{:weakening-ok \"who agreed, and why it is safe\"}` on the def
+  is the author's answer."
+  [_session st* changed]
+  (let [old-srcs (:sources (first (:baselines st*)))]
+    (vec (for [fid changed
+               :let [e       (store/form-by-id st* fid)
+                     sx      (some-> e edit.facet/facet-sexpr)
+                     old-src (get old-srcs fid)]
+               :when (and sx old-src (not (:weakening-ok (meta (second sx)))))
+               :let [old (try (n/sexpr (p/parse-string old-src)) (catch Exception _ nil))
+                     ws  (when (and (seq? old) (map? (last old)) (map? (last sx)))
+                           (edit.facet/weakenings (last old) (last sx)))]
+               :when (seq ws)]
+           {:form  (symbol (str (store/ns-of-form-id st* fid)) (str (:name e)))
+            :teach (str "this change loosens the facet: " (str/join "; " ws)
+                        ". A facet is the contract its values are checked against, and"
+                        " loosening it changes what every port lets through. If it is"
+                        " meant, say why on the def: ^{:weakening-ok \"who agreed, and"
+                        " why it is safe\"}.")}))))
+
+(defn undeclared-travel-check
+  "Done-advisory: a changed form uses a namespaced DATA key that travels
+  across two or more modules and that no facet owns — a value's contract that
+  exists only as the code that happens to agree on it. The rollout lever for
+  facets, so it asks only in a store that has declared one. Marker vocabulary
+  (`:http/*`, `:rest/*`, `:rule/*`, `:malli/*` and the other namespaces slopp
+  gives meaning to as var metadata) is not data and is skipped: measured on
+  slopp's own store, it is most of what crosses modules."
+  [_session st* changed]
+  (let [own (edit.facet/owners st*)]
+    (if (empty? own)
+      []
+      (let [marker-nss #{"http" "rest" "rule" "malli" "facet" "web" "webapp" "cli" "app" "slopp"}
+            data-key?  (fn [k] (when-let [n (namespace k)]
+                                 (not (or (marker-nss n) (str/includes? n "?")
+                                          (str/starts-with? n "clojure")))))
+            mods       (reduce (fn [m r] (update m (:kw r) (fnil conj #{}) (edit.modules/module-of (:from-ns r))))
+                               {} (refs/keyword-refs st*))]
+        (vec (for [fid changed
+                   :let [e (store/form-by-id st* fid) ns-sym (store/ns-of-form-id st* fid)]
+                   :when (and e (:name e) ns-sym)
+                   :let [sx (try (n/sexpr (:node e)) (catch Exception _ nil))
+                         ks (sort (distinct (for [[k _] (when sx (refs/form-keyword-uses sx))
+                                                  :when (and (data-key? k) (not (own k))
+                                                             (>= (count (get mods k)) 2))]
+                                              k)))]
+                   :when (seq ks)]
+               {:form  (symbol (str ns-sym) (str (:name e)))
+                :teach (str "uses " (vec ks) ", which travel across modules with no facet"
+                            " owning them. A key that crosses modules is a value's contract;"
+                            " declare a facet that owns it, so its checks live in one place.")}))))))
+
+(defn facet-key-ownership-check
+  "Done-advisory: the write gate `facet-key-ownership` asked again of the
+  episode's forms, and of the whole store by the sweep. The gate fires on the
+  form being written, so a form written BEFORE its key's facet was declared
+  becomes a violation that no write ever looks at again."
+  [_session st* changed]
+  (vec (for [fid changed
+             :let [e (store/form-by-id st* fid) ns-sym (store/ns-of-form-id st* fid)]
+             :when (and e (:name e) ns-sym)
+             :let [t (edit.facet/facet-key-ownership st* ns-sym (:name e))]
+             :when t]
+         {:form (symbol (str ns-sym) (str (:name e))) :teach t})))
+
 (def done-advisories
   "The done-time advisory registry (D9 rule-registry — the done-grain sibling of
    `edit.modules/per-form-write-gates`): an ordered list of {:key :severity
@@ -1523,6 +1593,19 @@
     :check #'facet-fields-check!
     :sweep true
     :selftest-note "runs in the image, where malli and the facet vars live, and the fixture harness passes no session; a field malli cannot build also fails every parse of that facet in its own tests"}
+   ;; the facet def is data, so test immutability cannot protect it; this can
+   {:key :facet-weakening :severity :error :applies-to :production
+    :check #'facet-weakening-check
+    :sweep "it compares with the last done, and a whole-store sweep has no baseline to compare with"
+    :selftest-note "needs a baseline from an earlier done, which the fixture harness does not build; slopp.rules-test/a-loosened-facet-reds-done-unless-it-says-why hands one in"}
+   {:key :undeclared-travel :severity :advisory :applies-to :production
+    :check #'undeclared-travel-check
+    :sweep true
+    :selftest-note "fires only across two modules in a store with a facet, and the fixture harness ingests one namespace; slopp.rules-test/undeclared-travel-and-key-ownership-are-asked-again-at-done pins it"}
+   {:key :facet-key-ownership-sweep :severity :advisory :applies-to :production
+    :check #'facet-key-ownership-check
+    :sweep true
+    :selftest-note "fires only when the key's facet lives in another namespace, and the fixture harness ingests one; slopp.rules-test/undeclared-travel-and-key-ownership-are-asked-again-at-done pins it"}
    ])
 
 (defn run-done-advisories!

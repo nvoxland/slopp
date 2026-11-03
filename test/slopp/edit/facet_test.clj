@@ -120,3 +120,21 @@
              (st (st (order "")) 'shop.web "(defn ^{:rest/request #'shop.order/Order} h [r] (:shop/total (:body r)))")
              'shop.web 'h))
       "a route that declares its facet by var had its body parsed by the port"))
+
+(deftest weakenings-name-every-way-a-facet-loosens
+  (let [old '{:facet/fields {:x/a :int :x/b {:schema :string :secret true} :x/c :int}
+              :facet/checks {:ok {:doc "d" :fn (var ok?)} :pure {:doc "p" :fn (var p?)}}
+              :facet/views  {:public [:x/a]}}]
+    (is (= [] (edit.facet/weakenings old old)) "the same declaration loosens nothing")
+    (is (= ["check :ok was removed"
+            "check :pure now declares :sources, so parse no longer runs it"
+            "field :x/b is no longer secret"
+            "field :x/c became optional"
+            "view :public now also shows [:x/b]"]
+           (edit.facet/weakenings old '{:facet/fields {:x/a :int :x/b :string :x/c {:schema :int :optional true}}
+                                        :facet/checks {:pure {:doc "p" :fn (var p?) :sources [:db/x]}}
+                                        :facet/views  {:public [:x/a :x/b]}})))
+    (is (= ["field :x/c was dropped, so the key has no owner"]
+           (edit.facet/weakenings old (update old :facet/fields dissoc :x/c))))
+    (is (= [] (edit.facet/weakenings old (assoc-in old [:facet/fields :x/d] :int)))
+        "a new field is a stronger contract, not a weaker one")))
