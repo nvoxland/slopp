@@ -5191,3 +5191,14 @@
           (is (re-find #":kind :form-history" r))
           (is (re-find #"(?s):reds\s+\[\{:test\s+.{1,3}rh.core-test/it-breaks.{1,3}\s+:n\s+2" r) r)))
       (finally (ops/close! sess)))))
+
+(deftest accept-says-why-a-red-test-got-no-proposal
+  ;; 5x1: the accepted test was STILL RED and came back :accept-unused, which
+  ;; says the opposite of what happened: its failure carried no detail the
+  ;; finisher could read, so it never entered the "failing" set
+  (let [t   'fin.core-test/counts
+        r   {:test {:fail 1 :failed-tests [t] :failures []}}
+        out (#'mcp/finish-accepted! r (atom {}) {:accept [(str t)]})]
+    (is (not (contains? out :accept-unused)) (pr-str out))
+    (is (= [t] (mapv :test (:accept-unproposable out))) (pr-str out))
+    (is (re-find #"detail" (str (:why (first (:accept-unproposable out))))))))

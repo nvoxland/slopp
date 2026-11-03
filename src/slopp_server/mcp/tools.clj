@@ -756,7 +756,7 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
     :delta :deltas :group :forms :affected :renamed :renamed-namespaces
     :mentions :changed-nses :reverted :skipped-shared :moved-to :moved :rewrote
     :callers :edges-declared :export-not-landed :export-note :shadowed :shadowed-note :callers-unrewritten
-    :extracted :step :steps :auto-require :canonicalized :auto-module-dep :finisher :accept-unused :to-ns :keys :unknown-shape
+    :extracted :step :steps :auto-require :canonicalized :auto-module-dep :finisher :accept-unused :accept-unproposable :to-ns :keys :unknown-shape
     ;; what a realias moved, and what it declined to
     :sites :lib :left-behind :also-created :replaced :upgraded :merged-refer :closed :whole-store :commit :repaired
     ;; what it cost and whether to believe it

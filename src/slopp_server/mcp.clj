@@ -1320,7 +1320,10 @@
     (if (empty? accept)
       r
       (let [failures (get-in r [:test :failures])
-            failing  (into #{} (map (comp str :test)) failures)
+            detailed (into #{} (map (comp str :test)) failures)
+            ;; a run can name a red test without carrying its detail (a
+            ;; capped or external report): it is still RED, never unused
+            failing  (into detailed (map str) (get-in r [:test :failed-tests]))
             by-test  (group-by :test (for [f failures
                                            :when (contains? accept (str (:test f)))
                                            :let  [p (propose-assertion f)]
@@ -1328,7 +1331,14 @@
                                        {:test (:test f) :proposed p}))
             multi    (vec (sort (keys (filter #(next (val %)) by-test))))
             eligible (mapcat val (remove #(next (val %)) by-test))
-            unused   (vec (sort (map symbol (remove failing accept))))]
+            unused   (vec (sort (map symbol (remove failing accept))))
+            proposed (into #{} (map str) (keys by-test))
+            unprop   (vec (for [t (sort accept)
+                                :when (and (failing t) (not (proposed t)))]
+                            {:test (symbol t)
+                             :why  (if (detailed t)
+                                     "its failure has no single literal-to-literal delta to move; change the expectation yourself"
+                                     "the run named it red without its failure detail, so no expectation could be read; run it alone (test_run {only [...]}) and move it yourself")}))]
         (cond-> r
           (seq eligible)
           (as-> r*
@@ -1372,7 +1382,9 @@
                                        " the case you judged, several is the case you probably"
                                        " did not: re-read the test and move them yourself")})
           (seq unused)
-          (assoc :accept-unused unused))))))
+          (assoc :accept-unused unused)
+          (seq unprop)
+          (assoc :accept-unproposable unprop))))))
 
 (defn- attach-red-context!
   "Result-carried orientation: a write that lands RED attaches, to each
