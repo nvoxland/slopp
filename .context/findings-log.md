@@ -3572,3 +3572,19 @@ that write's answer, and corrected before landing. Only three had also met it
 on a read. So recorded intent changes outcomes once it is delivered, and the
 moment that delivers it is the write that would undo it, not the read before.
 One task, one model, n=10: a strong signal, not yet a general result.
+
+**Round 3, two more tasks (same day, same model, n=10 per cell).**
+- *A true conflict* (a recorded legal reason for taking a discount off before
+  tax, against a spec asking for 5.00 off the final total): with history,
+  10/10 told the user about the rule; 4 kept the legal order and 6 followed
+  the explicit request with a warning before shipping. Without history, 0/10
+  mentioned it.
+- *A compatibility rule* (a bank importer reads CSV columns by position,
+  against a spec asking for a new column in the middle): with history 10/10
+  added it at the end and kept the positions; without history 10/10 inserted
+  it in the middle. Confound: the seed's three-column test went red on a mid
+  insertion and test immutability blocked the edit, so no no-history run
+  landed; this task measures intent from the change calls, not the landing.
+- Across three tasks the direction is the same: recorded intent, delivered at
+  the replacing write, changes what agents do. Next measurements: a second
+  model, and tasks whose seed tests do not touch the constraint at all.
