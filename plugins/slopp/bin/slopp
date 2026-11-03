@@ -176,7 +176,13 @@ case "${1:-}" in
     } > "$ARGSFILE"
     FRAMED=1
     ;;
-  -*|"") : ;;
+  ""|--main) : ;;
+  -*)
+    # an unknown FLAG is a mistake, never a request to serve: it used to fall
+    # through to serve mode, and `slopp --version` started a stray server
+    echo "slopp: unknown flag $1 — slopp --help lists the spellings" >&2
+    exit 2
+    ;;
   *)
     # bare-verb spelling: `slopp <op> [json]` — any lowercase_word that is
     # not a directory is a tool call (a typo answers with the tool list)

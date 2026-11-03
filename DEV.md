@@ -77,6 +77,12 @@ slopp dev .     # in one terminal: boots the dev instance from the store and kee
 claude          # every agent, here or in any other project: attaches to it like any slopp server
 ```
 
+**On a machine whose plugin launcher is the v0.3.0 release, `slopp dev .` does
+not work yet:** that jar predates the dev runner (`slopp-server.dev`), so it
+boots `~/.slopp` and fails. Point the launcher at a jar built from this store
+instead (the `SLOPP_JAR` line under "Building the jar" below); a fresh machine
+with no local jar needs the next release.
+
 `slopp dev` reads the store's own declaration of its instance (`app.main =
 slopp-server.process/-main` and `http.port 7357` in `capabilities` — both
 project to git, so a clone has them), boots it in a child JVM, prints its
