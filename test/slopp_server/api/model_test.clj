@@ -967,3 +967,23 @@
                               :modules first :namespaces first :forms first :why))]
     (is (= "make f add one" (why "c1" "c2")) "and housekeeping in the range does not replace the author's ask")
     (is (= "make f add two" (why "c2" "c3")))))
+
+(deftest a-change-range-declares-what-it-did-not-see
+  (let [s0  (store/ingest (store/empty-store) 'ab.core "(ns ab.core)\n\n(defn f [x] (inc x))\n\n(defn g [x] x)\n")
+        fid (fn [nm] (:id (store/form-named s0 'ab.core nm)))
+        st  (reduce store/record-delta
+                    (assoc s0 :deltas [] :head nil :line-pos 0 :prompts {} :last-write {})
+                    [{:id "c1" :op :commit :status :green :at 1784900000000 :description "base"}
+                     {:id "d1" :op :replace :ns 'ab.core :form-id (fid 'f) :prompt "f adds one"
+                      :sources {(fid 'f) "(defn f [x] (+ x 1))"}}
+                     {:id "d2" :op :replace :ns 'ab.core :form-id (fid 'g) :prompt "g is identity"
+                      :sources {(fid 'g) "(defn g [y] y)"}}
+                     {:id "d3" :op :replace :ns 'ab.core :form-id (fid 'g) :prompt "normalize" :system true
+                      :sources {(fid 'g) "(defn g [y] y)"}}
+                     {:id "c2" :op :commit :status :green :at 1784900060000 :description "work"}])
+        cv  (fn [tmap] (:absence (model/change-view (atom {:store st :test-map tmap}) "c1" "c2")))]
+    (is (= {:changed 2 :no-observed-test 1 :system-deltas 1}
+           (cv '{ab.core-test/f-adds-one #{ab.core/f}}))
+        "g changed and no test was SEEN running it; one delta was housekeeping")
+    (is (= {:changed 2 :no-observed-test nil :system-deltas 1} (cv nil))
+        "with no trace map the count is unknown, not zero")))

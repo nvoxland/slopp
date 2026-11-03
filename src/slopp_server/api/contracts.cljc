@@ -176,6 +176,10 @@
    [:spread {:doc (str "how WIDE the range is, over production forms only: agent success"
                        " falls once a change touches three or more modules. A report, not a gate")}
     [:map [:forms :int] [:namespaces :int] [:modules :int]]]
+   [:absence {:doc (str "what this view did NOT see: changed forms no test was observed"
+                        " running (nil when the server holds no trace map, so the count is"
+                        " unknown rather than zero), and housekeeping deltas in the range")}
+    [:map [:changed :int] [:no-observed-test [:maybe :int]] [:system-deltas :int]]]
    [:modules {:doc (str "the changes grouped module then namespace, with a count at"
                         " every rung so a consumer can render a collapsed tree"
                         " without summing anything itself")}

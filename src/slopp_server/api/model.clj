@@ -1168,6 +1168,14 @@ gaps    (gaps-by-ns st (:test-map @session))
                         (dissoc (json-card (orient/form-card session ns-sym nm)) :form))
            graph (assoc :graph graph)))))))
 
+(defn- range-deltas
+  "The deltas inside the range (`from`, `to`]: after `from`, up to and
+  including `to`, oldest first."
+  [st from to]
+  (let [after (rest (drop-while #(not= from (:id %)) (store/deltas st)))
+        [a b] (split-with #(not= to (:id %)) after)]
+    (concat a (take 1 b))))
+
 (defn- range-prompts
   "`{form-id ask}` for the asks that changed each form INSIDE the range
   (`from`, `to`]: the latest authored delta there that names the form. Same
@@ -1176,14 +1184,12 @@ gaps    (gaps-by-ns st (:test-map @session))
   but bounded by the range, because the form's NEWEST ask can belong to a
   later change and a reviewer reading this range would be shown its intent."
   [st from to]
-  (let [after   (rest (drop-while #(not= from (:id %)) (store/deltas st)))
-        [a b]   (split-with #(not= to (:id %)) after)]
-    (reduce (fn [m d]
-              (if (and (:prompt d) (not (:system d)))
-                (reduce #(assoc %1 %2 (:prompt d)) m
-                        (cond-> (vec (:form-ids d)) (:form-id d) (conj (:form-id d))))
-                m))
-            {} (concat a (take 1 b)))))
+  (reduce (fn [m d]
+            (if (and (:prompt d) (not (:system d)))
+              (reduce #(assoc %1 %2 (:prompt d)) m
+                      (cond-> (vec (:form-ids d)) (:form-id d) (conj (:form-id d))))
+              m))
+          {} (range-deltas st from to)))
 
 (defn ^:export change-view
   "What changed between two commit-points, grouped module → namespace → form
@@ -1245,4 +1251,14 @@ gaps    (gaps-by-ns st (:test-map @session))
                                                           :count (count fs)
                                                           :forms (vec (sort-by :form
                                                                                (map #(dissoc % :ns :module) fs)))})))})))
-         :arc     (vec (:verification-arc ch))}))))
+         :arc     (vec (:verification-arc ch))
+         ;; what this screen did NOT see, said on the screen: a deterministic
+         ;; view that hides its gaps reads as more certain than it is
+         :absence {:changed          (count rows)
+                   :no-observed-test (when-let [tmap (:test-map @session)]
+                                       (count (remove (fn [{:keys [form status]}]
+                                                        (or (= "deleted" status)
+                                                            (some #(contains? (:via %) :observed)
+                                                                  (refs/covered-by st tmap (symbol form)))))
+                                                      rows)))
+                   :system-deltas    (count (filter :system (range-deltas st from to)))}}))))
