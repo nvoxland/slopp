@@ -22,7 +22,7 @@
   (:require [malli.core :as m]
             [malli.error :as me]
             [malli.transform :as mt]
-            [cheshire.core :as json] [clojure.edn :as edn] [clojure.string :as str]))
+            [cheshire.core :as json] [clojure.edn :as edn] [clojure.string :as str] [slopp.facet :as facet]))
 
 (defn- closed-map
   "`schema` with its TOP LEVEL closed, or `schema` unchanged when it is not a
@@ -106,6 +106,21 @@
     ;; the contract says the body IS text — a shell posting a source blob
     ;; with no JSON around it — so it travels as it stands and the merge
     ;; rule below, which is for object bodies, does not apply
+    ;; a FACET, by var: decode each carrier as below, then parse the merge.
+    ;; The handler receives the parsed value under :body; a failed check is
+    ;; the sender's 400 and names the check by its :doc
+    (var? schema)
+    (let [fs     (facet/fields-schema schema)
+          p      (when path-params (m/decode fs path-params mt/string-transformer))
+          q      (when query-params (m/decode fs query-params mt/string-transformer))
+          b      (when (map? body) (m/decode fs body mt/json-transformer))
+          parsed (facet/parse schema (merge q b p))]
+      (if-let [failed (:facet/failed parsed)]
+        {:error (str "request does not match " (symbol schema) ": "
+                     (clojure.string/join "; " (for [[_ {:keys [doc data]}] failed]
+                                                 (str doc (when data (str " " (pr-str data)))))))}
+        {:value {:path-params p :query-params q :body parsed}}))
+
     (= :string schema)
     (if (string? body)
       {:value {:path-params path-params :query-params query-params :body body}}
@@ -223,10 +238,12 @@
   same reason: an endpoint that declares EDN and emits something else has
   broken its contract in the one way a consumer cannot work around.
 
-  A nil schema is an absence rather than a violation — see [[decode-request]]."
+  A nil schema is an absence rather than a violation — see [[decode-request]].
+  A facet var is judged by [[shape-response]], which projects the body before
+  this runs, so there is nothing left here to judge."
   ([schema value] (check-response schema value nil))
   ([schema value opts]
-   (when schema
+   (when (and schema (not (var? schema)))
      (let [got (try {:ok (arrived value opts)}
                     (catch Exception e {:err (ex-message e)}))]
        (cond
@@ -237,3 +254,21 @@
          (not (m/validate schema (:ok got)))
          (str "response does not match the declared contract once serialized: "
               (pr-str (me/humanize (m/explain schema (:ok got))))))))))
+
+(defn ^:export shape-response
+  "The response as it may LEAVE: when the route's `:rest/response` is a facet
+  var, its body is that facet's `:facet/view` of the value, parsed again first
+  (the handler may have changed it) and with secret fields redacted. Any other
+  route's response passes untouched. A body the handler broke throws, which
+  the dispatcher turns into a logged, generic 500: at the exit the fault is
+  the server's, and the reader is not owed the details."
+  [row resp]
+  (let [v (:rest/response row)]
+    (if (and (var? v) (contains? resp :body))
+      (let [out (facet/project v (:facet/view row) (:body resp))]
+        (if-let [failed (:facet/failed out)]
+          (throw (ex-info (str "response fails " (symbol v) ": "
+                               (str/join "; " (map :doc (vals failed))))
+                          {:facet/failed (vec (keys failed))}))
+          (assoc resp :body out)))
+      resp)))

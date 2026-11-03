@@ -50,6 +50,7 @@
   [ctx]
   (assoc ctx
          :rest/decode-request rest.contract/decode-request
+         :rest/shape-response rest.contract/shape-response
          :rest/check-response rest.contract/check-response))
 
 (defn ^:export call

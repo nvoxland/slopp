@@ -172,7 +172,7 @@
        :to-form   (:id (store/form-named st to (symbol (name s))))
        :via       :carrier})))
 
-(defn- form-keyword-uses
+(defn ^:export form-keyword-uses
   "`[[kw via] …]` for one form's sexpr — every keyword it references, and HOW.
 
   `:literal` is a keyword token. `:destructuring` is a `{:keys [x]}` /

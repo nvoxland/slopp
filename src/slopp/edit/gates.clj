@@ -64,7 +64,7 @@
    #'edit.http/http-unsafe-get #'edit.http/http-unknown-group #'edit.http/http-react-attrs
    #'edit.cli/cli-args-schema #'edit.cli/cli-command-collision #'edit.cli/cli-direct-stdio
    #'security/process-launch #'security/java-deserialization
-   #'edit.facet/facet-declaration #'edit.facet/facet-by-var])
+   #'edit.facet/facet-declaration #'edit.facet/facet-by-var #'edit.facet/facet-key-ownership #'edit.facet/facet-reveal #'edit.facet/facet-adapter-raw])
 
 (defn ^:export rule-applies-to-platform?
   "Whether a rule scoped to `rule-scope` (:everywhere / :clojure / :clojurescript)

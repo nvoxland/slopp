@@ -136,6 +136,9 @@
    ;; and the marker's VALUE says what that value is, so it asks for nothing
    {:marker :facet        :kind :declaration :discharges nil :on :name
     :asks nil :self-polices? false}
+   ;; a secret's real value leaves the program only through a form that says so
+   {:marker :reveals :kind :escape :discharges :facet-reveal :on :name
+    :asks "what does this form hand the secret to, and why must it see the real value?" :self-polices? false}
    {:marker :generated    :kind :internal :discharges nil     :on :name
     :asks nil :self-polices? false}
    {:marker :auto-declare :kind :internal :discharges nil     :on :form

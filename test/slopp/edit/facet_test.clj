@@ -67,3 +67,56 @@
   (is (= [['shop.order 'Order]]
          (keys (edit.facet/facets (st (str (order "") "(defn f [] {:facet/fields {:x/a :int}})\n")))))
       "a form that only mentions :facet/fields is not a facet"))
+
+(deftest an-owned-key-in-the-shell-is-used-only-where-it-was-parsed
+  (let [base (st (order ""))
+        chk  (fn [ns-sym body] (edit.facet/facet-key-ownership (st base ns-sym body) ns-sym 'h))]
+    (testing "read, destructured or built by hand in the shell, with no parse in sight"
+      (doseq [body ["(defn h [m] (:shop/total m))"
+                    "(defn h [{:shop/keys [total]}] total)"
+                    "(defn h [] {:shop/total 5})"]]
+        (is (re-find #"shop.order/Order" (str (chk 'shop.web body))) body)))
+    (testing "where the value was parsed, or by the facet's own namespace"
+      (is (nil? (chk 'shop.web "(defn h [m] (:shop/total (facet/parse #'shop.order/Order m)))")))
+      (is (nil? (chk 'shop.web "(defn ^{:rest/request shop.order/Order} h [r] (:shop/total (:body r)))"))
+          "the route's port parsed the body before the handler ran")
+      (is (nil? (chk 'shop.order "(defn h [m] (:shop/total m))"))))
+    (testing "inside the region a parsed value is plain data"
+      (let [s (first (store/record-module-tier (st base 'shop.core "(defn h [m] (:shop/total m))") "shop.core" :pure))]
+        (is (nil? (edit.facet/facet-key-ownership s 'shop.core 'h)))))
+    (testing "facets in test namespaces own nothing in the program"
+      (is (nil? (edit.facet/facet-key-ownership
+                 (st (st (store/empty-store) 'shop.order-test (order "")) 'shop.web "(defn h [m] (:shop/total m))")
+                 'shop.web 'h))))
+    (is (= :advisory (:rule/severity (meta #'edit.facet/facet-key-ownership)))
+        "advisory until slopp's own store has measured where it fires")
+    (is (some #{#'edit.facet/facet-key-ownership} gates/per-form-write-gates))))
+
+(deftest reveal-is-a-port
+  (let [chk (fn [body] (edit.facet/facet-reveal (st body) 'shop.order 'h))]
+    (is (re-find #":reveals" (str (chk "(defn h [x] (facet/reveal x))"))) "an unmarked reveal is refused")
+    (is (nil? (chk "(defn ^{:reveals \"the card processor needs the number\"} h [x] (facet/reveal x))")))
+    (is (nil? (chk "(def h '(facet/reveal x))")) "a quoted call is data")
+    (is (nil? (chk "(defn h [x] (facet/parse x))")))
+    (is (some #{#'edit.facet/facet-reveal} gates/per-form-write-gates))
+    (is (= :production (:rule/applies-to (meta #'edit.facet/facet-reveal))))))
+
+(deftest adapters-emit-raw
+  (let [base (st (order ""))
+        chk  (fn [s body] (edit.facet/facet-adapter-raw (st s 'shop.db body) 'shop.db 'h))
+        db   "(defn ^{:adapter \"db — orders table; tests pass a fake\"} h [conn] (vec conn))"]
+    (is (re-find #"facet/raw" (str (chk base db))) "a db adapter without raw gets the advisory")
+    (is (nil? (chk base "(defn ^{:adapter \"db — orders table; tests pass a fake\"} h [conn] (facet/raw (vec conn) :db/orders))")))
+    (is (nil? (chk base "(defn ^{:adapter \"process — git\"} h [conn] (vec conn))")))
+    (is (nil? (chk (store/empty-store) db)) "no production facet, no advisory")
+    (is (= :advisory (:rule/severity (meta #'edit.facet/facet-adapter-raw))))
+    (is (= :production (:rule/applies-to (meta #'edit.facet/facet-adapter-raw))))
+    (is (some #{#'edit.facet/facet-adapter-raw} gates/per-form-write-gates))))
+
+(deftest the-port-hands-parse-a-var-it-holds
+  (is (nil? (edit.facet/facet-by-var (st (str (order "") "(defn h [v x] (facet/parse v x))")) 'shop.order 'h))
+      "a local holding a var is checked by parse itself at runtime: it refuses anything but a facet var")
+  (is (nil? (edit.facet/facet-key-ownership
+             (st (st (order "")) 'shop.web "(defn ^{:rest/request #'shop.order/Order} h [r] (:shop/total (:body r)))")
+             'shop.web 'h))
+      "a route that declares its facet by var had its body parsed by the port"))

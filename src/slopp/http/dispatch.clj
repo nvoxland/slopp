@@ -230,12 +230,18 @@
                         :query-params (:query-params (:value sent))
                         :body (:body (:value sent)))
             declared (set (:http/effects row))
-            check (fn [r] (if-let [err (response-violation ctx row r)]
-                            (do (.println System/err
-                                          (str "slopp.http: response contract violated at "
-                                               (:method row) " " (:path row) " — " err))
-                                {:status 500 :body {:error "internal server error"}})
-                            r))
+            check (fn [r0]
+                    ;; a validator may SHAPE the response before judging it
+                    ;; (slopp.rest projects a facet-typed body to its view);
+                    ;; called by key, as :rest/check-response is, so this
+                    ;; namespace never learns what shaped it
+                    (let [r (if-let [shape (:rest/shape-response ctx)] (shape row r0) r0)]
+                      (if-let [err (response-violation ctx row r)]
+                        (do (.println System/err
+                                      (str "slopp.http: response contract violated at "
+                                           (:method row) " " (:path row) " — " err))
+                            {:status 500 :body {:error "internal server error"}})
+                        r)))
             resp (try
                    (let [;; REQUEST-SCOPED RESOLVE. A route may declare
                          ;; dependencies resolved FROM the request into the

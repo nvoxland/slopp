@@ -3,7 +3,7 @@
   (:require [clojure.string :as str]
             [rewrite-clj.node :as n]
             [slopp.store :as store]
-            [slopp.index.refs :as refs] [slopp.store.render :as store.render]))
+            [slopp.index.refs :as refs] [slopp.store.render :as store.render] [slopp.edit.tiers :as tiers]))
 
 (defn ^:export facet-sexpr
   "The form's sexpr when entry `e` defines a facet, `(def ^{:facet \"...\"} Name decl)`,
@@ -122,9 +122,14 @@
               facet-call? (fn [h] (and (symbol? h) (namespace h)
                                        (= 'slopp.facet (get aliases (symbol (namespace h)) (symbol (namespace h))))
                                        (contains? #{"parse" "project" "parsed?"} (name h))))
-              by-var? (fn [a] (and (seq? a) (= 'var (first a)) (symbol? (second a))
-                                   (let [[n s] (resolve-sym aliases ns-sym (second a))]
-                                     (some? (some-> (store/form-named candidate n s) facet-sexpr)))))
+              by-var? (fn [a] (if (symbol? a)
+                        ;; a symbol naming no top-level form is a local or a
+                        ;; parameter: parse refuses anything but a facet var at
+                        ;; runtime, so a port holding a route's var may pass it on
+                        (nil? (apply store/form-named candidate (resolve-sym aliases ns-sym a)))
+                        (and (seq? a) (= 'var (first a)) (symbol? (second a))
+                             (let [[n s] (resolve-sym aliases ns-sym (second a))]
+                               (some? (some-> (store/form-named candidate n s) facet-sexpr))))))
               bad     (first (for [c (calls sx) :when (facet-call? (first c)) :when (not (by-var? (second c)))] c))]
           (when bad
             (str ns-sym "/" form-name " calls (" (first bad) " " (pr-str (second bad)) " ...). parse,"
@@ -142,3 +147,117 @@
           :when (and f (not (:sources spec)) (seq? f) (= 'var (first f)) (symbol? (second f)))
           :let [[n s] (resolve-sym aliases ns-sym (second f))]]
       [k (symbol (str n) (str s))])))
+
+(defn ^:export owners
+  "{key [ns name]} for every field key a PRODUCTION facet owns. A test
+  namespace's fixture facets own nothing in the program."
+  [store]
+  (into {} (for [[[n nm] decl] (facets store)
+                 :when (not (store.render/test-ns? n))
+                 k (keys (:facet/fields decl))]
+             [k [n nm]])))
+
+(defn- parsed-in
+  "The facets, as [ns name], that sexpr `sx` (written in `ns-sym`) hands to
+  `slopp.facet/parse` or `project` by var."
+  [aliases ns-sym sx]
+  (set (for [c (calls sx)
+             :let [h (first c) a (second c)]
+             :when (and (symbol? h) (namespace h)
+                        (= 'slopp.facet (get aliases (symbol (namespace h)) (symbol (namespace h))))
+                        (contains? #{"parse" "project"} (name h))
+                        (seq? a) (= 'var (first a)) (symbol? (second a)))]
+         (resolve-sym aliases ns-sym (second a)))))
+
+(defn ^:export ^{:rule/applies-to :production :rule/severity :advisory} facet-key-ownership
+  "Write gate (advisory): in the SHELL — a namespace with no declared purity
+  tier — a key a facet owns is read, destructured or built only where the
+  value was parsed: in a form that calls `parse`/`project` with that facet, in
+  a route handler whose `:rest/request` is that facet (its port parsed the
+  body), or in the facet's own namespace. Inside a declared tier a parsed
+  value is plain data and the rule says nothing. `^:unsafe` does not
+  discharge it: the way past is a parser, not a marker.
+
+  Advisory until it has been measured on real stores. Returns a teaching
+  string, or nil when clean."
+  [candidate ns-sym form-name]
+  (let [ns-sym (symbol (str ns-sym))
+        nm     (symbol (str form-name))]
+    (when (and (not= 'slopp.facet ns-sym) (= :external (tiers/tier-for candidate ns-sym)))
+      (when-let [e (store/form-named candidate ns-sym nm)]
+        (let [own (owners candidate)]
+          (when (seq own)
+            (let [sx      (try (n/sexpr (:node e)) (catch Exception _ nil))
+                  aliases (store/require-aliases candidate ns-sym)
+                  ok      (let [rr (:rest/request (store/form-name-meta e))
+                                rr (if (and (seq? rr) (= 'var (first rr))) (second rr) rr)]
+                            (cond-> (parsed-in aliases ns-sym sx)
+                              (symbol? rr) (conj (resolve-sym aliases ns-sym rr))))
+                  bad     (distinct (for [[k _] (when sx (refs/form-keyword-uses sx))
+                                          :let [o (get own k)]
+                                          :when (and o (not= ns-sym (first o)) (not (ok o)))]
+                                      [k o]))]
+              (when-let [[k [on onm]] (first bad)]
+                (str ns-sym "/" nm " uses " k ", which belongs to the facet " on "/" onm
+                     ", in a namespace with no declared purity tier (the shell). In the shell an"
+                     " owned key is used only where the value was parsed: call (facet/parse #'"
+                     on "/" onm " value) in this form, declare :rest/request " onm " on the"
+                     " route, or move this logic into a namespace with a declared tier, where"
+                     " parsed values are plain data."
+                     (when (next bad) (str " Also: " (vec (distinct (map first (rest bad)))) ".")))))))))))
+
+(defn- facet-calls
+  "The names (strings) of `slopp.facet` fns that form `form-name` in `ns-sym` calls, through whatever alias the namespace gives it; a quoted call is data."
+  [candidate ns-sym e]
+  (let [aliases (store/require-aliases candidate ns-sym)
+        sx      (try (n/sexpr (:node e)) (catch Exception _ nil))]
+    (set (for [c (when sx (calls sx))
+               :let [h (first c)]
+               :when (and (symbol? h) (namespace h)
+                          (= 'slopp.facet (get aliases (symbol (namespace h)) (symbol (namespace h)))))]
+           (name h)))))
+
+(defn ^:export ^{:rule/applies-to :production} facet-reveal
+  "Write gate: a form that calls `slopp.facet/reveal` must carry
+  `^{:reveals \"what it hands the secret to, and why that needs the real value\"}`
+  on its name. A secret's real value leaves the program only through a form
+  that declares it, so a reader can list every place it can escape. A write
+  adapter that must persist a secret is such a form. The `slopp.facet`
+  namespace itself is skipped. Returns a teaching string, or nil when clean."
+  [candidate ns-sym form-name]
+  (let [ns-sym (symbol (str ns-sym))
+        nm     (symbol (str form-name))]
+    (when (not= 'slopp.facet ns-sym)
+      (when-let [e (store/form-named candidate ns-sym nm)]
+        (when (contains? (facet-calls candidate ns-sym e) "reveal")
+          (let [why (:reveals (store/form-name-meta e))]
+            (when-not (and (string? why) (not (str/blank? why)))
+              (str ns-sym "/" nm " calls facet/reveal, which hands out a secret's real value."
+                   " The real value leaves the program only through a form that declares it:"
+                   " mark this form ^{:reveals \"what it hands the secret to, and why that"
+                   " needs the real value\"}. A write adapter that must persist a secret is"
+                   " such a form."))))))))
+
+(def inbound-data-ports
+  "The first words of an `:adapter` marker that name an INBOUND data port: data from outside arrives through them. This set is the spike's and grows with use."
+  #{"db" "jdbc" "sql" "file" "queue"})
+
+(defn ^:export ^{:rule/applies-to :production :rule/severity :advisory} facet-adapter-raw
+  "Write gate (advisory): when the store has a production facet, a form whose
+  `:adapter` marker names an inbound data port (`inbound-data-ports`: db,
+  jdbc, sql, file, queue — the spike's set, which grows with use) should hand
+  its data out as `(facet/raw rows :db/orders)`, so nothing reads it until a
+  facet parses it. `process` and `http` adapters are not inbound data ports
+  here. Returns a teaching string, or nil when clean."
+  [candidate ns-sym form-name]
+  (let [ns-sym (symbol (str ns-sym))
+        nm     (symbol (str form-name))]
+    (when (and (not= 'slopp.facet ns-sym) (seq (owners candidate)))
+      (when-let [e (store/form-named candidate ns-sym nm)]
+        (let [adapter (some-> (:adapter (store/form-name-meta e)) str str/triml)
+              port    (some-> adapter (str/split #"\s+") first)]
+          (when (and (contains? inbound-data-ports port)
+                     (not (contains? (facet-calls candidate ns-sym e) "raw")))
+            (str ns-sym "/" nm " is a " port " adapter, so data from outside arrives here."
+                 " Hand it out as (facet/raw rows :db/orders), so nothing reads it until a"
+                 " facet parses it.")))))))

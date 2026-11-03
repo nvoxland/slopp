@@ -389,19 +389,20 @@
     stores that use http, while a `cli` store driving no screens is not the
     population that mattered. Being named here is the first time its shipping
     is a decision rather than a side effect.
+  - `slopp.facet` — the facet rules refuse a read of a key a facet owns until
+    the value goes through `slopp.facet/parse`, so every store that can declare
+    a facet must have the namespace that discharges the rule; and the rest
+    port parses a facet-typed request through it.
 
   **What every member has in common is what makes shipping them a COPY rather
   than a dependency graph: none reaches back into slopp.** `slopp.lang` and
   `slopp.cache` have zero requires at all; the cljnx three require each other
-  and `clojure.string` and nothing else. That is a property to check rather
-  than assume when adding a member — a namespace here that required a
-  capability's code would land in a store that does not have it, which is the
-  failure `framework-injection` describes as the framework arriving intact and
-  failing inside itself.
-
-  - `slopp.facet` — the facet rules refuse a read of a key a facet owns until
-    the value goes through `slopp.facet/parse`, so every store that can declare
-    a facet must have the namespace that discharges the rule.
+  and `clojure.string` and nothing else; `slopp.facet` requires malli, which
+  every image already carries. That is a property to check rather than assume
+  when adding a member — a namespace here that required a capability's code
+  would land in a store that does not have it, which is the failure
+  `framework-injection` describes as the framework arriving intact and failing
+  inside itself.
 
   THE derivation two readers consume: `build.clj` files these under `\"_\"`, and
   the leak guard permits a family namespace to reach them."
@@ -409,7 +410,8 @@
     slopp.cache        "slopp/cache.clj"
     slopp.cljnx        "slopp/cljnx.clj"
     slopp.cljnx.hiccup "slopp/cljnx/hiccup.clj"
-    slopp.cljnx.render "slopp/cljnx/render.clj"})
+    slopp.cljnx.render "slopp/cljnx/render.clj"
+    slopp.facet        "slopp/facet.clj"})
 
 (defn ^:export rule-owner
   "The capability that owns rule `k` — read off the rule's own NAME — or nil for

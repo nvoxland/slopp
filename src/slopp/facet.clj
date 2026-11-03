@@ -203,7 +203,7 @@
     (let [r (if (parsed? facet-var x) x (parse facet-var x))]
       (if (:facet/failed r)
         (update r :facet/failed #(into {} (map (fn [[k f]] [k (select-keys f [:doc])])) %))
-        (select-keys r fields)))))
+        (into {} (map (fn [[k v]] [k (if (instance? Secret v) (str v) v)])) (select-keys r fields))))))
 
 (defn fields-schema
   "The closed malli schema the facet's fields describe: what `parse` validates

@@ -302,6 +302,13 @@
    {:rule :facet-integrity :grain :done
     :escape "none but the dial: keep one owner per key (nest the other facet as a field), keep a check pure, or declare :sources on a check that reads the world"
     :teach "two threads can each land a facet owning the same key, each passing its own write gate; and a check that touches the world would make parse an effect"}
+   {:rule :facet-key-ownership, :grain :form, :escape "parse where the value arrives, (facet/parse #'Order value); declare :rest/request Order on the route; or move the logic into a namespace with a declared purity tier. ^:unsafe does not discharge it", :teach "a key a facet owns, used in the shell where nothing parsed it, means a value reached the program without the facet's checks — the skipped edge that is the measured failure"}
+   {:rule :facet-reveal :grain :form
+    :escape "mark the form ^{:reveals \"what it hands the secret to, and why that needs the real value\"}"
+    :teach "a form calls facet/reveal, which returns a secret's real value. The value leaves the program only through a form that declares it, so every place it can escape is listed by the marker. A write adapter that must persist a secret is such a form"}
+   {:rule :facet-adapter-raw :grain :form
+    :escape "emit the data as (facet/raw rows :db/orders) so nothing reads it until a facet parses it; or accept it — advisory"
+    :teach "an adapter for an inbound data port (db, jdbc, sql, file, queue) in a store with a facet hands data out without marking it raw. Data from outside arrives as raw until a facet parses it"}
    {:rule :facet-fields :grain :done
     :escape "none but the dial: write each field as a malli schema, or as {:schema s :optional true :secret true}"
     :teach "parse validates against the schema a facet's fields describe; a field malli cannot build throws at the port instead of answering the sender"}])
