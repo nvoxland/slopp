@@ -2098,53 +2098,6 @@
 
               :else {:zloc (first usable)})))))))
 
-(defn ^:export subform-replace-plan
-  "Plan replacing the unique occurrence of `match-src` inside `form-name` with
-  `new-src` (item 5 — paredit's valid-tree→valid-tree invariant, content-
-  addressed: siblings are never re-transcribed). A pair match (P1) replaces
-  the WHOLE pair span. Returns {:new-form-src s} or {:error msg}.
-
-  With `wrap?`, `new-src` is a TEMPLATE and `$1` is filled with the source the
-  match actually found — so the matched form ends up NESTED inside it. That is
-  the third transformation shape: the verbs expressed replace-in-place and
-  insert-beside, and introducing `(let [x …] <the thing that was there>)`
-  around existing code was neither. Matching a fragment that opens a delimiter
-  it does not close is correctly refused, so the only way to express it was to
-  restate the whole enclosing form — measured at ~40 lines a time.
-
-  `$1` is filled from the FOUND text, not from `match-src`: matching is
-  whitespace-insensitive, so the two can differ and the source is what should
-  survive. A template with no `$1` is refused rather than treated as a plain
-  replace, because that would DELETE the matched form — a different operation
-  than the one asked for."
-  ([store ns-sym form-name match-src new-src]
-   (subform-replace-plan store ns-sym form-name match-src new-src false))
-  ([store ns-sym form-name match-src new-src wrap?]
-   (try
-     (if (and wrap? (not (re-find #"\$1" (str new-src))))
-       {:error (str "a wrap template must contain $1 — the place the matched form"
-                    " goes. Without it the match would be DELETED, which is"
-                    " edit_subform without wrap")}
-       (if-let [e (store/form-named store ns-sym form-name)]
-         (let [form-src (n/string (:node e))
-               found    (find-unique-subform form-src match-src form-name)]
-           (if (:error found)
-             found
-             (let [m       (:zloc found)
-                   e2      (or (:end-zloc found) m)
-                   [r c]   (z/position m)
-                   [er ec] (node-span (z/position e2) (n/string (z/node e2)))
-                   ;; the source the match actually FOUND, not what the caller
-                   ;; typed: matching is whitespace-insensitive, so the two can
-                   ;; differ and it is the source that should survive the wrap
-                   src     (if wrap?
-                             (fill-template new-src [(n/string (z/node m))])
-                             new-src)]
-               {:new-form-src (replace-span form-src [r c] [er ec] src)})))
-         {:error (str "no form named " form-name " in " ns-sym)}))
-     (catch Exception ex
-       {:error (str "subform edit failed: " (ex-message ex))}))))
-
 (defn ^:export extract-plan
   "Plan extracting the unique occurrence of `subform-src` inside `from-name`
   into a new fn `new-name`: params = the free locals (bound outside the
@@ -2356,3 +2309,84 @@
          (remove #(re-matches sweep-pat %))
          sort
          vec)))
+
+(defn- span-text
+  "The text between 1-based [start end) positions in `s` — the span
+  `replace-span` would replace."
+  [s [sr sc] [er ec]]
+  (let [ls (vec (str/split s #"\n" -1))]
+    (if (= sr er)
+      (subs (ls (dec sr)) (dec sc) (dec ec))
+      (str/join "\n" (concat [(subs (ls (dec sr)) (dec sc))]
+                                        (subvec ls sr (dec er))
+                                        [(subs (ls (dec er)) 0 (dec ec))])))))
+
+(defn- comment-texts
+  "Every comment in source `s`, trimmed, read from the parse tree so a `;`
+  inside a string is not one. [] when `s` does not parse."
+  [s]
+  (try
+    (letfn [(walk [nd] (if (= :comment (n/tag nd))
+                         [(str/trim (n/string nd))]
+                         (when (n/inner? nd) (mapcat walk (n/children nd)))))]
+      (vec (walk (p/parse-string-all s))))
+    (catch Exception _ [])))
+
+(defn ^:export subform-replace-plan
+  "Plan replacing the unique occurrence of `match-src` inside `form-name` with
+  `new-src` (item 5 — paredit's valid-tree→valid-tree invariant, content-
+  addressed: siblings are never re-transcribed). A pair match (P1) replaces
+  the WHOLE pair span. Returns {:new-form-src s} or {:error msg}.
+
+  With `wrap?`, `new-src` is a TEMPLATE and `$1` is filled with the source the
+  match actually found — so the matched form ends up NESTED inside it. That is
+  the third transformation shape: the verbs expressed replace-in-place and
+  insert-beside, and introducing `(let [x …] <the thing that was there>)`
+  around existing code was neither. Matching a fragment that opens a delimiter
+  it does not close is correctly refused, so the only way to express it was to
+  restate the whole enclosing form — measured at ~40 lines a time.
+
+  `$1` is filled from the FOUND text, not from `match-src`: matching is
+  whitespace-insensitive, so the two can differ and the source is what should
+  survive. A template with no `$1` is refused rather than treated as a plain
+  replace, because that would DELETE the matched form — a different operation
+  than the one asked for."
+  ([store ns-sym form-name match-src new-src]
+   (subform-replace-plan store ns-sym form-name match-src new-src false))
+  ([store ns-sym form-name match-src new-src wrap?]
+   (try
+     (if (and wrap? (not (re-find #"\$1" (str new-src))))
+       {:error (str "a wrap template must contain $1 — the place the matched form"
+                    " goes. Without it the match would be DELETED, which is"
+                    " edit_subform without wrap")}
+       (if-let [e (store/form-named store ns-sym form-name)]
+         (let [form-src (n/string (:node e))
+               found    (find-unique-subform form-src match-src form-name)]
+           (if (:error found)
+             found
+             (let [m       (:zloc found)
+                   e2      (or (:end-zloc found) m)
+                   [r c]   (z/position m)
+                   [er ec] (node-span (z/position e2) (n/string (z/node e2)))
+                   ;; the source the match actually FOUND, not what the caller
+                   ;; typed: matching is whitespace-insensitive, so the two can
+                   ;; differ and it is the source that should survive the wrap
+                   src     (if wrap?
+                             (fill-template new-src [(n/string (z/node m))])
+                             new-src)]
+               (let [old     (frequencies (comment-texts (span-text form-src [r c] [er ec])))
+                     kept    (frequencies (comment-texts src))
+                     dropped (sort (for [[t k] old :when (> k (get kept t 0))] t))]
+                 ;; matching skips comments, so a match written without
+                 ;; them still SPANS them, and a replacement without them
+                 ;; deleted them while the write reported ok
+                 (if (and (not wrap?) (seq dropped))
+                   {:error (str "this match spans comment(s) the replacement does not carry: "
+                                (clojure.string/join " | " dropped)
+                                ". Matching ignores comments, so they would be deleted."
+                                " Restate them in the replacement, or match a smaller form"
+                                " that does not contain them.")}
+                   {:new-form-src (replace-span form-src [r c] [er ec] src)})))))
+         {:error (str "no form named " form-name " in " ns-sym)}))
+     (catch Exception ex
+       {:error (str "subform edit failed: " (ex-message ex))}))))

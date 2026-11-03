@@ -857,3 +857,17 @@
       (let [r (plan 'm "1 :b" "9 :b")]
         (is (:error r) (pr-str r))
         (is (re-find #"pair" (str (:error r))) (str (:error r)))))))
+
+(deftest a-subform-replace-does-not-drop-comments-silently
+  ;; byq: matching skips comments, so a match written without them still
+  ;; COVERED them, and the replacement deleted three comment lines while the
+  ;; write reported ok
+  (let [st (store/ingest (store/empty-store) 'cm.core
+                         "(ns cm.core)\n\n(def m\n  {:a 1\n   ;; why b is two\n   :b 2})\n")]
+    (let [r (refactor/subform-replace-plan st 'cm.core 'm "{:a 1 :b 2}" "{:a 1 :b 3}")]
+      (is (re-find #"why b is two" (str (:error r))) (pr-str r)))
+    (let [r (refactor/subform-replace-plan st 'cm.core 'm "{:a 1 :b 2}" "{:a 1\n   ;; why b is two\n   :b 3}")]
+      (is (nil? (:error r)) (pr-str r))
+      (is (re-find #"why b is two" (str (:new-form-src r)))))
+    (is (nil? (:error (refactor/subform-replace-plan st 'cm.core 'm ":b 2" ":b 3")))
+        "a match that spans no comment is untouched by the rule")))
