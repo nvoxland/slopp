@@ -842,8 +842,17 @@
   than half a framework."
   [store files]
   (when (seq files)
-    (let [used (used-families store)]
-      (when (seq used)
+    (let [used    (used-families store)
+          nses    (set (keys (:namespaces store)))
+          ;; a store may reach an always-shipped namespace with no capability
+          ;; at all (a store of facets and pure code requires slopp.facet
+          ;; and nothing else); it is handed the "_" family then too, unless
+          ;; it defines that namespace itself
+          common? (some (fn [n] (some #(and (contains? capabilities/shipping-common %)
+                                             (not (contains? nses %)))
+                                       (store/ns-require-libs store n)))
+                        nses)]
+      (when (or (seq used) common?)
         (not-empty (reduce merge (get files "_") (map #(get files %) used)))))))
 
 (defn marker-readers

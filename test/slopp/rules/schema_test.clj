@@ -162,3 +162,22 @@
       (testing "both match their schema's types; only one keeps the facet's invariant"
         (is (= '[demo.fac/liar] (mapv :form (schema/drift! h s '#{demo.fac/honest demo.fac/liar})))))
       (finally (repl/stop! h)))))
+
+(deftest ^:external an-oracle-that-cannot-compile-is-one-finding-not-a-crash
+  ;; Found by the facets dogfood app: a :=> schema that CALLED a fn through a
+  ;; namespace alias, (facet/fields-schema #'order/Order), compiled in the
+  ;; image's `user` namespace where the alias does not exist. The whole eval
+  ;; string failed, repl/eval! handed back the error TEXT, and done iterated
+  ;; a string: \"Character cannot be cast to IPersistentMap\".
+  (let [src (str "(ns demo.ali)\n\n"
+                 "(defn ^{:malli/schema [:=> [:cat :int] (nope/schema-of :x)]} f \"D.\" [x] x)\n")
+        s   (store/ingest (store/empty-store) 'demo.ali src)
+        h   (repl/start!)]
+    (try
+      (repl/eval! h "(ns demo.ali) (defn f [x] x) (in-ns 'user)")
+      (let [r (schema/drift! h s '#{demo.ali/f})]
+        (is (vector? r) (pr-str r))
+        (is (= 1 (count r)) (pr-str r))
+        (is (every? map? r) (pr-str r))
+        (is (re-find #"could not run" (str (:error (first r)))) (pr-str r)))
+      (finally (repl/stop! h)))))

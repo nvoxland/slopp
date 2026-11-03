@@ -170,4 +170,15 @@
   [image store qsyms]
   (let [cands (schema-candidates store qsyms)]
     (when (seq cands)
-      (first (repl/eval! image (check-string cands))))))
+      (let [r (first (repl/eval! image (check-string cands)))]
+        ;; the eval string can fail WHOLE — a :=> schema written as a call
+        ;; through an alias the image's `user` namespace lacks — and then the
+        ;; image hands back the error TEXT; a caller iterating it as findings
+        ;; crashed done on a Character. One formless finding, like the
+        ;; unresolvable checker: it is about the oracle, not about a form
+        (if (vector? r)
+          r
+          [{:error (str "schema oracle could not run over this episode's schemas: " r
+                        " — a :malli/schema is read from source and compiled outside"
+                        " its namespace, so write it as literal data, or name a schema"
+                        " var fully qualified")}])))))

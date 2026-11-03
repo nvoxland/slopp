@@ -160,3 +160,22 @@
                                  :prompt "ambiguous")]
           (is (re-find #"(?i)ambiguous" (str (:error r))) (pr-str r))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-group-write-reports-the-advisories-its-forms-raise
+  ;; Found by the facets dogfood app: rule 1 ships advisory, and every
+  ;; probe that should have raised it came back silent through `change`,
+  ;; because the group path asked the gates only for a refusal.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'gfac.order "(ns gfac.order)\n(def ^{:facet \"an order\"} Order {:facet/fields {:g/id :int}})\n")
+      (ops/ingest! sess 'gfac.web "(ns gfac.web)\n(defn f [] 1)\n")
+      (let [r (ops/edit-group-once! sess
+                                    [{:action :add :ns 'gfac.web :source "(defn h [m] (:g/id m))"}]
+                                    :prompt "read an owned key in the shell")]
+        (is (nil? (:error r)) "an advisory never blocks")
+        (is (some #(re-find #"gfac.order/Order" %) (:advisories r)) (pr-str (select-keys r [:advisories :warnings]))))
+      (let [r (ops/edit-group-once! sess
+                                    [{:action :add :ns 'gfac.web :source "(defn k [] 2)"}]
+                                    :prompt "nothing to advise")]
+        (is (not (contains? r :advisories)) "absent when there is nothing to say"))
+      (finally (ops/close! sess)))))

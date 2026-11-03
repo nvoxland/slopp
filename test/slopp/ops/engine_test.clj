@@ -845,3 +845,16 @@
         "the store's rendering of its own kernel runtime")
     (is (nil? (engine/rt-fallback without))
         "an ordinary project has no kernel of its own")))
+
+(deftest a-store-using-only-a-shipped-helper-is-handed-it
+  ;; Found by the facets dogfood app: a store that declares facets and no
+  ;; route could not require slopp.facet at all, because the always-shipped
+  ;; family rode in only beside a capability's.
+  (let [files {"_" {"slopp/facet.clj" "(ns slopp.facet)"} "http" {"slopp/http.clj" "(ns slopp.http)"}}
+        uses  (store/ingest (store/empty-store) 'shop.order "(ns shop.order (:require [slopp.facet :as facet]))\n(defn f [] 1)\n")
+        bare  (store/ingest (store/empty-store) 'shop.order "(ns shop.order)\n(defn f [] 1)\n")
+        owns  (store/ingest uses 'slopp.facet "(ns slopp.facet)\n(defn parse [v x] x)\n")]
+    (is (= {"slopp/facet.clj" "(ns slopp.facet)"} (engine/framework-injection uses files)))
+    (is (nil? (engine/framework-injection bare files)) "a store that requires nothing of slopp is handed nothing")
+    (is (nil? (engine/framework-injection owns files))
+        "a store that DEFINES the namespace is not shadowed by the shipped copy")))

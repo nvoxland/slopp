@@ -3918,6 +3918,639 @@
                 :step i}))))))
    (map-indexed vector steps)))
 
+(defn ^:export session-var-hint
+  "The line a `query_eval` failure owes a caller who reached for a SESSION —
+  or nil for any other error.
+
+  Measured (s19): 121 refusals on one store named a `*session*` var (written
+  unqualified deliberately — spelled with a namespace it reads as prose
+  naming a form that exists, which is the one thing this is about), an
+  agent trying to call session-taking fns from the oracle. There is no such var and there should not be one: a live session
+  in eval would let a write bypass the delta pipeline, which is exactly what
+  the observe gate refuses (T5). So unlike an argument SHAPE this cannot be
+  repaired — the intent is real, the capability is deliberately absent — and
+  the honest answer is to name the doors that do exist."
+  [err]
+  (when (re-find #"\*session\*" (str err))
+    (str "there is no session var in the oracle, deliberately: eval observes,"
+         " it never writes (a session here would let a write bypass the delta"
+         " pipeline). The three doors that answer what you were asking:"
+         " query_store {code \"(fn [store] …)\"} for anything about the STORE"
+         " VALUE; the tools themselves for anything a session does (they hold"
+         " it for you); explore {ops [{op check code …}]} to run assertions in"
+         " the image. For a pure fn, call it directly — query_eval already has"
+         " every namespace loaded.")))
+
+^:reads (defn query-eval
+  "Observe-only eval against the live image (the oracle): call anything —
+  including effectful fns — but (re)defining code is rejected (T5); writes go
+  through the edit tools so provenance stays airtight. `:gate` swaps the
+  scanner for a caller that has already gated the untrusted part of `code`
+  itself (`check` gates the question, then wraps it in trusted scaffolding).
+
+  Returns the values, or `{:error msg}` when the eval actually FAILED — nREPL's
+  `eval-error` status, not merely something reaching stderr. A library that
+  prints at load (`WARNING: abs already refers to …`) is output, not failure:
+  its warning is dropped here, as in any REPL, and the values come back. It used
+  to come back as `{:error …}` with the values discarded, and since a second
+  eval finds the namespace loaded and prints nothing, the failure vanished on
+  retry.
+
+  A failure that reached for a SESSION carries [[session-var-hint]]: that
+  miss was the commonest eval refusal measured on a real store, and it is
+  one the pipeline cannot repair — the capability is absent on purpose."
+  [session code & {:keys [gate]}]
+  (if-let [err ((or gate edit/observe-gate) code)]
+    {:error err}
+    ;; strip :reload in the owned image — no source files exist to reload, so it
+    ;; would only throw FileNotFoundException (store ns) or waste a jar re-read
+    (let [r (repl/eval-checked! (:image @session) (edit/strip-image-reload code))]
+      (if (:err r)                                  ; F-3c2: never a silent []
+        {:error (if-let [h (session-var-hint (:err r))]
+                  (str (:err r) " — " h)
+                  (:err r))}
+        (:values r)))))
+
+^:reads (defn query-call
+  "Observe-only INVOKE of one var in the live image: `(query-call session
+  'app.core/f 1 2)` — the structured face of the common query-eval case.
+  The var reference is CARRIED (a quoted symbol in a designated position —
+  renames, moves, and the unused gate all see it) instead of hidden in an
+  eval string; args must be printable data (they cross the nREPL boundary
+  as pr-str). query-eval remains the escape hatch for genuinely arbitrary
+  expressions."
+  [session qsym & args]
+  (query-eval session
+              (str "(" qsym (apply str (map #(str " " (pr-str %)) args)) ")")))
+
+(defn- canonicalize-steps
+  "Canonicalize every add/replace step's source against the store's aliases
+  (`refactor/canonicalize-refs`) and prepend the requires those rewrites owe
+  as `:require` steps, one per [ns spec], so the group verifies them together
+  and a form's hot-load sees its alias. Returns `{:steps :canonicalized}` —
+  the second empty when nothing moved. A step whose source does not parse is
+  left for the group's own refusal."
+  [session steps]
+  (let [st      (:store @session)
+        aliases (read.modules/project-aliases st)
+        out     (reduce (fn [{:keys [steps owed rewrites]} step]
+                          (let [{:keys [action ns source]} step
+                                nsx (some-> ns (as-> n (symbol (str n))))]
+                            (if (and nsx source (contains? #{nil :add :replace} action)
+                                     (get-in st [:namespaces nsx]))
+                              (let [pf (edit/parse-form source)]
+                                (if-let [node (:node pf)]
+                                  (let [c (refactor/canonicalize-refs st nsx node aliases)]
+                                    {:steps    (conj steps (if (seq (:rewrites c))
+                                                             (assoc step :source (n/string (:node c)))
+                                                             step))
+                                     :owed     (into owed (map (fn [spec] [nsx spec])) (:requires c))
+                                     :rewrites (into rewrites (map #(assoc % :ns nsx) (:rewrites c)))})
+                                  {:steps (conj steps step) :owed owed :rewrites rewrites}))
+                              {:steps (conj steps step) :owed owed :rewrites rewrites})))
+                        {:steps [] :owed [] :rewrites []}
+                        steps)
+        reqs    (mapv (fn [[nsx spec]] {:action :require :ns nsx :require spec})
+                      (distinct (:owed out)))]
+    {:steps (into reqs (:steps out))
+     :canonicalized (vec (:rewrites out))
+     :requires (mapv (fn [[nsx spec]] {:added spec :ns nsx}) (distinct (:owed out)))}))
+
+(defn- purpose-doc
+  "The ns docstring a `prompt` becomes when a namespace is born without one:
+  the ask, first paragraph, capped at 300 chars — or nil for a blank prompt.
+  The ask says why the namespace exists, which is exactly what the
+  namespace-purpose rule asks for and what no tool can derive."
+  [prompt]
+  (let [p (some-> prompt str str/trim)]
+    (when (and p (not (str/blank? p)))
+      (let [para (str/trim (first (str/split p #"\n\s*\n")))]
+        (if (> (count para) 300) (str (subs para 0 297) "…") para)))))
+
+(defn- with-purpose
+  "`source` (a whole namespace's text) with `prompt` inserted as the ns
+  form's docstring when the ns form has none and the prompt says something;
+  unchanged otherwise. Textual on purpose: the ns form is the first form
+  and its docstring, when present, is the string right after the name."
+  [source ns-sym prompt]
+  (let [d (purpose-doc prompt)
+        m (re-matcher (re-pattern (str "^\\s*\\(ns\\s+" (java.util.regex.Pattern/quote (str ns-sym)) "(?![^\\s)])")) (str source))]
+    (if (and d (.find m))
+      (let [end  (.end m)
+            rest (subs (str source) end)]
+        (if (re-find #"^\s*\"" rest)
+          source
+          (str (subs (str source) 0 end) "\n  " (pr-str d) rest)))
+      source)))
+
+(defn- bracketed-require
+  "A require clause string with its brackets: `clojure.set :as set` — a bare
+  lib followed by its options, no outer vector — becomes `[clojure.set :as
+  set]`; a bare lib name, an already-bracketed clause, or one carrying
+  metadata (`^:side-effect [lib :as r]`, the done-point's own spelling) is
+  returned as it is. The shape is unambiguous and it failed to load (eval25
+  opus)."
+  [s]
+  (let [t (str/trim (str s))]
+    (if (re-matches #"[A-Za-z][A-Za-z0-9_.*+!?<>=$%&|'-]*\s+:.*" t)
+      (str "[" t "]")
+      t)))
+
+(defn ^:export note-event!
+  "Queue an EVENT for this session's agent — `{:kind :note}` — to ride the
+  next tool answer as one leading line. This is push in the only form that
+  reaches a model: an MCP notification goes to the client's log and never
+  to the conversation, while the next answer always does. Bounded to the
+  last five; an agent that has not called in a while gets the recent ones,
+  not a history."
+  [session event]
+  (swap! session update :events
+         (fn [evs] (vec (take-last 5 (conj (or evs []) event)))))
+  nil)
+
+(defn config-restore!
+  "Land a whole config entry at `path` as structured config, key by key —
+  the clone path's verb: a projected tree carries a declaration only as its
+  RENDERING, and `store/parse-config` read it back. Returns `{:path :keys}`.
+
+  Deliberately NOT through `config-file!`'s registries. A clone is replaying
+  what another store declared, possibly under a different slopp version, and
+  refusing a key this version does not know would abort the whole import over
+  a declaration nobody here made. The key lands as given; `session_brief`'s
+  `:unread-declarations` is the surface that names a declaration this slopp
+  no longer reads, which is the honest outcome — visible, not fatal.
+
+  `modules` is not a config entry (edge-grain, derived by adoption) and is
+  refused here as `config-file!` refuses it."
+  [session path {:keys [format values]} & {:keys [prompt agent]}]
+  (if (= "modules" (str path))
+    {:error "the module manifest is derived by adoption, not restored as config"}
+    (do (engine/commit-appended!
+         session
+         (fn [st]
+           (reduce (fn [s [k v]]
+                     (first (store/record-config-put s path (or format :manifest) k v
+                                                     :prompt prompt :agent agent)))
+                   st
+                   (sort-by key values)))
+         [])
+        {:path (str path) :keys (count values)})))
+
+(defn- app-booting-since
+  "When the boot of this project's app server that is IN FLIGHT began, or nil.
+  The server starts the app in the background on a project's first open and
+  lends each session `:app-booting-since`, a fn over the project's record; a
+  session with no server behind it has none. Nil once an app is held, whatever
+  the record says."
+  [session app]
+  (when (nil? app)
+    (when-let [f (:app-booting-since @session)]
+      (try (f) (catch Throwable _ nil)))))
+
+^:reads (defn session-brief
+  "THE one-call orientation, task-shaped (knowledge-differential stance):
+  breadth stays CHEAP — namespace FAMILIES (≥5 same-prefix siblings) roll
+  up to one row, form names ride only for solo nses on small stores — and
+  depth arrives WHERE THE ASK POINTS: the session's :last-intent (the
+  user's verbatim words, via the prompt hook or turn_begin) seeds the same
+  walk `orient` makes over the reference graph, and the top rows ride as
+  interface CARDS under :relevant, each with its :via. The agent starts
+  working instead of orienting. :host is the serving process's code-currency
+  record (orient/host-brief over the kernel's boot-info, reached through the
+  late-ref carrier — absent when this process didn't boot from a store):
+  which code the host actually runs, and what a restart would change.
+  :module-cycles rides only when the manifest has one — impossible to create
+  under the gate, so it was inherited at import, and this is the only place
+  outside the web UI that says so."
+  [session]
+  (let [st       (:store @session)
+        nss      (sort (keys (:namespaces st)))
+        names    (into {} (map (fn [n] [n (vec (remove #{n} (keep :name (store/forms st n))))])) nss)
+        total    (reduce + 0 (map (comp count val) names))
+        fams     (group-by #(first (str/split (str %) #"\.")) nss)
+        project  (vec (mapcat (fn [[seg members]]
+                                (if (<= 5 (count members))
+                                  [{:family (str seg ".*") :nses (count members)
+                                    :forms (reduce + 0 (map (comp count names) members))}]
+                                  (for [n members]
+                                    (if (< 200 total)
+                                      {:ns n :forms (count (names n))}
+                                      {:ns n :forms (names n)}))))
+                              (sort-by key fams)))
+        ms       (->> (query-commits session)
+                      (take 2)
+                      (mapv #(-> (select-keys % [:commit :description :at :status])
+                                 (update :description orient/snip 110))))
+        last-done (when-let [conn (:db @session)]
+                    ;; guarded on the connection like the thread and host
+                    ;; clauses: a session on a dir with no store yet — the
+                    ;; server's first on a fresh project — has nothing to ask
+                    (let [d (db/last-marker conn (engine/session-line session) :done)]
+                      (when (and d (or (= :red (get-in d [:findings :test-status]))
+                                       (pos? (get-in d [:findings :lint-errors] 0))))
+                        (-> (select-keys d [:label :at :findings])
+                            (assoc :note (str "the last done-point left problems —"
+                                              " address them or tell the user why not"))))))
+        ;; the kernel ns exists only in a process that booted from a store
+        ;; (the dev server, a jar launch) — reach it through the carrier and
+        ;; treat any failure as absence, never an error
+        host     (when-let [info (try ((store/late-ref 'slopp.kernel.boot/current-boot-info))
+                                      (catch Throwable _ nil))]
+                   (orient/host-brief
+                    ;; :jar-head is the ARTIFACT's identity; placing it against
+                    ;; THIS store is the caller's job, because the store a jar
+                    ;; runs against is often not the one it was built from.
+                    (cond-> info
+                      (:jar-head info)
+                      (assoc :jar (jar-currency session (:jar-head info))))
+                    ;; ONE spelling of the code-delta count. This was a second
+                    ;; copy of code-deltas-since — identical today, and the
+                    ;; docstring one namespace over already called itself "the
+                    ;; ONLY spelling of it" while this stood beside it. Three
+                    ;; artifacts now report staleness with it.
+                    (db/code-deltas-after (:db @session) (engine/session-line session)
+                                          {:at (:booted-at info 0)})
+                    (boolean (when-let [b (:branch @session)]
+                               (not= "main" (str b))))
+                    ;; MEASURED, not inferred: without this the
+                    ;; brief repeats whatever the reload counter
+                    ;; believes, which is how it once announced
+                    ;; five stale namespaces to a process that
+                    ;; held every one of them current.
+                    (rules.currency/drift (:image @session) st)))
+        ;; DERIVED, never remembered. A cycle is standing debt rather than an
+        ;; event, so reading the manifest each time means it survives a
+        ;; restart, covers import as well as adoption, and cannot disagree
+        ;; with the module graph — one `module-layers`, one answer.
+        cycles   (vec (:cycles (store/module-layers (:modules st))))
+        ;; one store-wide scan, not two — the cond-> below tests and reports the
+        ;; same value
+        unread   (orient/unread-declarations st)
+        ;; a projected config rendering held as a FILE with nothing behind it —
+        ;; what an import before the clone path learned to restore config left.
+        ;; Every capability reads nil while the projection shows the declaration
+        ;; plainly, which is why it has to be said HERE, beside the app line.
+        blobbed  (not-empty (store/blobbed-config-paths st))
+        ;; under the server the app server is the PROJECT's, held by its owner
+        ;; session; this session mirrors it only after a refresh it ran itself.
+        ;; Read the owner's when it is already open — never force it: an
+        ;; orientation must not be the thing that opens a reader.
+        app      (or (:app-server @session)
+                     (when-let [o (:app-owner @session)]
+                       (when (or (not (delay? o)) (realized? o))
+                         (:app-server @(force o)))))
+        declared (cond
+                   (capabilities/effective st "app.main")
+                   (str "app.main = " (capabilities/effective st "app.main"))
+                   (capabilities/effective st "http.enabled")
+                   "http.enabled")
+        ;; the line this session WRITES to, when it is a private one. Read from
+        ;; the session rather than resolved, deliberately: resolving ADOPTS,
+        ;; and orientation must not be the thing that creates a workspace.
+        ;; The count is measured from the thread's own base, which is the one
+        ;; delta guaranteed to be in its log however far the branch has moved.
+        thread   (when-let [conn (:db @session)]
+                   (when-let [row (and (:line @session)
+                                       (first (filter #(= (:line @session) (:id %))
+                                                      (db/lines conn))))]
+                     (when (= "thread" (:kind row))
+                       ;; ONE producer for this number, shared with thread_list and
+                       ;; the write hint. It used to be re-derived here by counting
+                       ;; the store's deltas past the base, which was a second
+                       ;; derivation of the same question AND the same defect: it
+                       ;; counted verification records, so a check with nothing
+                       ;; written left it non-zero.
+                       (let [n (db/unlanded-count conn (:id row) history/content-ops)]
+                         (cond-> {:on (:branch @session) :unlanded n}
+                           (pos? n)
+                           (assoc :note
+                                  (str n " change(s) are private to this thread. A green"
+                                       " done lands them on " (:branch @session)
+                                       "; nothing outside this session — the running"
+                                       " host included — can see them until it does.")))))))
+        intent   (:last-intent @session)
+        ;; the ask's MAP, at a small budget: the same walk `orient` makes over
+        ;; the reference graph and the coverage edges, so the brief's
+        ;; :relevant is the first six rows of what `orient {ask}` would say
+        ;; — seeds first, then what they pull in, each with its :via
+        relevant (when (seq (str/trim (str intent)))
+                   (->> (:rows (orient/orient-map session :ask intent :tokens 700))
+                        (take 6)
+                        vec
+                        not-empty))]
+    ;; no :loop line: it was 472 chars byte-identical in every session of a
+    ;; lifetime, re-teaching what the skill said. The brief carries what
+    ;; CHANGED and what needs the agent, nothing that is true every time.
+    (cond-> {:project project
+             ;; what the code means by each lib — the ns-form question, answered once
+             :aliases (read.modules/project-aliases (:store @session))}
+      (seq ms)   (assoc :commit-points ms)
+      last-done  (assoc :last-done last-done)
+      ;; A tangle can only have been INHERITED — `module_dep` cycle-checks
+      ;; every add, so nothing a store does under the gate can create one.
+      ;; That makes this the rarest thing in the brief and the one nobody
+      ;; else will mention: adoption reports it once at open and the report
+      ;; is discarded, leaving the web UI's module page as the only surface.
+      (seq cycles)
+      (assoc :module-cycles cycles
+             :module-cycles-note
+             (str "inherited at import — nothing loads in a circle and the code"
+                  " is not broken. A module is the first two segments, so this"
+                  " is a cross-module call in each direction. Nothing can add"
+                  " to it (an edge that closes a cycle is refused), so it is"
+                  " one-time debt: move what crosses, then module_dep"
+                  " {from … to … remove true}."))
+      host       (assoc :host host)
+      thread     (assoc :thread thread)
+      ;; what this store DECLARES that this slopp no longer reads. The brief is
+      ;; where it belongs because the moment it becomes true is a RESTART onto
+      ;; a different artifact — no write happened, so no write-time gate could
+      ;; have said it, and the store did not change.
+      ;;
+      ;; It is the JOIN rather than the finding: `unknown-marker` reports the
+      ;; per-form half at done grain, and nobody adds ten of those up. A
+      ;; consuming store hit exactly this — every route declaring a retired
+      ;; spelling, so nothing registered and everything 404d — and diagnosed
+      ;; drift in a since-retired check-in protocol instead, because the fact
+      ;; it needed was not here to read.
+      unread     (assoc :unread-declarations unread)
+      ;; this project's READ API on the server — `/api/projects/<slug>`, the
+      ;; `/api/<resource>` of its contract mounted there: JSON, plus the
+      ;; surface documents under it. The address to hand a PROGRAM (a client
+      ;; generator, a script). A HUMAN gets :pages — the server's own pages
+      ;; for this project, `/p/<slug>`, which read that same API. Both set by
+      ;; the server at attach; a session attached with nothing bound (a test
+      ;; on the registry alone) has no line here to hand out.
+      (:api-url @session) (merge {:api (:api-url @session)}
+                                 (when-let [p (:pages-url @session)] {:pages p}))
+      ;; the APP slopp is running for this project, when it is running one.
+      ;; Its only other announcement is a line on the server's stderr, which
+      ;; most clients never show anyone — so an agent asked "what is going
+      ;; on" is where a human finds out the app has an address at all.
+            (:url app) (assoc :app (:url app))
+      ;; and what the image cost to come up. It rides HERE rather than only on
+      ;; the banner because the comment two lines up is the whole reason: an
+      ;; agent asked "what is going on" is where a human finds out. The first
+      ;; app to want this number had to watch for the child process and diff
+      ;; its bind against its start time — hand-measuring a figure slopp had
+      ;; already computed, because the only place it was written was stderr.
+            (:boot-ms app)
+      (assoc :app-boot-ms (:boot-ms app))
+      ;; and whether that image is built from what you just wrote. `full_check`
+      ;; has carried this for a while and the BRIEF is where a reader looks —
+      ;; a consumer read this brief through a twenty-minute window in which
+      ;; their app served old code, and it said nothing, because the counter
+      ;; lived in a different call. Two docstrings meanwhile claimed it was
+      ;; here.
+      ;;
+      ;; 0 is REPORTED, not silenced: the question is "is the page I am about
+      ;; to look at built from what I just wrote", and silence on yes puts the
+      ;; reader back to hand-checking something slopp knows. Silence is for
+      ;; nothing-is-serving, which `behind` answers nil for.
+            (some? (app-behind session app))
+      (assoc :app-behind (app-behind session app))
+      ;; and a managed app server that FAILED is not the same as one nobody
+      ;; asked for. Silence on both is how "the dev server is broken" reads
+      ;; as "this project has no dev server", which sends the reader nowhere.
+            (and app (not (:serving? app)))
+      (assoc :app-note (str "slopp is running this project's app server and it"
+                            " is DOWN: " (:reason app)))
+      ;; and NO app at all is said in both directions. Silence here was
+      ;; deliberate once — most stores are not web projects — and it hid a
+      ;; LOST declaration for an hour: the brief said nothing, the registry
+      ;; said app null, and the reader concluded the project had no dev
+      ;; server rather than that its declaration had been blobbed.
+      ;; unless this process IS that app: a managed child never boots a child
+      ;; of itself, so "none is running" would describe the process answering
+      (and (nil? app) declared (:dev-instance-of @session)
+           (not (app-booting-since session app)))
+      (assoc :app-note (str "this process IS this store's dev instance (" declared "),"
+                            " booted by the machine server and refreshed at each done"
+                            " there; it serves you and manages no app of its own"))
+      (and (nil? app) declared (not (:dev-instance-of @session))
+           (not (app-booting-since session app)))
+      (assoc :app-note (str "this store declares an app (" declared ") but none is"
+                            " running in this session's view: the server"
+                            " starts it on the project's first attach and"
+                            " re-serves it at each done. If it stays absent, the"
+                            " server's stderr carries the boot verdict"
+                            (when blobbed
+                              (str " — and see :config-blobbed: " (str/join ", " blobbed)
+                                   " exist only as tracked files"))))
+      (and (nil? app) (nil? declared) (not (app-booting-since session app)))
+      (assoc :app-note (str "no app server: this store declares neither app.main"
+                            " nor http.enabled — config_file {path \"capabilities\""
+                            " key \"http.enabled\" value \"true\"} opts it into web,"
+                            " or key \"app.main\" value \"my.ns/-main\" declares"
+                            " an entry to run"
+                            (when blobbed
+                              (str ". BUT " (str/join ", " blobbed)
+                                   " exist as tracked FILES with no structured"
+                                   " config behind them — an import blobbed the"
+                                   " declaration; see :config-blobbed"))))
+      blobbed
+      (assoc :config-blobbed blobbed
+             :config-blobbed-note
+             (str "projected config held as opaque files, not declarations —"
+                  " every reader of those keys sees nil. An import before the"
+                  " clone path restored config did this. Repair each: file_get"
+                  " {path P}, config_file {path P key K value V} per line, then"
+                  " file_remove {path P}."))
+      relevant   (assoc :relevant relevant)
+      ;; a boot IN FLIGHT, last so it is the note that stands: the first open
+      ;; starts the app in the background, and "none is running" in these
+      ;; seconds read exactly like a boot that failed or never happened
+      (app-booting-since session app)
+      (assoc :app-note (str "slopp is starting this project's app server"
+                            (when declared (str " (" declared ")"))
+                            " — booting for "
+                            (quot (max 0 (- (System/currentTimeMillis)
+                                            (app-booting-since session app)))
+                                  1000)
+                            "s, begun when the project opened. The image takes"
+                            " seconds to come up; ask again and :app carries its"
+                            " url. If it never appears, the server's stderr"
+                            " carries the boot verdict")))))
+
+(defn flag-test!
+  "`flag_test`: record that `agent` believes the deftest `ns/name` is wrong, and
+  why. The exit D-test-immutability names when it refuses an edit to a test
+  grading the agent's own change: the objection lands as a :flag-test marker
+  for a human, and the test is untouched. Refuses a test that does not exist
+  and an empty reason — an objection with no reason gives the human nothing to
+  decide."
+  [session & {:keys [ns name reason agent]}]
+  (let [st (:store @session)
+        q  (when (and ns name) (symbol (str ns) (str name)))]
+    (cond
+      (nil? q)
+      {:error "flag_test needs ns and name — the deftest you believe is wrong"}
+
+      (nil? (store/form-named st (symbol (str ns)) (symbol (str name))))
+      {:error (str "no form " q " — flag_test names an existing deftest")}
+
+      (str/blank? reason)
+      {:error (str "flag_test needs a reason: what the test asserts, and why you"
+                   " believe that is wrong. The human decides from it.")}
+
+      :else
+      (do (engine/commit-appended!
+           session
+           #(first (store/record-flag-test % q reason
+                                           :agent (or agent (:agent-id @session))))
+           [])
+          {:flagged q :reason reason
+           :note (str "recorded for the human; the test is unchanged. Say in your"
+                      " reply which test you flagged and why.")}))))
+
+(defn mutation-run!
+  "Mutation testing outside `done`, which caps itself at 10s per episode. With
+  `ns`, every function in that namespace that has an observed test. Without
+  it, what earlier dones OWE: forms the budget did not reach whose current
+  version is still the one that went unchecked, so a form edited since is not
+  owed twice and a deleted one not at all. `budget-ms` defaults to 120s.
+  Results are recorded exactly as `done` records them, so a checked form
+  leaves the backlog. Returns `{:owed n :targets n :status {status n}
+  :findings [...]}`."
+  [session & {:keys [ns budget-ms]}]
+  (let [{:keys [image store test-map db]} @session
+        owed (when (and db (nil? ns))
+               (mutate/backlog store (db/measurements db "mutation" nil)))
+        fids (if ns
+               (keep :id (store/elements store (symbol (str ns))))
+               (map :fid owed))
+        ts   (mutate/targets store test-map fids)]
+    (cond
+      (nil? image) {:error "mutation testing needs the image, and this session has none"}
+      (empty? ts)  (cond-> {:targets 0}
+                     (nil? ns) (assoc :owed (count owed)))
+      :else
+      (let [rs (mutate/mutate! image store ts :budget-ms (or budget-ms 120000))]
+        (when db (mutate/record! db rs))
+        (cond-> {:targets  (count ts)
+                 :status   (frequencies (map :status rs))
+                 :findings (mutate/findings rs)}
+          (nil? ns) (assoc :owed (count owed)))))))
+
+(defn endorsement-refusal
+  "D-endorsed-examples, as a pure question over a store VALUE: nil when every
+  step may land, else the refusal. Two things are the human's alone. Editing
+  or deleting a test (or a facet def, `(def ^{:facet …} Name {…})`, protected because its
+  declaration is the value's contract as a test is the behaviour's) that carries `^{:endorsed …}` — a human read it and said
+  yes, so it is the readable spec, whatever its coverage and whoever wrote it.
+  And adding or changing that marker, since an agent that could endorse its
+  own tests could lock its own oracle. An `intent` (the human's verbatim ask)
+  that names the test lifts both: that is the human deciding."
+  [store intent steps]
+  (let [named?   (fn [nm] (and intent nm (str/includes? intent (str nm))))
+        new-meta (fn [src]
+                   (try (let [f (n/sexpr (p/parse-string src))]
+                          (when (and (seq? f)
+                                    (or (= 'deftest (first f))
+                                        (and (= 'def (first f))
+                                             (:facet (meta (second f))))))
+                            [(second f) (:endorsed (meta (second f)))]))
+                        (catch Exception _ nil)))
+        hit      (some (fn [{:keys [action ns name source] :as step}]
+                         (let [act       (some-> action clojure.core/name keyword)
+                               [snm end] (when source (new-meta source))
+                               end       (or end
+                                             (when (some #(str/includes? (str (:source %)) ":endorsed")
+                                                         (:replace step))
+                                               :patched))
+                               nm        (or (some-> name str symbol) snm)
+                               e         (when (and ns nm)
+                                           (store/form-named store (symbol (str ns)) (symbol (str nm))))
+                               old       (when e (:endorsed (store/form-name-meta e)))
+                               q         (when nm (symbol (str ns) (str nm)))]
+                           (cond
+                             (or (nil? q) (named? nm)) nil
+                             (and old (contains? #{:replace :subform :delete :patch nil} act))
+                             [:endorsed q old]
+                             (and end (not= end old)) [:endorse q])))
+                       steps)]
+    (when-let [[k q why] hit]
+      (if (= k :endorsed)
+        (str q " is ENDORSED (" (pr-str why) "): a human read it and said yes, so it is"
+             " the readable spec and no agent episode edits it. If you believe it is"
+             " wrong, record that with flag_test {ns \"" (namespace q) "\" name \"" (name q)
+             "\" reason \"…\"} and say so to the human; an ask that names this test lifts this.")
+        (str "only the human endorses a test: ^{:endorsed …} on " q " needs an ask that"
+             " names it. Ask the human to read " q " and endorse it.")))))
+
+(defn protected-test-refusal
+  "D-test-immutability, as a pure question over a store VALUE: nil when every
+  step may land, else the refusal naming the sanctioned exit.
+
+  An ENDORSED test (see [[endorsement-refusal]]) is refused first and
+  unconditionally: no agent episode edits it, whatever its coverage.
+
+  Otherwise a step that replaces, patches or deletes a deftest is refused when
+  the test ALREADY EXISTED before `agent`'s episode and its OBSERVED coverage
+  (`tmap`, test qsym -> form qsyms) reaches a form `agent` changed in that
+  episode — or a production form another step of these SAME `steps` targets,
+  since the guard runs before any of them lands and one call that weakens a
+  test and edits what it grades is the same move as two. That is the one edit
+  that lets an agent pass by weakening the oracle — the measured failure is
+  editing the test that is red right now, and prompting against it measured
+  no effect, so the guard is the write path's.
+
+  Three things stay open, each for a reason. A test this episode CREATED is the
+  agent's own new spec (red-first has to be able to fix its own typo). A test
+  whose coverage the agent did not touch is not part of the arc being graded.
+  And a turn intent that NAMES the test is the human deciding — the one actor
+  allowed to move an oracle."
+  [store tmap agent intent steps]
+  (or
+   (endorsement-refusal store intent steps)
+   (when (and agent (seq tmap))
+     (let [mine     (filter #(= agent (:agent %)) (history/episode-span store agent))
+           fids     (fn [d] (if (:form-id d) [(:form-id d)] (:form-ids d)))
+           created  (into #{} (comp (filter #(#{:add :ingest} (:op %))) (mapcat fids)) mine)
+           same-call (into #{}
+                           (keep (fn [{:keys [ns name]}]
+                                   (when (and ns name (not (str/ends-with? (str ns) "-test")))
+                                     (symbol (str ns) (str name)))))
+                           steps)
+           changed  (into same-call
+                          (comp (mapcat fids)
+                                (keep (fn [fid]
+                                        (when-let [e (store/form-by-id store fid)]
+                                          (when-let [ns-sym (store/ns-of-form-id store fid)]
+                                            (store/form-trace-keys ns-sym e)))))
+                                cat)
+                          mine)
+           protected? (fn [{:keys [action ns name]}]
+                        (when (and ns name (contains? #{:replace :subform :delete :patch nil}
+                                              (some-> action clojure.core/name keyword)))
+                          (let [ns (symbol (str ns))
+                                name (symbol (str name))
+                                q (symbol (str ns) (str name))
+                                e (store/form-named store ns name)
+                                reach (get tmap q)]
+                            (when (and e reach
+                                       (not (contains? created (:id e)))
+                                       (some changed reach)
+                                       (not (and intent (str/includes? intent (str name)))))
+                              [q (sort (filter changed reach))]))))]
+       (when-let [[q under] (some protected? steps)]
+         (str q " covers " (str/join ", " under) ", which you changed this"
+              " episode — so it is the oracle grading your change, and not yours"
+              " to edit. If you believe the test is wrong, record that with"
+              " flag_test {ns \"" (namespace q) "\" name \"" (name q) "\" reason \"…\"}"
+              " and say so to the human; the human decides. (A test you CREATED this"
+              " episode stays yours, and an ask that names this test lifts this.)"))))))
+
+(defn- group-advisories
+  "The ADVISORY write-gate findings for the forms a group wrote, read off the
+  final store. A gate at `:advisory` severity never blocks, so the step loop,
+  which asks only for a refusal, dropped them, and an author writing through
+  `change` never saw one: found when the facets dogfood app's deliberate
+  key-ownership probes came back silent."
+  [st step-nms]
+  (vec (distinct (mapcat (fn [[_ ns nm]] (when nm (:advisories (gates/gate-check st ns nm))))
+                         step-nms))))
+
 (defn edit-group-once!
   "Apply several form writes as ONE atomic intent (F2). All steps are validated
   and applied to a store value first — any error rejects the WHOLE group with
@@ -4182,7 +4815,10 @@
                                                                     " not. Update them and the next write"
                                                                     " rebuilds cleanly."))))
                       untested           (assoc :untested true)
-                      (pos? existing)    (assoc :existing-warnings existing))
+                      (pos? existing)    (assoc :existing-warnings existing)
+                      true               (as-> m (if-let [a (not-empty (group-advisories st step-nms))]
+                                                   (assoc m :advisories a)
+                                                   m)))
                     t0))))))))))
 
 (defn revert-episode!
@@ -4979,629 +5615,6 @@
                        (let [e (store/form-by-id st (:form-id d))]
                          (symbol (str ns-sym) (str (or (:name e) (:form-id d))))))
                      (:deltas r)))))))
-
-(defn ^:export session-var-hint
-  "The line a `query_eval` failure owes a caller who reached for a SESSION —
-  or nil for any other error.
-
-  Measured (s19): 121 refusals on one store named a `*session*` var (written
-  unqualified deliberately — spelled with a namespace it reads as prose
-  naming a form that exists, which is the one thing this is about), an
-  agent trying to call session-taking fns from the oracle. There is no such var and there should not be one: a live session
-  in eval would let a write bypass the delta pipeline, which is exactly what
-  the observe gate refuses (T5). So unlike an argument SHAPE this cannot be
-  repaired — the intent is real, the capability is deliberately absent — and
-  the honest answer is to name the doors that do exist."
-  [err]
-  (when (re-find #"\*session\*" (str err))
-    (str "there is no session var in the oracle, deliberately: eval observes,"
-         " it never writes (a session here would let a write bypass the delta"
-         " pipeline). The three doors that answer what you were asking:"
-         " query_store {code \"(fn [store] …)\"} for anything about the STORE"
-         " VALUE; the tools themselves for anything a session does (they hold"
-         " it for you); explore {ops [{op check code …}]} to run assertions in"
-         " the image. For a pure fn, call it directly — query_eval already has"
-         " every namespace loaded.")))
-
-^:reads (defn query-eval
-  "Observe-only eval against the live image (the oracle): call anything —
-  including effectful fns — but (re)defining code is rejected (T5); writes go
-  through the edit tools so provenance stays airtight. `:gate` swaps the
-  scanner for a caller that has already gated the untrusted part of `code`
-  itself (`check` gates the question, then wraps it in trusted scaffolding).
-
-  Returns the values, or `{:error msg}` when the eval actually FAILED — nREPL's
-  `eval-error` status, not merely something reaching stderr. A library that
-  prints at load (`WARNING: abs already refers to …`) is output, not failure:
-  its warning is dropped here, as in any REPL, and the values come back. It used
-  to come back as `{:error …}` with the values discarded, and since a second
-  eval finds the namespace loaded and prints nothing, the failure vanished on
-  retry.
-
-  A failure that reached for a SESSION carries [[session-var-hint]]: that
-  miss was the commonest eval refusal measured on a real store, and it is
-  one the pipeline cannot repair — the capability is absent on purpose."
-  [session code & {:keys [gate]}]
-  (if-let [err ((or gate edit/observe-gate) code)]
-    {:error err}
-    ;; strip :reload in the owned image — no source files exist to reload, so it
-    ;; would only throw FileNotFoundException (store ns) or waste a jar re-read
-    (let [r (repl/eval-checked! (:image @session) (edit/strip-image-reload code))]
-      (if (:err r)                                  ; F-3c2: never a silent []
-        {:error (if-let [h (session-var-hint (:err r))]
-                  (str (:err r) " — " h)
-                  (:err r))}
-        (:values r)))))
-
-^:reads (defn query-call
-  "Observe-only INVOKE of one var in the live image: `(query-call session
-  'app.core/f 1 2)` — the structured face of the common query-eval case.
-  The var reference is CARRIED (a quoted symbol in a designated position —
-  renames, moves, and the unused gate all see it) instead of hidden in an
-  eval string; args must be printable data (they cross the nREPL boundary
-  as pr-str). query-eval remains the escape hatch for genuinely arbitrary
-  expressions."
-  [session qsym & args]
-  (query-eval session
-              (str "(" qsym (apply str (map #(str " " (pr-str %)) args)) ")")))
-
-(defn- canonicalize-steps
-  "Canonicalize every add/replace step's source against the store's aliases
-  (`refactor/canonicalize-refs`) and prepend the requires those rewrites owe
-  as `:require` steps, one per [ns spec], so the group verifies them together
-  and a form's hot-load sees its alias. Returns `{:steps :canonicalized}` —
-  the second empty when nothing moved. A step whose source does not parse is
-  left for the group's own refusal."
-  [session steps]
-  (let [st      (:store @session)
-        aliases (read.modules/project-aliases st)
-        out     (reduce (fn [{:keys [steps owed rewrites]} step]
-                          (let [{:keys [action ns source]} step
-                                nsx (some-> ns (as-> n (symbol (str n))))]
-                            (if (and nsx source (contains? #{nil :add :replace} action)
-                                     (get-in st [:namespaces nsx]))
-                              (let [pf (edit/parse-form source)]
-                                (if-let [node (:node pf)]
-                                  (let [c (refactor/canonicalize-refs st nsx node aliases)]
-                                    {:steps    (conj steps (if (seq (:rewrites c))
-                                                             (assoc step :source (n/string (:node c)))
-                                                             step))
-                                     :owed     (into owed (map (fn [spec] [nsx spec])) (:requires c))
-                                     :rewrites (into rewrites (map #(assoc % :ns nsx) (:rewrites c)))})
-                                  {:steps (conj steps step) :owed owed :rewrites rewrites}))
-                              {:steps (conj steps step) :owed owed :rewrites rewrites})))
-                        {:steps [] :owed [] :rewrites []}
-                        steps)
-        reqs    (mapv (fn [[nsx spec]] {:action :require :ns nsx :require spec})
-                      (distinct (:owed out)))]
-    {:steps (into reqs (:steps out))
-     :canonicalized (vec (:rewrites out))
-     :requires (mapv (fn [[nsx spec]] {:added spec :ns nsx}) (distinct (:owed out)))}))
-
-(defn- purpose-doc
-  "The ns docstring a `prompt` becomes when a namespace is born without one:
-  the ask, first paragraph, capped at 300 chars — or nil for a blank prompt.
-  The ask says why the namespace exists, which is exactly what the
-  namespace-purpose rule asks for and what no tool can derive."
-  [prompt]
-  (let [p (some-> prompt str str/trim)]
-    (when (and p (not (str/blank? p)))
-      (let [para (str/trim (first (str/split p #"\n\s*\n")))]
-        (if (> (count para) 300) (str (subs para 0 297) "…") para)))))
-
-(defn- with-purpose
-  "`source` (a whole namespace's text) with `prompt` inserted as the ns
-  form's docstring when the ns form has none and the prompt says something;
-  unchanged otherwise. Textual on purpose: the ns form is the first form
-  and its docstring, when present, is the string right after the name."
-  [source ns-sym prompt]
-  (let [d (purpose-doc prompt)
-        m (re-matcher (re-pattern (str "^\\s*\\(ns\\s+" (java.util.regex.Pattern/quote (str ns-sym)) "(?![^\\s)])")) (str source))]
-    (if (and d (.find m))
-      (let [end  (.end m)
-            rest (subs (str source) end)]
-        (if (re-find #"^\s*\"" rest)
-          source
-          (str (subs (str source) 0 end) "\n  " (pr-str d) rest)))
-      source)))
-
-(defn- bracketed-require
-  "A require clause string with its brackets: `clojure.set :as set` — a bare
-  lib followed by its options, no outer vector — becomes `[clojure.set :as
-  set]`; a bare lib name, an already-bracketed clause, or one carrying
-  metadata (`^:side-effect [lib :as r]`, the done-point's own spelling) is
-  returned as it is. The shape is unambiguous and it failed to load (eval25
-  opus)."
-  [s]
-  (let [t (str/trim (str s))]
-    (if (re-matches #"[A-Za-z][A-Za-z0-9_.*+!?<>=$%&|'-]*\s+:.*" t)
-      (str "[" t "]")
-      t)))
-
-(defn ^:export note-event!
-  "Queue an EVENT for this session's agent — `{:kind :note}` — to ride the
-  next tool answer as one leading line. This is push in the only form that
-  reaches a model: an MCP notification goes to the client's log and never
-  to the conversation, while the next answer always does. Bounded to the
-  last five; an agent that has not called in a while gets the recent ones,
-  not a history."
-  [session event]
-  (swap! session update :events
-         (fn [evs] (vec (take-last 5 (conj (or evs []) event)))))
-  nil)
-
-(defn config-restore!
-  "Land a whole config entry at `path` as structured config, key by key —
-  the clone path's verb: a projected tree carries a declaration only as its
-  RENDERING, and `store/parse-config` read it back. Returns `{:path :keys}`.
-
-  Deliberately NOT through `config-file!`'s registries. A clone is replaying
-  what another store declared, possibly under a different slopp version, and
-  refusing a key this version does not know would abort the whole import over
-  a declaration nobody here made. The key lands as given; `session_brief`'s
-  `:unread-declarations` is the surface that names a declaration this slopp
-  no longer reads, which is the honest outcome — visible, not fatal.
-
-  `modules` is not a config entry (edge-grain, derived by adoption) and is
-  refused here as `config-file!` refuses it."
-  [session path {:keys [format values]} & {:keys [prompt agent]}]
-  (if (= "modules" (str path))
-    {:error "the module manifest is derived by adoption, not restored as config"}
-    (do (engine/commit-appended!
-         session
-         (fn [st]
-           (reduce (fn [s [k v]]
-                     (first (store/record-config-put s path (or format :manifest) k v
-                                                     :prompt prompt :agent agent)))
-                   st
-                   (sort-by key values)))
-         [])
-        {:path (str path) :keys (count values)})))
-
-(defn- app-booting-since
-  "When the boot of this project's app server that is IN FLIGHT began, or nil.
-  The server starts the app in the background on a project's first open and
-  lends each session `:app-booting-since`, a fn over the project's record; a
-  session with no server behind it has none. Nil once an app is held, whatever
-  the record says."
-  [session app]
-  (when (nil? app)
-    (when-let [f (:app-booting-since @session)]
-      (try (f) (catch Throwable _ nil)))))
-
-^:reads (defn session-brief
-  "THE one-call orientation, task-shaped (knowledge-differential stance):
-  breadth stays CHEAP — namespace FAMILIES (≥5 same-prefix siblings) roll
-  up to one row, form names ride only for solo nses on small stores — and
-  depth arrives WHERE THE ASK POINTS: the session's :last-intent (the
-  user's verbatim words, via the prompt hook or turn_begin) seeds the same
-  walk `orient` makes over the reference graph, and the top rows ride as
-  interface CARDS under :relevant, each with its :via. The agent starts
-  working instead of orienting. :host is the serving process's code-currency
-  record (orient/host-brief over the kernel's boot-info, reached through the
-  late-ref carrier — absent when this process didn't boot from a store):
-  which code the host actually runs, and what a restart would change.
-  :module-cycles rides only when the manifest has one — impossible to create
-  under the gate, so it was inherited at import, and this is the only place
-  outside the web UI that says so."
-  [session]
-  (let [st       (:store @session)
-        nss      (sort (keys (:namespaces st)))
-        names    (into {} (map (fn [n] [n (vec (remove #{n} (keep :name (store/forms st n))))])) nss)
-        total    (reduce + 0 (map (comp count val) names))
-        fams     (group-by #(first (str/split (str %) #"\.")) nss)
-        project  (vec (mapcat (fn [[seg members]]
-                                (if (<= 5 (count members))
-                                  [{:family (str seg ".*") :nses (count members)
-                                    :forms (reduce + 0 (map (comp count names) members))}]
-                                  (for [n members]
-                                    (if (< 200 total)
-                                      {:ns n :forms (count (names n))}
-                                      {:ns n :forms (names n)}))))
-                              (sort-by key fams)))
-        ms       (->> (query-commits session)
-                      (take 2)
-                      (mapv #(-> (select-keys % [:commit :description :at :status])
-                                 (update :description orient/snip 110))))
-        last-done (when-let [conn (:db @session)]
-                    ;; guarded on the connection like the thread and host
-                    ;; clauses: a session on a dir with no store yet — the
-                    ;; server's first on a fresh project — has nothing to ask
-                    (let [d (db/last-marker conn (engine/session-line session) :done)]
-                      (when (and d (or (= :red (get-in d [:findings :test-status]))
-                                       (pos? (get-in d [:findings :lint-errors] 0))))
-                        (-> (select-keys d [:label :at :findings])
-                            (assoc :note (str "the last done-point left problems —"
-                                              " address them or tell the user why not"))))))
-        ;; the kernel ns exists only in a process that booted from a store
-        ;; (the dev server, a jar launch) — reach it through the carrier and
-        ;; treat any failure as absence, never an error
-        host     (when-let [info (try ((store/late-ref 'slopp.kernel.boot/current-boot-info))
-                                      (catch Throwable _ nil))]
-                   (orient/host-brief
-                    ;; :jar-head is the ARTIFACT's identity; placing it against
-                    ;; THIS store is the caller's job, because the store a jar
-                    ;; runs against is often not the one it was built from.
-                    (cond-> info
-                      (:jar-head info)
-                      (assoc :jar (jar-currency session (:jar-head info))))
-                    ;; ONE spelling of the code-delta count. This was a second
-                    ;; copy of code-deltas-since — identical today, and the
-                    ;; docstring one namespace over already called itself "the
-                    ;; ONLY spelling of it" while this stood beside it. Three
-                    ;; artifacts now report staleness with it.
-                    (db/code-deltas-after (:db @session) (engine/session-line session)
-                                          {:at (:booted-at info 0)})
-                    (boolean (when-let [b (:branch @session)]
-                               (not= "main" (str b))))
-                    ;; MEASURED, not inferred: without this the
-                    ;; brief repeats whatever the reload counter
-                    ;; believes, which is how it once announced
-                    ;; five stale namespaces to a process that
-                    ;; held every one of them current.
-                    (rules.currency/drift (:image @session) st)))
-        ;; DERIVED, never remembered. A cycle is standing debt rather than an
-        ;; event, so reading the manifest each time means it survives a
-        ;; restart, covers import as well as adoption, and cannot disagree
-        ;; with the module graph — one `module-layers`, one answer.
-        cycles   (vec (:cycles (store/module-layers (:modules st))))
-        ;; one store-wide scan, not two — the cond-> below tests and reports the
-        ;; same value
-        unread   (orient/unread-declarations st)
-        ;; a projected config rendering held as a FILE with nothing behind it —
-        ;; what an import before the clone path learned to restore config left.
-        ;; Every capability reads nil while the projection shows the declaration
-        ;; plainly, which is why it has to be said HERE, beside the app line.
-        blobbed  (not-empty (store/blobbed-config-paths st))
-        ;; under the server the app server is the PROJECT's, held by its owner
-        ;; session; this session mirrors it only after a refresh it ran itself.
-        ;; Read the owner's when it is already open — never force it: an
-        ;; orientation must not be the thing that opens a reader.
-        app      (or (:app-server @session)
-                     (when-let [o (:app-owner @session)]
-                       (when (or (not (delay? o)) (realized? o))
-                         (:app-server @(force o)))))
-        declared (cond
-                   (capabilities/effective st "app.main")
-                   (str "app.main = " (capabilities/effective st "app.main"))
-                   (capabilities/effective st "http.enabled")
-                   "http.enabled")
-        ;; the line this session WRITES to, when it is a private one. Read from
-        ;; the session rather than resolved, deliberately: resolving ADOPTS,
-        ;; and orientation must not be the thing that creates a workspace.
-        ;; The count is measured from the thread's own base, which is the one
-        ;; delta guaranteed to be in its log however far the branch has moved.
-        thread   (when-let [conn (:db @session)]
-                   (when-let [row (and (:line @session)
-                                       (first (filter #(= (:line @session) (:id %))
-                                                      (db/lines conn))))]
-                     (when (= "thread" (:kind row))
-                       ;; ONE producer for this number, shared with thread_list and
-                       ;; the write hint. It used to be re-derived here by counting
-                       ;; the store's deltas past the base, which was a second
-                       ;; derivation of the same question AND the same defect: it
-                       ;; counted verification records, so a check with nothing
-                       ;; written left it non-zero.
-                       (let [n (db/unlanded-count conn (:id row) history/content-ops)]
-                         (cond-> {:on (:branch @session) :unlanded n}
-                           (pos? n)
-                           (assoc :note
-                                  (str n " change(s) are private to this thread. A green"
-                                       " done lands them on " (:branch @session)
-                                       "; nothing outside this session — the running"
-                                       " host included — can see them until it does.")))))))
-        intent   (:last-intent @session)
-        ;; the ask's MAP, at a small budget: the same walk `orient` makes over
-        ;; the reference graph and the coverage edges, so the brief's
-        ;; :relevant is the first six rows of what `orient {ask}` would say
-        ;; — seeds first, then what they pull in, each with its :via
-        relevant (when (seq (str/trim (str intent)))
-                   (->> (:rows (orient/orient-map session :ask intent :tokens 700))
-                        (take 6)
-                        vec
-                        not-empty))]
-    ;; no :loop line: it was 472 chars byte-identical in every session of a
-    ;; lifetime, re-teaching what the skill said. The brief carries what
-    ;; CHANGED and what needs the agent, nothing that is true every time.
-    (cond-> {:project project
-             ;; what the code means by each lib — the ns-form question, answered once
-             :aliases (read.modules/project-aliases (:store @session))}
-      (seq ms)   (assoc :commit-points ms)
-      last-done  (assoc :last-done last-done)
-      ;; A tangle can only have been INHERITED — `module_dep` cycle-checks
-      ;; every add, so nothing a store does under the gate can create one.
-      ;; That makes this the rarest thing in the brief and the one nobody
-      ;; else will mention: adoption reports it once at open and the report
-      ;; is discarded, leaving the web UI's module page as the only surface.
-      (seq cycles)
-      (assoc :module-cycles cycles
-             :module-cycles-note
-             (str "inherited at import — nothing loads in a circle and the code"
-                  " is not broken. A module is the first two segments, so this"
-                  " is a cross-module call in each direction. Nothing can add"
-                  " to it (an edge that closes a cycle is refused), so it is"
-                  " one-time debt: move what crosses, then module_dep"
-                  " {from … to … remove true}."))
-      host       (assoc :host host)
-      thread     (assoc :thread thread)
-      ;; what this store DECLARES that this slopp no longer reads. The brief is
-      ;; where it belongs because the moment it becomes true is a RESTART onto
-      ;; a different artifact — no write happened, so no write-time gate could
-      ;; have said it, and the store did not change.
-      ;;
-      ;; It is the JOIN rather than the finding: `unknown-marker` reports the
-      ;; per-form half at done grain, and nobody adds ten of those up. A
-      ;; consuming store hit exactly this — every route declaring a retired
-      ;; spelling, so nothing registered and everything 404d — and diagnosed
-      ;; drift in a since-retired check-in protocol instead, because the fact
-      ;; it needed was not here to read.
-      unread     (assoc :unread-declarations unread)
-      ;; this project's READ API on the server — `/api/projects/<slug>`, the
-      ;; `/api/<resource>` of its contract mounted there: JSON, plus the
-      ;; surface documents under it. The address to hand a PROGRAM (a client
-      ;; generator, a script). A HUMAN gets :pages — the server's own pages
-      ;; for this project, `/p/<slug>`, which read that same API. Both set by
-      ;; the server at attach; a session attached with nothing bound (a test
-      ;; on the registry alone) has no line here to hand out.
-      (:api-url @session) (merge {:api (:api-url @session)}
-                                 (when-let [p (:pages-url @session)] {:pages p}))
-      ;; the APP slopp is running for this project, when it is running one.
-      ;; Its only other announcement is a line on the server's stderr, which
-      ;; most clients never show anyone — so an agent asked "what is going
-      ;; on" is where a human finds out the app has an address at all.
-            (:url app) (assoc :app (:url app))
-      ;; and what the image cost to come up. It rides HERE rather than only on
-      ;; the banner because the comment two lines up is the whole reason: an
-      ;; agent asked "what is going on" is where a human finds out. The first
-      ;; app to want this number had to watch for the child process and diff
-      ;; its bind against its start time — hand-measuring a figure slopp had
-      ;; already computed, because the only place it was written was stderr.
-            (:boot-ms app)
-      (assoc :app-boot-ms (:boot-ms app))
-      ;; and whether that image is built from what you just wrote. `full_check`
-      ;; has carried this for a while and the BRIEF is where a reader looks —
-      ;; a consumer read this brief through a twenty-minute window in which
-      ;; their app served old code, and it said nothing, because the counter
-      ;; lived in a different call. Two docstrings meanwhile claimed it was
-      ;; here.
-      ;;
-      ;; 0 is REPORTED, not silenced: the question is "is the page I am about
-      ;; to look at built from what I just wrote", and silence on yes puts the
-      ;; reader back to hand-checking something slopp knows. Silence is for
-      ;; nothing-is-serving, which `behind` answers nil for.
-            (some? (app-behind session app))
-      (assoc :app-behind (app-behind session app))
-      ;; and a managed app server that FAILED is not the same as one nobody
-      ;; asked for. Silence on both is how "the dev server is broken" reads
-      ;; as "this project has no dev server", which sends the reader nowhere.
-            (and app (not (:serving? app)))
-      (assoc :app-note (str "slopp is running this project's app server and it"
-                            " is DOWN: " (:reason app)))
-      ;; and NO app at all is said in both directions. Silence here was
-      ;; deliberate once — most stores are not web projects — and it hid a
-      ;; LOST declaration for an hour: the brief said nothing, the registry
-      ;; said app null, and the reader concluded the project had no dev
-      ;; server rather than that its declaration had been blobbed.
-      ;; unless this process IS that app: a managed child never boots a child
-      ;; of itself, so "none is running" would describe the process answering
-      (and (nil? app) declared (:dev-instance-of @session)
-           (not (app-booting-since session app)))
-      (assoc :app-note (str "this process IS this store's dev instance (" declared "),"
-                            " booted by the machine server and refreshed at each done"
-                            " there; it serves you and manages no app of its own"))
-      (and (nil? app) declared (not (:dev-instance-of @session))
-           (not (app-booting-since session app)))
-      (assoc :app-note (str "this store declares an app (" declared ") but none is"
-                            " running in this session's view: the server"
-                            " starts it on the project's first attach and"
-                            " re-serves it at each done. If it stays absent, the"
-                            " server's stderr carries the boot verdict"
-                            (when blobbed
-                              (str " — and see :config-blobbed: " (str/join ", " blobbed)
-                                   " exist only as tracked files"))))
-      (and (nil? app) (nil? declared) (not (app-booting-since session app)))
-      (assoc :app-note (str "no app server: this store declares neither app.main"
-                            " nor http.enabled — config_file {path \"capabilities\""
-                            " key \"http.enabled\" value \"true\"} opts it into web,"
-                            " or key \"app.main\" value \"my.ns/-main\" declares"
-                            " an entry to run"
-                            (when blobbed
-                              (str ". BUT " (str/join ", " blobbed)
-                                   " exist as tracked FILES with no structured"
-                                   " config behind them — an import blobbed the"
-                                   " declaration; see :config-blobbed"))))
-      blobbed
-      (assoc :config-blobbed blobbed
-             :config-blobbed-note
-             (str "projected config held as opaque files, not declarations —"
-                  " every reader of those keys sees nil. An import before the"
-                  " clone path restored config did this. Repair each: file_get"
-                  " {path P}, config_file {path P key K value V} per line, then"
-                  " file_remove {path P}."))
-      relevant   (assoc :relevant relevant)
-      ;; a boot IN FLIGHT, last so it is the note that stands: the first open
-      ;; starts the app in the background, and "none is running" in these
-      ;; seconds read exactly like a boot that failed or never happened
-      (app-booting-since session app)
-      (assoc :app-note (str "slopp is starting this project's app server"
-                            (when declared (str " (" declared ")"))
-                            " — booting for "
-                            (quot (max 0 (- (System/currentTimeMillis)
-                                            (app-booting-since session app)))
-                                  1000)
-                            "s, begun when the project opened. The image takes"
-                            " seconds to come up; ask again and :app carries its"
-                            " url. If it never appears, the server's stderr"
-                            " carries the boot verdict")))))
-
-(defn flag-test!
-  "`flag_test`: record that `agent` believes the deftest `ns/name` is wrong, and
-  why. The exit D-test-immutability names when it refuses an edit to a test
-  grading the agent's own change: the objection lands as a :flag-test marker
-  for a human, and the test is untouched. Refuses a test that does not exist
-  and an empty reason — an objection with no reason gives the human nothing to
-  decide."
-  [session & {:keys [ns name reason agent]}]
-  (let [st (:store @session)
-        q  (when (and ns name) (symbol (str ns) (str name)))]
-    (cond
-      (nil? q)
-      {:error "flag_test needs ns and name — the deftest you believe is wrong"}
-
-      (nil? (store/form-named st (symbol (str ns)) (symbol (str name))))
-      {:error (str "no form " q " — flag_test names an existing deftest")}
-
-      (str/blank? reason)
-      {:error (str "flag_test needs a reason: what the test asserts, and why you"
-                   " believe that is wrong. The human decides from it.")}
-
-      :else
-      (do (engine/commit-appended!
-           session
-           #(first (store/record-flag-test % q reason
-                                           :agent (or agent (:agent-id @session))))
-           [])
-          {:flagged q :reason reason
-           :note (str "recorded for the human; the test is unchanged. Say in your"
-                      " reply which test you flagged and why.")}))))
-
-(defn mutation-run!
-  "Mutation testing outside `done`, which caps itself at 10s per episode. With
-  `ns`, every function in that namespace that has an observed test. Without
-  it, what earlier dones OWE: forms the budget did not reach whose current
-  version is still the one that went unchecked, so a form edited since is not
-  owed twice and a deleted one not at all. `budget-ms` defaults to 120s.
-  Results are recorded exactly as `done` records them, so a checked form
-  leaves the backlog. Returns `{:owed n :targets n :status {status n}
-  :findings [...]}`."
-  [session & {:keys [ns budget-ms]}]
-  (let [{:keys [image store test-map db]} @session
-        owed (when (and db (nil? ns))
-               (mutate/backlog store (db/measurements db "mutation" nil)))
-        fids (if ns
-               (keep :id (store/elements store (symbol (str ns))))
-               (map :fid owed))
-        ts   (mutate/targets store test-map fids)]
-    (cond
-      (nil? image) {:error "mutation testing needs the image, and this session has none"}
-      (empty? ts)  (cond-> {:targets 0}
-                     (nil? ns) (assoc :owed (count owed)))
-      :else
-      (let [rs (mutate/mutate! image store ts :budget-ms (or budget-ms 120000))]
-        (when db (mutate/record! db rs))
-        (cond-> {:targets  (count ts)
-                 :status   (frequencies (map :status rs))
-                 :findings (mutate/findings rs)}
-          (nil? ns) (assoc :owed (count owed)))))))
-
-(defn endorsement-refusal
-  "D-endorsed-examples, as a pure question over a store VALUE: nil when every
-  step may land, else the refusal. Two things are the human's alone. Editing
-  or deleting a test (or a facet def, `(def ^{:facet …} Name {…})`, protected because its
-  declaration is the value's contract as a test is the behaviour's) that carries `^{:endorsed …}` — a human read it and said
-  yes, so it is the readable spec, whatever its coverage and whoever wrote it.
-  And adding or changing that marker, since an agent that could endorse its
-  own tests could lock its own oracle. An `intent` (the human's verbatim ask)
-  that names the test lifts both: that is the human deciding."
-  [store intent steps]
-  (let [named?   (fn [nm] (and intent nm (str/includes? intent (str nm))))
-        new-meta (fn [src]
-                   (try (let [f (n/sexpr (p/parse-string src))]
-                          (when (and (seq? f)
-                                    (or (= 'deftest (first f))
-                                        (and (= 'def (first f))
-                                             (:facet (meta (second f))))))
-                            [(second f) (:endorsed (meta (second f)))]))
-                        (catch Exception _ nil)))
-        hit      (some (fn [{:keys [action ns name source] :as step}]
-                         (let [act       (some-> action clojure.core/name keyword)
-                               [snm end] (when source (new-meta source))
-                               end       (or end
-                                             (when (some #(str/includes? (str (:source %)) ":endorsed")
-                                                         (:replace step))
-                                               :patched))
-                               nm        (or (some-> name str symbol) snm)
-                               e         (when (and ns nm)
-                                           (store/form-named store (symbol (str ns)) (symbol (str nm))))
-                               old       (when e (:endorsed (store/form-name-meta e)))
-                               q         (when nm (symbol (str ns) (str nm)))]
-                           (cond
-                             (or (nil? q) (named? nm)) nil
-                             (and old (contains? #{:replace :subform :delete :patch nil} act))
-                             [:endorsed q old]
-                             (and end (not= end old)) [:endorse q])))
-                       steps)]
-    (when-let [[k q why] hit]
-      (if (= k :endorsed)
-        (str q " is ENDORSED (" (pr-str why) "): a human read it and said yes, so it is"
-             " the readable spec and no agent episode edits it. If you believe it is"
-             " wrong, record that with flag_test {ns \"" (namespace q) "\" name \"" (name q)
-             "\" reason \"…\"} and say so to the human; an ask that names this test lifts this.")
-        (str "only the human endorses a test: ^{:endorsed …} on " q " needs an ask that"
-             " names it. Ask the human to read " q " and endorse it.")))))
-
-(defn protected-test-refusal
-  "D-test-immutability, as a pure question over a store VALUE: nil when every
-  step may land, else the refusal naming the sanctioned exit.
-
-  An ENDORSED test (see [[endorsement-refusal]]) is refused first and
-  unconditionally: no agent episode edits it, whatever its coverage.
-
-  Otherwise a step that replaces, patches or deletes a deftest is refused when
-  the test ALREADY EXISTED before `agent`'s episode and its OBSERVED coverage
-  (`tmap`, test qsym -> form qsyms) reaches a form `agent` changed in that
-  episode — or a production form another step of these SAME `steps` targets,
-  since the guard runs before any of them lands and one call that weakens a
-  test and edits what it grades is the same move as two. That is the one edit
-  that lets an agent pass by weakening the oracle — the measured failure is
-  editing the test that is red right now, and prompting against it measured
-  no effect, so the guard is the write path's.
-
-  Three things stay open, each for a reason. A test this episode CREATED is the
-  agent's own new spec (red-first has to be able to fix its own typo). A test
-  whose coverage the agent did not touch is not part of the arc being graded.
-  And a turn intent that NAMES the test is the human deciding — the one actor
-  allowed to move an oracle."
-  [store tmap agent intent steps]
-  (or
-   (endorsement-refusal store intent steps)
-   (when (and agent (seq tmap))
-     (let [mine     (filter #(= agent (:agent %)) (history/episode-span store agent))
-           fids     (fn [d] (if (:form-id d) [(:form-id d)] (:form-ids d)))
-           created  (into #{} (comp (filter #(#{:add :ingest} (:op %))) (mapcat fids)) mine)
-           same-call (into #{}
-                           (keep (fn [{:keys [ns name]}]
-                                   (when (and ns name (not (str/ends-with? (str ns) "-test")))
-                                     (symbol (str ns) (str name)))))
-                           steps)
-           changed  (into same-call
-                          (comp (mapcat fids)
-                                (keep (fn [fid]
-                                        (when-let [e (store/form-by-id store fid)]
-                                          (when-let [ns-sym (store/ns-of-form-id store fid)]
-                                            (store/form-trace-keys ns-sym e)))))
-                                cat)
-                          mine)
-           protected? (fn [{:keys [action ns name]}]
-                        (when (and ns name (contains? #{:replace :subform :delete :patch nil}
-                                              (some-> action clojure.core/name keyword)))
-                          (let [ns (symbol (str ns))
-                                name (symbol (str name))
-                                q (symbol (str ns) (str name))
-                                e (store/form-named store ns name)
-                                reach (get tmap q)]
-                            (when (and e reach
-                                       (not (contains? created (:id e)))
-                                       (some changed reach)
-                                       (not (and intent (str/includes? intent (str name)))))
-                              [q (sort (filter changed reach))]))))]
-       (when-let [[q under] (some protected? steps)]
-         (str q " covers " (str/join ", " under) ", which you changed this"
-              " episode — so it is the oracle grading your change, and not yours"
-              " to edit. If you believe the test is wrong, record that with"
-              " flag_test {ns \"" (namespace q) "\" name \"" (name q) "\" reason \"…\"}"
-              " and say so to the human; the human decides. (A test you CREATED this"
-              " episode stays yours, and an ask that names this test lifts this.)"))))))
 
 (defn create-ns!
   "F4: bring a brand-new namespace into being — two modes:
