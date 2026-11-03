@@ -78,7 +78,9 @@ elsewhere without moving (`help {topic "threads"}`).
    and close again. `{prompt impl}` alone is the ordinary write — a
    docstring, a comment, a one-form fix. `{prompt tests}` alone lands the
    spec red and waits: the impl is the next change. Say the WHY in
-   `prompt`; it is the recorded intent forever.
+   `prompt`; it is the recorded intent forever. Pass `rejected` ("tried X; it
+   failed because Y") when you tried or weighed something and dropped it: it
+   is stored on every delta of the change and shown in the form's history.
 3. **The result is the verdict.** `:test {:ran :pass :status}` — the
    covering tests by name; `:finisher {:applied …}` — the expectation
    shifts you declared, already applied and re-verified; requires and
