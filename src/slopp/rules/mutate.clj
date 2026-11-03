@@ -49,25 +49,36 @@
 (defn mutants
   "Up to `k` mutants of the defn source `src`, each `{:mutation \"< → <=\"
   :at \"(< x 10)\" :source s}`: the same source with exactly one token
-  changed. `:at` is the expression the token sits in, cut to 60 characters —
-  where it is, said the way a reader finds it, never as a coordinate. Only the
-  body is mutated (see [[in-body?]]). When there are more sites than `k`, the
-  k are spread evenly over the body in source order, so a long function is not
+  changed. `:at` is the expression the token sits in, on one line and cut to
+  60 characters — where it is, said the way a reader finds it, never as a
+  coordinate. When that expression is too long to show whole and the token is
+  not its head, `:at` is the token's left neighbour and the token instead: a
+  token directly in a cond or let would otherwise be placed by the first sixty
+  characters of the whole form, which need not contain it. Only the body is
+  mutated (see [[in-body?]]). When there are more sites than `k`, the k are
+  spread evenly over the body in source order, so a long function is not
   judged on its first few lines."
   [src k]
-  (let [top   (z/of-string src)
-        root  (if (= :meta (z/tag top)) (-> top z/down z/rightmost) top)
-        rnode (z/node root)
-        sites (vec (keep (fn [loc]
-                           (when (in-body? rnode loc)
-                             (when-let [r (replacement loc)] (assoc r :loc loc))))
-                         (take-while #(not (z/end? %)) (iterate z/next root))))
-        n     (count sites)
+  (let [top    (z/of-string src)
+        root   (if (= :meta (z/tag top)) (-> top z/down z/rightmost) top)
+        rnode  (z/node root)
+        sites  (vec (keep (fn [loc]
+                            (when (in-body? rnode loc)
+                              (when-let [r (replacement loc)] (assoc r :loc loc))))
+                          (take-while #(not (z/end? %)) (iterate z/next root))))
+        n      (count sites)
         picked (if (<= n k) sites (mapv #(sites (quot (* % n) k)) (range k)))
-        cut   (fn [s] (if (> (count s) 60) (str (subs s 0 60) "…") s))]
+        line   (fn [node] (str/replace (n/string node) #"\s+" " "))
+        cut    (fn [s] (if (> (count s) 60) (str (subs s 0 60) "…") s))
+        at     (fn [loc]
+                 (let [whole (line (z/node (z/up loc)))
+                       left  (z/left loc)]
+                   (cut (if (and (> (count whole) 60) left)
+                          (str (line (z/node left)) " " (line (z/node loc)))
+                          whole))))]
     (mapv (fn [{:keys [loc from to]}]
             {:mutation (str (pr-str from) " → " (pr-str to))
-             :at       (cut (n/string (z/node (z/up loc))))
+             :at       (at loc)
              :source   (z/root-string (z/replace loc (n/token-node to)))})
           picked)))
 

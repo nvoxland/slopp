@@ -202,3 +202,21 @@
       (is (str/includes? (:teach tim) "restart")))
     (testing "no timeout, no finding"
       (is (not-any? :timed-out (mutate/findings [{:form 'a/g :status :killed :timeout 0}]))))))
+
+(deftest a-token-in-a-long-form-is-placed-by-its-neighbour
+  ;; `:at` is where a reader looks for the fault. A token that sits directly
+  ;; in a cond or let has the whole cond as its enclosing expression: many
+  ;; lines, cut at sixty characters to something that does not contain the
+  ;; token at all. Its left neighbour — the test of a cond pair, the name of
+  ;; a let binding — is what places it.
+  (let [src (str "(defn f [up x]\n  (cond (nil? up) false\n        (pos? x) (+ x 1000000)\n"
+                 "        :else (str \"a long tail that pushes the cond past sixty\")))")
+        ms  (mutate/mutants src 50)
+        by  (into {} (map (juxt :mutation :at)) ms)]
+    (testing "a token directly in the long cond is shown with its left neighbour"
+      (is (= "(nil? up) false" (by "false → true"))))
+    (testing "a short enclosing expression is still shown whole"
+      (is (= "(+ x 1000000)" (by "1000000 → 1000001")))))
+  (testing "every :at is one line"
+    (let [ms (mutate/mutants "(defn f [x]\n  (+ x\n     1))" 50)]
+      (is (= "(+ x 1)" (:at (first ms)))))))
