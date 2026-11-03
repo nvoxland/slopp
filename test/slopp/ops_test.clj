@@ -2961,3 +2961,24 @@
       (is (re-find #"flag_test" (str (ops/protected-test-refusal st tmap "agent-b" "tidy" [weaken edit-f])))))
     (testing "the same test edit alone, with the code untouched, is not"
       (is (nil? (ops/protected-test-refusal st tmap "agent-b" "tidy" [weaken]))))))
+
+(deftest an-endorsed-facet-def-is-the-humans-like-an-endorsed-test
+  (let [st     (-> (store/empty-store)
+                   (store/ingest 'fc.core
+                                 (str "(ns fc.core)\n\n"
+                                      "(def ^{:facet \"Thing\" :endorsed \"pat: x is an int\"} Thing {:facet/fields {:x/a :int}})\n\n"
+                                      "(def ^{:facet \"Other\"} Other {:facet/fields {:x/a :int}})\n\n"
+                                      "(def ^{:endorsed \"pat: plain\"} plain-def 1)\n")))
+        edit   (fn [nm src] [{:action :replace :ns "fc.core" :name nm :source src}])
+        refuse #(ops/endorsement-refusal st %1 %2)]
+    (testing "replacing an endorsed facet def is refused unless the ask names it"
+      (is (re-find #"ENDORSED" (str (refuse "tidy" (edit "Thing" "(def ^{:facet \"Thing\" :endorsed \"pat: x is an int\"} Thing {:facet/fields {:x/a :string}})")))))
+      (is (nil? (refuse "change Thing to a string" (edit "Thing" "(def ^{:facet \"Thing\" :endorsed \"pat: x is an int\"} Thing {:facet/fields {:x/a :string}})")))))
+    (testing "deleting an endorsed facet def is refused"
+      (is (re-find #"ENDORSED" (str (refuse "tidy" [{:action :delete :ns "fc.core" :name "Thing"}])))))
+    (testing "only the human endorses a facet def"
+      (is (re-find #"only the human endorses" (str (refuse "tidy" (edit "Other" "(def ^{:facet \"Other\" :endorsed \"x\"} Other {:facet/fields {:x/a :int}})")))))
+      (is (nil? (refuse "endorse Other" (edit "Other" "(def ^{:facet \"Other\" :endorsed \"x\"} Other {:facet/fields {:x/a :int}})")))))
+    (testing "a plain def keeps today's behaviour: an existing endorsed one is protected, a new marker on one is not gated"
+      (is (re-find #"ENDORSED" (str (refuse "tidy" (edit "plain-def" "(def ^{:endorsed \"pat: plain\"} plain-def 2)")))))
+      (is (nil? (refuse "tidy" [{:action :add :ns "fc.core" :source "(def ^{:endorsed \"x\"} fresh 1)"}]))))))

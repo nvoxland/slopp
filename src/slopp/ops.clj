@@ -5497,7 +5497,8 @@
 (defn endorsement-refusal
   "D-endorsed-examples, as a pure question over a store VALUE: nil when every
   step may land, else the refusal. Two things are the human's alone. Editing
-  or deleting a test that carries `^{:endorsed …}` — a human read it and said
+  or deleting a test (or a facet def, `(def ^{:facet …} Name {…})`, protected because its
+  declaration is the value's contract as a test is the behaviour's) that carries `^{:endorsed …}` — a human read it and said
   yes, so it is the readable spec, whatever its coverage and whoever wrote it.
   And adding or changing that marker, since an agent that could endorse its
   own tests could lock its own oracle. An `intent` (the human's verbatim ask)
@@ -5506,7 +5507,10 @@
   (let [named?   (fn [nm] (and intent nm (str/includes? intent (str nm))))
         new-meta (fn [src]
                    (try (let [f (n/sexpr (p/parse-string src))]
-                          (when (and (seq? f) (= 'deftest (first f)))
+                          (when (and (seq? f)
+                                    (or (= 'deftest (first f))
+                                        (and (= 'def (first f))
+                                             (:facet (meta (second f))))))
                             [(second f) (:endorsed (meta (second f)))]))
                         (catch Exception _ nil)))
         hit      (some (fn [{:keys [action ns name source] :as step}]
