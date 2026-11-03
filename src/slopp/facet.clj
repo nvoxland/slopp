@@ -103,10 +103,14 @@
   @facet-var)
 
 (defn- version
-  "The facet's version: the stamp rendering puts on it, else a hash of the
-  declaration as it stands in this image."
+  "The facet's version in this image: its declaration, plus the IDENTITY of
+  each check and claim fn its vars hold now. Re-evaluating a check's body
+  makes a new fn object, so a seal made under the old body stops fitting with
+  no restart and no stamp in the source. A seal never leaves its image (the
+  key is per image), so an in-image identity is all a version has to be."
   [decl]
-  (or (:facet/version (meta decl)) (hash decl)))
+  (hash [decl (mapv (fn [{f :fn}] (System/identityHashCode (if (var? f) @f f)))
+                    (concat (vals (:facet/checks decl)) (vals (:facet/claims decl))))]))
 
 (defn- canonical-text
   "One text for a value whatever order its maps and sets hold entries in, with

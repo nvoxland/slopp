@@ -92,3 +92,11 @@
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"by VAR" (facet/parse Order good)))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"by VAR" (facet/parse #'total-matches? good)))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #":owner" (facet/project #'Order :owner good))))
+
+(deftest redefining-a-check-stales-a-live-seal
+  (let [p (facet/parse #'Order good)]
+    (is (facet/parsed? #'Order p))
+    (with-redefs [total-matches? (fn [_] true)]
+      (is (not (facet/parsed? #'Order p))
+          "a check's body changed, so what the seal vouched for no longer holds"))
+    (is (facet/parsed? #'Order p) "the same check again: the seal fits again")))
