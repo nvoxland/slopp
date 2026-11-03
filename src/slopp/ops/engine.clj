@@ -12,7 +12,7 @@
   lands for that operation. Four gates were once hand-pasted at four write
   sites because the chokepoint was not used, and every later fix to them had
   to be applied four times."
-  (:require [clojure.edn :as edn] [clojure.set :as set] [clojure.string :as str] [rewrite-clj.node :as n] [slopp.store.db :as db] [slopp.edit :as edit] [slopp.image :as image] [slopp.store.render :as store.render] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.index.analyze :as analyze] [slopp.edit.hotload :as hotload] [slopp.edit.lintgate :as lintgate] [rewrite-clj.parser :as p] [slopp.rules.http :as rules.http] [slopp.index.refs :as refs] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [clojure.java.io :as io] [slopp.project.capabilities :as capabilities] [slopp.index.crossings :as crossings]))
+  (:require [clojure.edn :as edn] [clojure.set :as set] [clojure.string :as str] [rewrite-clj.node :as n] [slopp.store.db :as db] [slopp.edit :as edit] [slopp.image :as image] [slopp.store.render :as store.render] [slopp.image.repl :as repl] [slopp.store :as store] [slopp.index.analyze :as analyze] [slopp.edit.hotload :as hotload] [slopp.edit.lintgate :as lintgate] [rewrite-clj.parser :as p] [slopp.rules.http :as rules.http] [slopp.index.refs :as refs] [slopp.image.currency :as image.currency] [slopp.kernel.boot :as boot] [clojure.java.io :as io] [slopp.project.capabilities :as capabilities] [slopp.index.crossings :as crossings] [slopp.cache :as cache]))
 
 ^{:auto-declare "mutual recursion: adopt-line!, commit-appended!, follow-branch-if-idle!, rebased-write!, refresh-cache!"}
 (declare adopt-line! commit-appended! follow-branch-if-idle! rebased-write! refresh-cache!)
@@ -1560,21 +1560,6 @@
       (vendor-framework! store dir)
       dir)))
 
-(defn start-spare!
-  "Kick off a background-warming spare image (D5 warm spare) if enabled.
-
-  Launched with no DEPS — the manifest can change between warming and adoption,
-  so `image-with-deps!` reconciles it there — but IN the session's framework
-  dir, because that half cannot be reconciled later: a JVM cannot pick up a
-  relative classpath directory after launch. The dir is resolved here, on the
-  calling thread, rather than inside the future: it writes to the session."
-  [session]
-  (when (:warm-spare? @session)
-    (let [dir (framework-dir! session (:store @session))]
-      (swap! session assoc :spare
-             (future (repl/start! (cond-> {}
-                                    dir (assoc :slopp.image.repl/dir dir))))))))
-
 (defn ^:export framework-deps-from-source
   "What a vendored family needs from OUTSIDE, for a process with no jar
   manifest: the checkout's own `deps.edn` `:deps`, handed WHOLE to every family
@@ -1659,6 +1644,142 @@
   (when (contains? (:namespaces store) 'slopp.kernel.rt)
     (store.render/render-ns store 'slopp.kernel.rt)))
 
+(defn- static-hits
+  "The `edited` forms test `t` reaches within three hops of the store's
+  reference graph — calls AND value reads, which is the difference that
+  matters: the tracer sees calls, so a test that reads a def has no trace
+  edge to it."
+  [store t edited]
+  (let [g     (group-by (juxt :from-ns :from-var) (refs/refs store))
+        start [(symbol (namespace t)) (symbol (name t))]
+        reach (loop [seen #{} frontier #{start} hop 0]
+                (if (or (empty? frontier) (> hop 3))
+                  (into seen frontier)
+                  (recur (into seen frontier)
+                         (into #{} (comp (mapcat #(get g %))
+                                         (keep (fn [r] (when (and (:to-ns r) (:to-name r))
+                                                         [(:to-ns r) (:to-name r)])))
+                                         (remove seen))
+                               frontier)
+                         (inc hop))))]
+    (seq (filter (fn [q] (reach [(symbol (namespace q)) (symbol (name q))])) edited))))
+
+(defn implicate
+  "Rock 2: annotate each failure with the just-changed forms that failing
+  test actually exercises (trace map ∩ edited) — the correlation agents
+  otherwise re-derive from raw expected/actual on every red.
+
+  Each failure also carries `:attribution`, because that intersection has
+  THREE outcomes and reporting only the hits collapsed the last two:
+
+  - `:mine`     the test exercises a form this episode changed, or IS one
+                — `:implicated` names which
+  - `:foreign`  the test IS traced and its trace is disjoint from this
+                episode's edits — somebody else's red
+  - `:untraced` no trace for this test, so nothing was intersected and
+                neither answer is available
+
+  `:foreign` and `:untraced` both used to arrive as a missing `:implicated`
+  key, leaving 'assume it is mine' as the only safe reading — which is how
+  one agent's red comes to freeze every other agent's thread. Only
+  `:foreign` is evidence of innocence. `:untraced` is the ABSENCE of
+  evidence and must never be read as the presence of it, which is why an
+  empty trace counts as untraced rather than as a disjoint one.
+
+  The test's OWN name is checked against `edited` before its trace is,
+  because the trace maps a test to the source forms it exercises and so can
+  never name the test itself. Writing a failing test against code you did
+  not touch is the ordinary red-first move, and reading its trace alone
+  called it somebody else's.
+
+  Given the `store`, a traced test whose trace misses the edit is checked
+  once more against the static reference graph before it is called
+  `:foreign` (`:via :static` on the result): a test that READS an edited def
+  has no trace edge to it, and a foreign attribution lets a red land
+  unexamined."
+  ([summary tmap edited] (implicate summary tmap edited nil))
+  ([summary tmap edited store]
+   (if-not (and (seq (:failures summary)) (seq edited))
+     summary
+     (let [edited (set edited)]
+       (update summary :failures
+               (fn [fs]
+                 (mapv (fn [f]
+                         (let [own    (when (contains? edited (:test f)) [(:test f)])
+                               traced (seq (get tmap (:test f)))
+                               hits   (some->> traced set (set/intersection edited) seq)]
+                           (cond
+                             (or own hits)
+                             (assoc f :attribution :mine
+                                    :implicated (vec (sort (distinct (concat own hits)))))
+                             traced (if-let [s (when store (static-hits store (:test f) edited))]
+                                      (assoc f :attribution :mine :implicated (vec (sort s)) :via :static)
+                                      (assoc f :attribution :foreign))
+                             :else  (assoc f :attribution :untraced))))
+                       fs)))))))
+
+(defn forget-trace!
+  "Drop `qsym` from the session's trace map: its entry when it was a test, and
+  every appearance in a test's set when it was a form. A deleted test that
+  stayed in the map was named by mutation findings and by impact selection
+  long after it was gone."
+  [session qsym]
+  (swap! session update :test-map
+         (fn [tm] (when tm
+                    (into {} (map (fn [[t fs]] [t (disj (set fs) qsym)]))
+                          (dissoc tm qsym))))))
+
+(defn image-rt!
+  "The slopp.kernel.rt source an image bootstraps with, or nil for none: the
+  store's own rendering when it holds the kernel ([[rt-fallback]]), else the
+  rendering held by the store at `host-dir`, the one the launching process
+  booted from.
+
+  The second half is what lets the dev instance serve any project but
+  slopp. It boots from slopp's store with no rt.clj on its classpath, and an
+  ordinary project's store holds no kernel, so every image it launched for
+  another project died bootstrapping. The host store's runtime is the one the
+  host is running, so it is the right one to hand down. It is rendered once
+  per directory and kept: the host runs a snapshot and does not reload it."
+  [store host-dir]
+  (or (rt-fallback store)
+      (when host-dir
+        (cache/cached-latest
+         :host-rt [host-dir] [host-dir]
+         (fn []
+           (try
+             (let [conn (db/open! host-dir)]
+               (try (rt-fallback (db/load-store conn (db/trunk-line-id! conn)))
+                    (finally (.close ^java.lang.AutoCloseable conn))))
+             (catch Exception _ nil)))))))
+
+(defn- host-dir
+  "The store directory this process booted from, or nil for a process that
+  did not boot from a store (a jar launch carries rt.clj on its classpath).
+  Reached through the late-ref carrier, and any failure reads as absence."
+  []
+  (:dir (try ((store/late-ref 'slopp.kernel.boot/current-boot-info))
+             (catch Throwable _ nil))))
+
+(defn start-spare!
+  "Kick off a background-warming spare image (D5 warm spare) if enabled.
+
+  Launched with no DEPS — the manifest can change between warming and adoption,
+  so `image-with-deps!` reconciles it there — but IN the session's framework
+  dir, because that half cannot be reconciled later: a JVM cannot pick up a
+  relative classpath directory after launch. The dir is resolved here, on the
+  calling thread, rather than inside the future: it writes to the session.
+  The bootstrap runtime is chosen as [[start-image!]] chooses it, so a spare
+  launched by the dev instance does not die where an ordinary image lives."
+  [session]
+  (when (:warm-spare? @session)
+    (let [dir (framework-dir! session (:store @session))
+          rt  (image-rt! (:store @session) (host-dir))]
+      (swap! session assoc :spare
+             (future (repl/start! (cond-> {}
+                                    dir (assoc :slopp.image.repl/dir dir)
+                                    rt  (assoc :slopp.image.repl/rt-fallback rt))))))))
+
 (defn ^:export start-image!
   "THE door: every owned image is launched here, for `store`.
 
@@ -1682,7 +1803,7 @@
   bug repeating."
   [session store]
   (let [dir (framework-dir! session store)
-        rt  (rt-fallback store)]
+        rt  (image-rt! store (host-dir))]
     (repl/start! (cond-> {:slopp.image.repl/deps (image-deps store)}
                    dir (assoc :slopp.image.repl/dir dir)
                    ;; a launching process with no rt.clj on its classpath — the
@@ -1899,80 +2020,6 @@
 
       :else (assoc r1 :diagnosis :genuine))))
 
-(defn- static-hits
-  "The `edited` forms test `t` reaches within three hops of the store's
-  reference graph — calls AND value reads, which is the difference that
-  matters: the tracer sees calls, so a test that reads a def has no trace
-  edge to it."
-  [store t edited]
-  (let [g     (group-by (juxt :from-ns :from-var) (refs/refs store))
-        start [(symbol (namespace t)) (symbol (name t))]
-        reach (loop [seen #{} frontier #{start} hop 0]
-                (if (or (empty? frontier) (> hop 3))
-                  (into seen frontier)
-                  (recur (into seen frontier)
-                         (into #{} (comp (mapcat #(get g %))
-                                         (keep (fn [r] (when (and (:to-ns r) (:to-name r))
-                                                         [(:to-ns r) (:to-name r)])))
-                                         (remove seen))
-                               frontier)
-                         (inc hop))))]
-    (seq (filter (fn [q] (reach [(symbol (namespace q)) (symbol (name q))])) edited))))
-
-(defn implicate
-  "Rock 2: annotate each failure with the just-changed forms that failing
-  test actually exercises (trace map ∩ edited) — the correlation agents
-  otherwise re-derive from raw expected/actual on every red.
-
-  Each failure also carries `:attribution`, because that intersection has
-  THREE outcomes and reporting only the hits collapsed the last two:
-
-  - `:mine`     the test exercises a form this episode changed, or IS one
-                — `:implicated` names which
-  - `:foreign`  the test IS traced and its trace is disjoint from this
-                episode's edits — somebody else's red
-  - `:untraced` no trace for this test, so nothing was intersected and
-                neither answer is available
-
-  `:foreign` and `:untraced` both used to arrive as a missing `:implicated`
-  key, leaving 'assume it is mine' as the only safe reading — which is how
-  one agent's red comes to freeze every other agent's thread. Only
-  `:foreign` is evidence of innocence. `:untraced` is the ABSENCE of
-  evidence and must never be read as the presence of it, which is why an
-  empty trace counts as untraced rather than as a disjoint one.
-
-  The test's OWN name is checked against `edited` before its trace is,
-  because the trace maps a test to the source forms it exercises and so can
-  never name the test itself. Writing a failing test against code you did
-  not touch is the ordinary red-first move, and reading its trace alone
-  called it somebody else's.
-
-  Given the `store`, a traced test whose trace misses the edit is checked
-  once more against the static reference graph before it is called
-  `:foreign` (`:via :static` on the result): a test that READS an edited def
-  has no trace edge to it, and a foreign attribution lets a red land
-  unexamined."
-  ([summary tmap edited] (implicate summary tmap edited nil))
-  ([summary tmap edited store]
-   (if-not (and (seq (:failures summary)) (seq edited))
-     summary
-     (let [edited (set edited)]
-       (update summary :failures
-               (fn [fs]
-                 (mapv (fn [f]
-                         (let [own    (when (contains? edited (:test f)) [(:test f)])
-                               traced (seq (get tmap (:test f)))
-                               hits   (some->> traced set (set/intersection edited) seq)]
-                           (cond
-                             (or own hits)
-                             (assoc f :attribution :mine
-                                    :implicated (vec (sort (distinct (concat own hits)))))
-                             traced (if-let [s (when store (static-hits store (:test f) edited))]
-                                      (assoc f :attribution :mine :implicated (vec (sort s)) :via :static)
-                                      (assoc f :attribution :foreign))
-                             :else  (assoc f :attribution :untraced))))
-                       fs)))))))
-
 (defn run-verification!
   "Diagnosed run of `affected` tests (grouped by their namespace), or of all of
   `default-ns`'s tests when there's no trace information — and of `default-ns`
@@ -2039,17 +2086,6 @@
              ;; noise about an implementation detail
              boundary? (dissoc :external-pending))]
     (assoc r :ms (- (System/currentTimeMillis) t0))))
-
-(defn forget-trace!
-  "Drop `qsym` from the session's trace map: its entry when it was a test, and
-  every appearance in a test's set when it was a form. A deleted test that
-  stayed in the map was named by mutation findings and by impact selection
-  long after it was gone."
-  [session qsym]
-  (swap! session update :test-map
-         (fn [tm] (when tm
-                    (into {} (map (fn [[t fs]] [t (disj (set fs) qsym)]))
-                          (dissoc tm qsym))))))
 
 (defn ^{:export "slopp-server"} refresh-cache!
   "Advance the cached store from the journal (the record of truth in a

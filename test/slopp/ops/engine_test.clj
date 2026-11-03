@@ -17,7 +17,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.ops :as ops]
             [slopp.edit :as edit]
-            [slopp.store :as store] [slopp.ops.engine :as engine] [slopp.ops.external :as external] [rewrite-clj.parser :as p] [slopp.store.render :as store.render] [slopp.store.db :as db] [rewrite-clj.node :as n] [next.jdbc :as jdbc] [clojure.string :as str]))
+            [slopp.store :as store] [slopp.ops.engine :as engine] [slopp.ops.external :as external] [rewrite-clj.parser :as p] [slopp.store.render :as store.render] [slopp.store.db :as db] [rewrite-clj.node :as n] [next.jdbc :as jdbc] [clojure.string :as str] [clojure.java.shell :as sh]))
 
 (deftest ^:external heal-path-replays-candidate-namespaces
   ;; the extract_ns live failure: hot-load-all!'s heal boots a FRESH image
@@ -871,3 +871,25 @@
            (select-keys (first (:failures (engine/implicate sum tm #{'at.core/tools} st))) [:attribution :implicated])))
     (is (= :foreign (:attribution (first (:failures (engine/implicate sum tm #{'at.core/other-thing} st)))))
         "a test that reaches nothing edited is still somebody else's")))
+
+(deftest ^:external an-ordinary-projects-image-gets-the-hosts-runtime
+  ;; The dev instance boots from slopp's own store, so it has no rt.clj on its
+  ;; classpath. An ordinary project's store holds no kernel either, so every
+  ;; image the dev instance launched for ANY other project died bootstrapping.
+  ;; The host's own store holds the runtime the host is running: hand that down.
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-hostrt-" (System/nanoTime))
+        host (store/ingest (store/empty-store) 'slopp.kernel.rt
+                           "(ns slopp.kernel.rt)\n\n(defn self-instrument! [] :from-host)\n")
+        conn (db/open! dir)]
+    (try
+      (is (true? (db/append! conn host (store/deltas host) ['slopp.kernel.rt] (db/trunk-line-id! conn) nil)))
+      (let [mine    (store/ingest (store/empty-store) 'slopp.kernel.rt
+                                  "(ns slopp.kernel.rt)\n\n(defn self-instrument! [] :from-store)\n")
+            without (store/ingest (store/empty-store) 'demo.core "(ns demo.core)\n")]
+        (is (str/includes? (str (engine/image-rt! without dir)) ":from-host")
+            "an ordinary project gets the host store's runtime")
+        (is (str/includes? (str (engine/image-rt! mine dir)) ":from-store")
+            "a store that holds its own kernel keeps its own")
+        (is (nil? (engine/image-rt! without nil))
+            "a host that did not boot from a store has rt.clj on its classpath: nothing to hand down"))
+      (finally (.close conn) (sh/sh "rm" "-rf" dir)))))

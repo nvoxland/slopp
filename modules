@@ -40,7 +40,7 @@ slopp.merge: slopp.store (test)
 slopp.modules: slopp.edit (test) slopp.ops (test) slopp.project (test) slopp.read (test) slopp.rules (test) slopp.store (test)
 slopp.multiproc: slopp.ops (test) slopp.read (test) slopp.store (test)
 slopp.observe: slopp.ops (test)
-slopp.ops: slopp.build slopp.edit slopp.image slopp.index slopp.kernel slopp.project slopp.read slopp.rules slopp.store slopp.webdev (test)
+slopp.ops: slopp.build slopp.cache slopp.edit slopp.image slopp.index slopp.kernel slopp.project slopp.read slopp.rules slopp.store slopp.webdev (test)
 slopp.orientation: slopp.edit (test) slopp.ops (test) slopp.read (test)
 slopp.phase4: slopp.ops (test) slopp.read (test)
 slopp.project: slopp.index slopp.store
