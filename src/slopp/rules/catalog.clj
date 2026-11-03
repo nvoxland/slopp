@@ -292,7 +292,19 @@
     :teach "a relocation this episode made left a call that breaks a module rule — usually a rename taking a namespace from two segments to three, which makes it package-private while its callers stay outside. The namespace that MOVED is not the one reported: the caller is, and the caller never moved. Module rules are inherited from the NAME and enforced at write time, and ns_rename rewrites its own callers, so nothing re-checks them — the operation most likely to drift the architecture is the one the architecture's check cannot see"}
    {:rule :tracked-file-drift :grain :done
     :escape "file_put the working-tree copy if a human edited it, or project/pull if the store's copy is the newer — reconcile deliberately, in one direction"
-    :teach "a tracked manifest file differs from the real file the human branch carries at the same path — the one fact this system keeps two copies of, and nothing compared them until build.clj drifted far enough to reintroduce a fixed jar-corruption bug downstream"}])
+    :teach "a tracked manifest file differs from the real file the human branch carries at the same path — the one fact this system keeps two copies of, and nothing compared them until build.clj drifted far enough to reintroduce a fixed jar-corruption bug downstream"}
+   {:rule :facet-declaration :grain :form
+    :escape "none but the dial: fix the declaration — name a check that exists as #'var with a :doc, list only declared fields in a view, and give each key one owner (nest the owning facet as a field)"
+    :teach "a facet is the contract its values are checked against; a declaration that names a missing check fails at runtime, a view naming an undeclared field shows nothing, and a key with two owners puts its rules in two places"}
+   {:rule :facet-by-var :grain :form
+    :escape "pass the facet by var, (facet/parse #'Order value); test namespaces are exempt"
+    :teach "parse, project and parsed? given a computed or edited copy of a declaration would let a value through without the checks the facet declares"}
+   {:rule :facet-integrity :grain :done
+    :escape "none but the dial: keep one owner per key (nest the other facet as a field), keep a check pure, or declare :sources on a check that reads the world"
+    :teach "two threads can each land a facet owning the same key, each passing its own write gate; and a check that touches the world would make parse an effect"}
+   {:rule :facet-fields :grain :done
+    :escape "none but the dial: write each field as a malli schema, or as {:schema s :optional true :secret true}"
+    :teach "parse validates against the schema a facet's fields describe; a field malli cannot build throws at the port instead of answering the sender"}])
 
 (defn ^:export rule-rows
   "The rule catalog with each rule's DECLARED default `:severity` merged in from

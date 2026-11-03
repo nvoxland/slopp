@@ -100,3 +100,7 @@
       (is (not (facet/parsed? #'Order p))
           "a check's body changed, so what the seal vouched for no longer holds"))
     (is (facet/parsed? #'Order p) "the same check again: the seal fits again")))
+
+(deftest fields-schema-is-the-closed-map-the-fields-describe
+  (is (= [:map {:closed true} [:line/sku :string] [:line/price [:int {:min 0}]]]
+         (facet/fields-schema #'Line))))

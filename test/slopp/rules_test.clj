@@ -1507,3 +1507,30 @@
          (:new (rules/red-first-rate [{:op :add :ns 'a-test :sources {"t" "(deftest t (is true))"}}
                                       {:op :verify :result {:failures [{:test 'a-test/other}]}}
                                       {:op :done}])))))
+
+(deftest every-facet-still-holds-at-done
+  (let [st (fn [body] (store/ingest (store/empty-store) 'rf.core (str "(ns rf.core)\n" body)))]
+    (testing "two owners of one key, as two threads landing one each would leave"
+      (is (some #(re-find #"ONE owner" (:teach %))
+                (rules/facet-integrity-check
+                 nil (st (str "(def ^{:facet \"a\"} A {:facet/fields {:x/a :int}})\n"
+                              "(def ^{:facet \"b\"} B {:facet/fields {:x/a :int}})\n")) nil))))
+    (testing "a check that touches the world is not a pure check"
+      (is (some #(re-find #":sources" (:teach %))
+                (rules/facet-integrity-check
+                 nil (st (str "(defn ok? [o] (slurp \"f\") true)\n"
+                              "(def ^{:facet \"a\"} A {:facet/fields {:x/a :int}"
+                              " :facet/checks {:ok {:doc \"d\" :fn #'ok?}}})\n")) nil))))
+    (is (empty? (rules/facet-integrity-check
+                 nil (st (str "(defn ok? [o] true)\n"
+                              "(def ^{:facet \"a\"} A {:facet/fields {:x/a :int}"
+                              " :facet/checks {:ok {:doc \"d\" :fn #'ok?}}})\n")) nil))
+        "a sound facet with a pure check is clean")))
+
+(deftest a-check-that-declares-sources-may-read-the-world
+  (is (empty? (rules/facet-integrity-check
+               nil (store/ingest (store/empty-store) 'rf.core
+                                 (str "(ns rf.core)\n(defn ok? [o] (slurp \"f\") true)\n"
+                                      "(def ^{:facet \"a\"} A {:facet/fields {:x/a :int}"
+                                      " :facet/checks {:ok {:doc \"d\" :fn #'ok? :sources [:db/x]}}})\n"))
+               nil))))

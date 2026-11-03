@@ -25,7 +25,7 @@
             [slopp.edit.tiers :as tiers]
             [slopp.edit.http :as edit.http]
             [slopp.store :as store]
-            [slopp.store.render :as store.render] [slopp.project.capabilities :as capabilities] [slopp.edit.cli :as edit.cli] [slopp.edit.rest :as edit.rest] [slopp.edit.webapp :as edit.webapp] [slopp.edit.security :as security]))
+            [slopp.store.render :as store.render] [slopp.project.capabilities :as capabilities] [slopp.edit.cli :as edit.cli] [slopp.edit.rest :as edit.rest] [slopp.edit.webapp :as edit.webapp] [slopp.edit.security :as security] [slopp.edit.facet :as edit.facet]))
 
 (defn ^:export rule-severity
   "The effective severity of rule `rule-key` for this store: a per-store OVERRIDE
@@ -63,7 +63,8 @@
    #'edit.http/http-auth-refusal #'edit.http/http-content-shape #'edit.http/http-unreachable-declaration #'edit.rest/rest-path-partition #'edit.rest/rest-endpoint-schema #'edit.http/http-path-pattern #'edit.http/http-route-collision #'edit.webapp/webapp-page-address #'edit.webapp/webapp-client-routes-retired #'edit.webapp/webapp-page-unreachable #'edit.webapp/webapp-portable-handler #'edit.http/http-undeclared-effect #'edit.http/http-undeclared-context
    #'edit.http/http-unsafe-get #'edit.http/http-unknown-group #'edit.http/http-react-attrs
    #'edit.cli/cli-args-schema #'edit.cli/cli-command-collision #'edit.cli/cli-direct-stdio
-   #'security/process-launch #'security/java-deserialization])
+   #'security/process-launch #'security/java-deserialization
+   #'edit.facet/facet-declaration #'edit.facet/facet-by-var])
 
 (defn ^:export rule-applies-to-platform?
   "Whether a rule scoped to `rule-scope` (:everywhere / :clojure / :clojurescript)

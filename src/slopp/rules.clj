@@ -21,7 +21,7 @@
   (:require [slopp.store :as store]
             [slopp.rules.schema :as schema]
             [slopp.rules.keywords :as keywords]
-            [slopp.rules.breakage :as breakage] [slopp.edit.modules :as edit.modules] [rewrite-clj.node :as n] [clojure.string :as str] [slopp.rules.http :as rules.http] [slopp.rules.catalog :as catalog] [slopp.index.refs :as refs] [slopp.rules.shape :as shape] [rewrite-clj.parser :as p] [slopp.rules.markers :as markers] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.rest :as rules.rest] [slopp.project.capabilities :as capabilities] [slopp.rules.webapp :as rules.webapp] [slopp.index.crossings :as crossings] [slopp.store.db :as db] [slopp.rules.mutate :as mutate]))
+            [slopp.rules.breakage :as breakage] [slopp.edit.modules :as edit.modules] [rewrite-clj.node :as n] [clojure.string :as str] [slopp.rules.http :as rules.http] [slopp.rules.catalog :as catalog] [slopp.index.refs :as refs] [slopp.rules.shape :as shape] [rewrite-clj.parser :as p] [slopp.rules.markers :as markers] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.rest :as rules.rest] [slopp.project.capabilities :as capabilities] [slopp.rules.webapp :as rules.webapp] [slopp.index.crossings :as crossings] [slopp.store.db :as db] [slopp.rules.mutate :as mutate] [slopp.image.repl :as repl] [slopp.edit.facet :as edit.facet]))
 
 (defn- changed-qsyms
   "The qualified symbols of the CHANGED forms this episode."
@@ -1058,6 +1058,84 @@
         (when db (mutate/record! db rs))
         (mutate/findings (remove #(= :untested (:status %)) rs))))))
 
+(defn ^:export red-first-rate
+  "How often the tests written were watched FAIL before the episode that wrote
+  them closed, over `deltas` (a journal, oldest first). Two lines, because they
+  are different habits: `:changed` is deftests that GAINED assertions (the
+  shape [[assertions-never-red-check]] flags one at a time), `:new` is
+  deftests added. A test is watched when a `:verify` or `:observe` delta names
+  it failing after the write and before the next `:done`. Each line is `{:n
+  :watched :rate}`, the rate nil when nothing was written.
+
+  A replace whose earlier source the journal does not carry (history before
+  a compaction) is skipped rather than guessed at: with no old version there
+  is no way to say whether assertions were added."
+  [deltas]
+  (let [ds     (vec deltas)
+        sx     (fn [s] (try (n/sexpr (p/parse-string s)) (catch Exception _ nil)))
+        red-in? (fn [i q]
+                  (boolean
+                   (some (fn [d] (and (contains? #{:verify :observe} (:op d))
+                                      (some #(= q (str (:test %))) (get-in d [:result :failures]))))
+                         (take-while #(not= :done (:op %)) (subvec ds (inc i))))))
+        rows   (loop [i 0 seen {} acc []]
+                 (if (= i (count ds))
+                   acc
+                   (let [d    (ds i)
+                         srcs (when (contains? #{:add :replace :ingest} (:op d)) (:sources d))
+                         new  (for [[fid src] srcs
+                                    :when (and (contains? #{:add :replace} (:op d))
+                                               (str/starts-with? src "(deftest"))
+                                    :let [nw   (sx src)
+                                          old  (some-> (get seen fid) sx)
+                                          kind (cond (= :add (:op d)) :new old :changed)]
+                                    :when (and nw kind
+                                               (or (= kind :new) (pos? (shape/assertions-added old nw))))]
+                                {:kind kind :red (red-in? i (str (:ns d) "/" (second nw)))})]
+                     (recur (inc i) (merge seen srcs) (into acc new)))))
+        tally  (fn [k]
+                 (let [rs (filter #(= k (:kind %)) rows)
+                       w  (count (filter :red rs))]
+                   {:n (count rs) :watched w
+                    :rate (when (seq rs) (/ (Math/round (* 1000.0 (/ w (count rs)))) 1000.0))}))]
+    {:changed (tally :changed) :new (tally :new)}))
+
+(defn facet-integrity-check
+  "Done-advisory: every facet in the store still holds — the write gate
+  `facet-declaration` re-run over all of them, plus purity of each check that
+  declares no `:sources`. The gate sees one form on one thread; two threads
+  can each land an owner for the same key, and only the store after both
+  shows it. A check runs inside `parse`, where touching the world would make
+  parsing an effect."
+  [_session st* _changed]
+  (let [fs (edit.facet/facets st*)]
+    (vec (concat
+          (for [[[ns-sym nm] _] fs
+                :let [t (edit.facet/facet-declaration st* ns-sym nm)]
+                :when t]
+            {:form (symbol (str ns-sym) (str nm)) :teach t})
+          (for [[[ns-sym nm] decl] fs
+                [k q] (edit.facet/pure-checks st* ns-sym decl)
+                :when (and (store/form-named st* (symbol (namespace q)) (symbol (name q)))
+                           (not (schema/analyzer-pure? st* q)))]
+            {:form  (symbol (str ns-sym) (str nm))
+             :teach (str "check " k " calls " q ", which is not pure; a check runs inside"
+                         " parse. Make it pure, or declare the world it reads with :sources"
+                         " so the port runs it with those sources.")})))))
+
+(defn facet-fields-check!
+  "Done-advisory, in the image: malli accepts every facet's fields as a schema.
+  `parse` validates against that schema at the port, and a field malli cannot
+  build would throw there instead of answering the sender."
+  [session st* _changed]
+  (let [qs (mapv (fn [[[ns-sym nm] _]] (symbol (str ns-sym) (str nm))) (edit.facet/facets st*))]
+    (when (and session (seq qs))
+      (let [code (str "(vec (keep (fn [q] (try (malli.core/schema (slopp.facet/fields-schema (find-var q))) nil"
+                      " (catch Exception e {:form q :teach (str \"its :facet/fields are not a schema malli accepts: \" (ex-message e))}))))"
+                      " '" (pr-str qs) "))")
+            r    (first (repl/eval! (:image @session) code))]
+        (if (vector? r) r [])))))
+
 (def done-advisories
   "The done-time advisory registry (D9 rule-registry — the done-grain sibling of
    `edit.modules/per-form-write-gates`): an ordered list of {:key :severity
@@ -1433,6 +1511,18 @@
     :fires-on (str "(ns du.api)\n"
                    "(defn ^{:http/method :get :http/path \"/t\" :http/auth :public"
                    " :rest/response [:map [:total :int]]} t \"T.\" [r] r)\n")}
+   ;; a facet's write gate sees one form on one thread, so two threads can each
+   ;; land an owner for the same key; only the store after both shows it
+   {:key :facet-integrity :severity :error :applies-to :both
+    :check #'facet-integrity-check
+    :sweep true
+    :fires-on (str "(ns rf.core)\n"
+                   "(def ^{:facet \"a\"} A {:facet/fields {:x/a :int}})\n"
+                   "(def ^{:facet \"b\"} B {:facet/fields {:x/a :int}})\n")}
+   {:key :facet-fields :severity :error :applies-to :both
+    :check #'facet-fields-check!
+    :sweep true
+    :selftest-note "runs in the image, where malli and the facet vars live, and the fixture harness passes no session; a field malli cannot build also fails every parse of that facet in its own tests"}
    ])
 
 (defn run-done-advisories!
@@ -1659,45 +1749,3 @@
     (assoc plan
            :forms    (count ids)
            :findings (run-checks session st* ids run))))
-
-(defn ^:export red-first-rate
-  "How often the tests written were watched FAIL before the episode that wrote
-  them closed, over `deltas` (a journal, oldest first). Two lines, because they
-  are different habits: `:changed` is deftests that GAINED assertions (the
-  shape [[assertions-never-red-check]] flags one at a time), `:new` is
-  deftests added. A test is watched when a `:verify` or `:observe` delta names
-  it failing after the write and before the next `:done`. Each line is `{:n
-  :watched :rate}`, the rate nil when nothing was written.
-
-  A replace whose earlier source the journal does not carry (history before
-  a compaction) is skipped rather than guessed at: with no old version there
-  is no way to say whether assertions were added."
-  [deltas]
-  (let [ds     (vec deltas)
-        sx     (fn [s] (try (n/sexpr (p/parse-string s)) (catch Exception _ nil)))
-        red-in? (fn [i q]
-                  (boolean
-                   (some (fn [d] (and (contains? #{:verify :observe} (:op d))
-                                      (some #(= q (str (:test %))) (get-in d [:result :failures]))))
-                         (take-while #(not= :done (:op %)) (subvec ds (inc i))))))
-        rows   (loop [i 0 seen {} acc []]
-                 (if (= i (count ds))
-                   acc
-                   (let [d    (ds i)
-                         srcs (when (contains? #{:add :replace :ingest} (:op d)) (:sources d))
-                         new  (for [[fid src] srcs
-                                    :when (and (contains? #{:add :replace} (:op d))
-                                               (str/starts-with? src "(deftest"))
-                                    :let [nw   (sx src)
-                                          old  (some-> (get seen fid) sx)
-                                          kind (cond (= :add (:op d)) :new old :changed)]
-                                    :when (and nw kind
-                                               (or (= kind :new) (pos? (shape/assertions-added old nw))))]
-                                {:kind kind :red (red-in? i (str (:ns d) "/" (second nw)))})]
-                     (recur (inc i) (merge seen srcs) (into acc new)))))
-        tally  (fn [k]
-                 (let [rs (filter #(= k (:kind %)) rows)
-                       w  (count (filter :red rs))]
-                   {:n (count rs) :watched w
-                    :rate (when (seq rs) (/ (Math/round (* 1000.0 (/ w (count rs)))) 1000.0))}))]
-    {:changed (tally :changed) :new (tally :new)}))

@@ -204,3 +204,9 @@
       (if (:facet/failed r)
         (update r :facet/failed #(into {} (map (fn [[k f]] [k (select-keys f [:doc])])) %))
         (select-keys r fields)))))
+
+(defn fields-schema
+  "The closed malli schema the facet's fields describe: what `parse` validates
+  against, what a port's request contract is, what a generator builds from."
+  [facet-var]
+  (schema-of (declaration facet-var)))
