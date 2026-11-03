@@ -263,3 +263,20 @@
                                  :prompt "rename f and land its caller together")]
           (is (nil? (:error r)) (pr-str r))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-deleted-test-leaves-the-trace-map
+  ;; ji2: mutation findings named a test deleted earlier in the session,
+  ;; because the trace map kept its entry
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'tr.core "(ns tr.core)\n\n(defn f \"F.\" [x] x)\n")
+      (ops/ingest! sess 'tr.core-test
+                   (str "(ns tr.core-test (:require [clojure.test :refer [deftest is]] [tr.core :as c]))\n\n"
+                        "(deftest keeps (is (= 1 (c/f 1))))\n\n(deftest goes (is (= 2 (c/f 2))))\n"))
+      (ops/test-run! sess 'tr.core-test)
+      (is (contains? (:test-map @sess) 'tr.core-test/goes) "traced first")
+      (ops/delete-form! sess 'tr.core-test 'goes :prompt "drop a redundant test")
+      (is (not (contains? (:test-map @sess) 'tr.core-test/goes)) "the single-form delete forgets it")
+      (ops/edit-group-once! sess [{:action :delete :ns 'tr.core-test :name 'keeps}] :prompt "drop the other")
+      (is (not (contains? (:test-map @sess) 'tr.core-test/keeps)) "and so does a group delete")
+      (finally (ops/close! sess)))))

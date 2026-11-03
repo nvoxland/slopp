@@ -21,7 +21,7 @@
   (:require [slopp.store :as store]
             [slopp.read.query :as query]
             [slopp.read.history :as history] [slopp.edit.modules :as edit.modules] [slopp.index.refs :as refs] [slopp.read.orient :as orient] [rewrite-clj.node :as n] [clojure.string :as str]
-            [slopp.read.modules :as read.modules] [slopp.edit.tiers :as tiers] [slopp.store.render :as store.render] [slopp.read.graph :as graph]))
+            [slopp.read.modules :as read.modules] [slopp.edit.tiers :as tiers] [slopp.store.render :as store.render] [slopp.read.graph :as graph] [slopp.store.db :as db]))
 
 (defn- json-card
   "A `form-card` as JSON-shaped data. Two fields cannot survive the trip:
@@ -1180,6 +1180,14 @@ gaps    (gaps-by-ns st (:test-map @session))
                          (when (seq s) (assoc s :test (:test row))))))
                (get-in view [:tests :shown]))))
 
+(defn ^:export form-reds
+  "The tests that have gone red against form `form-id`, as `[{:test \"ns/name\" :n times-red}]`, most often first, from the durable red index. `conn` is the session's db; callers pass it only when they have one, because no db is not 'never red' and the key must be ABSENT then, never empty."
+  [conn form-id]
+  (->> (db/reds-for conn [form-id])
+       (mapv (fn [{:keys [test n]}] {:test (str test) :n n}))
+       (sort-by (juxt (comp - :n) :test))
+       vec))
+
 (defn ^:export form-view
   "One form's page model, addressed by form ID — ids are stable across
   edits and names are not, so the id is the permalink.
@@ -1258,7 +1266,8 @@ gaps    (gaps-by-ns st (:test-map @session))
                                           :calls (count (keep :arity us))}
                                          (dissoc (json-card (orient/form-card session tns tnm))
                                                  :form)))))
-             graph   (neighbourhood session form-id depth)]
+             graph   (neighbourhood session form-id depth)
+             reds    (some-> (:db @session) (form-reds form-id))]
          (cond-> (merge {:form-id form-id
                          :form    (str qsym)
                          :name    (str nm)
@@ -1300,4 +1309,5 @@ gaps    (gaps-by-ns st (:test-map @session))
                                        " binding or built at runtime is not here")}
                         (dissoc (json-card (orient/form-card session ns-sym nm)) :form))
            graph (assoc :graph graph)
+           reds  (assoc :reds reds)
            true  (with-test-specs st)))))))

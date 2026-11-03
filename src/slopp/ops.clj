@@ -477,6 +477,7 @@
        r
        (let [affected (engine/affected-tests session ns-sym nm)]
          (repl/eval! (:image @session) (format "(ns-unmap '%s '%s)" ns-sym nm))
+         (engine/forget-trace! session (symbol (str ns-sym) (str nm)))
          (when unregister (repl/eval! (:image @session) unregister))
          (let [summary (engine/run-verification! session ns-sym affected
                                                   :edited #{(symbol (str ns-sym) (str nm))})]
@@ -4529,7 +4530,8 @@
                     _        (doseq [[kind a b c] hots]
                                (cond
                                  (= :unmap kind)
-                                 (repl/eval! image (format "(ns-unmap '%s '%s)" a b))
+                                 (do (repl/eval! image (format "(ns-unmap '%s '%s)" a b))
+                                     (engine/forget-trace! session (symbol (str a) (str b))))
                                  (= :load-unmap kind)
                                  (repl/eval! image (format "(ns-unmap '%s '%s)" b c))))
                     ;; a replaced/deleted defmethod's old dispatch — after

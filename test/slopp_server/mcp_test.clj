@@ -17,7 +17,7 @@
             [clojure.edn :as edn]
             [cheshire.core :as json]
             [slopp.ops :as ops]
-            [slopp-server.mcp :as mcp] [clojure.java.io :as io] [slopp.store :as store] [slopp.store.db :as db] [clojure.java.shell :as sh] [slopp.sync :as sync] [clojure.string :as str] [slopp-server.mcp.tools :as tools] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [rewrite-clj.node :as n] [slopp-server.mcp.smells :as smells] [slopp-server.api.server :as server] [slopp.read.history :as history] [slopp.ops.branch :as branch] [slopp.rules.webapp :as rules.webapp] [slopp.read.telemetry :as telemetry] [slopp.edit :as edit] [slopp.http :as http] [slopp.rules.mutate :as mutate]))
+            [slopp-server.mcp :as mcp] [clojure.java.io :as io] [slopp.store :as store] [slopp.store.db :as db] [clojure.java.shell :as sh] [slopp.sync :as sync] [clojure.string :as str] [slopp-server.mcp.tools :as tools] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [rewrite-clj.node :as n] [slopp-server.mcp.smells :as smells] [slopp-server.api.server :as server] [slopp.read.history :as history] [slopp.ops.branch :as branch] [slopp.rules.webapp :as rules.webapp] [slopp.read.telemetry :as telemetry] [slopp.edit :as edit] [slopp.http :as http] [slopp.rules.mutate :as mutate] [next.jdbc :as jdbc]))
 
 (deftest ^:external protocol-handshake
   (let [sess (atom {})]
@@ -5178,3 +5178,16 @@
            (:unread-callees (#'mcp/terse-done (assoc base :unread-callees '{ur.core/c [ur.core/b]})))))
     (is (not (contains? (#'mcp/terse-done base) :unread-callees))
         "and stays one line when every callee was read")))
+
+(deftest ^:external a-form-history-result-carries-its-red-evidence
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'rh.core "(ns rh.core)\n(defn ^:unused-ok f [x] x)\n")
+      (let [fid (:id (store/form-named (:store @sess) 'rh.core 'f))]
+        (jdbc/execute! (:db @sess)
+                            ["INSERT INTO form_reds (form_id, test, n, last_delta) VALUES (?,?,2,'d1')"
+                             fid "rh.core-test/it-breaks"])
+        (let [r (call! sess "query_history" {:ns "rh.core" :name "f"})]
+          (is (re-find #":kind :form-history" r))
+          (is (re-find #"(?s):reds\s+\[\{:test\s+.{1,3}rh.core-test/it-breaks.{1,3}\s+:n\s+2" r) r)))
+      (finally (ops/close! sess)))))

@@ -702,6 +702,13 @@
                   [:test {:doc "the deftest, ns/name — matches a :tests :shown entry"} :string]
                   [:assertion {:doc "its first is form, on one line, at most 120 characters"} :string]
                   [:assertions {:doc "how many is/are forms the deftest holds"} :int]]]]
+   [:reds {:optional true
+           :doc (str "the tests that have gone red against this form, most often first,"
+                     " from the durable red index. ABSENT when the server holds no"
+                     " durable db: no db is not 'never red', and an empty list means"
+                     " the index was read and nothing was there")}
+    [:sequential [:map [:test {:doc "the deftest, ns/name"} :string]
+                  [:n {:doc "how many times it went red against this form"} :int]]]]
    [:note {:doc (str "the standing caveat on :callers and :callees, in words: the"
                      " edges come from a SYNTACTIC reader over the store, so they are"
                      " a FLOOR and not a census — a call reached through a binding or"

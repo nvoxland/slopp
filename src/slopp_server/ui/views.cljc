@@ -3542,6 +3542,13 @@
                    [:p [:code assertion]
                     (when assertions
                       [:small " " (plural assertions "assertion")])])])))
+      (when-let [reds (seq (:reds data))]
+        [:p [:small (str "went red against " (plural (count reds) "test") ": "
+                         (str/join ", " (map (fn [{:keys [test n]}]
+                                               (str (if-let [i (str/index-of test "/")] (subs test (inc i)) test)
+                                                    " (" n "x)"))
+                                             (take 5 reds)))
+                         (when (< 5 (count reds)) ", ..."))]])
       (let [more (- (or (:count tests) 0) (count (:shown tests)))]
         (when (pos? more)
           [:p [:small (str "and " more " more reach it")]]))]

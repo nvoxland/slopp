@@ -12,7 +12,7 @@
             [clojure.string :as str]
             [cheshire.core :as json]
             [slopp.ops :as ops]
-            [slopp.store.db :as db] [slopp.sync :as sync] [clojure.edn :as edn] [slopp-server.mcp.tools :as tools] [slopp-server.mcp.smells :as smells] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [slopp.webdev.cljs :as cljs] [slopp.rules :as rules] [slopp-server.api.server :as server] [slopp.rules.doctor :as doctor] [slopp.webdev.live :as live] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.screen :as webdev.screen] [slopp.ops.engine :as engine] [slopp.read.orient :as orient] [slopp.store :as store] [rewrite-clj.node :as n] [slopp.edit :as edit] [slopp.read.anticipate :as anticipate]))
+            [slopp.store.db :as db] [slopp.sync :as sync] [clojure.edn :as edn] [slopp-server.mcp.tools :as tools] [slopp-server.mcp.smells :as smells] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [slopp.webdev.cljs :as cljs] [slopp.rules :as rules] [slopp-server.api.server :as server] [slopp.rules.doctor :as doctor] [slopp.webdev.live :as live] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.screen :as webdev.screen] [slopp.ops.engine :as engine] [slopp.read.orient :as orient] [slopp.store :as store] [rewrite-clj.node :as n] [slopp.edit :as edit] [slopp.read.anticipate :as anticipate] [slopp-server.api.model :as model]))
 
 ^{:auto-declare "mutual recursion: call-op!, call-op-1!, call-tool!, handle!, http-call!"}
 (declare call-op! call-op-1! call-tool! handle! http-call!)
@@ -2815,10 +2815,14 @@
                                                    :kind :form-effort)
 
                                             nm
-                                            {:kind :form-history
-                                             :versions (history/query-form-history session (sym :ns) (sym :name)
-                                                                              :format (:format a)
-                                                                              :diff (:diff a))}
+                                            (let [fid (:id (store/form-named (:store @session) (sym :ns) (sym :name)))]
+                                              (cond-> {:kind :form-history
+                                                       :versions (history/query-form-history session (sym :ns) (sym :name)
+                                                                                        :format (:format a)
+                                                                                        :diff (:diff a))}
+                                                ;; red evidence only with a durable db: no db is not 'never red'
+                                                (and fid (:db @session))
+                                                (assoc :reds (model/form-reds (:db @session) fid))))
 
                                             (:at a)
                                             (assoc (history/query-status-at session :at (:at a))

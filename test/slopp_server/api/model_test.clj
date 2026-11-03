@@ -12,7 +12,7 @@
   exactly once, in the model, and this namespace is where that is enforced."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp-server.api.model :as model]
-            [slopp.store :as store]))
+            [slopp.store :as store] [slopp.store.db :as db] [next.jdbc :as jdbc]))
 
 (defn- json-shaped?
   "True when `x` would survive a JSON round trip UNCHANGED — structure and
@@ -1044,3 +1044,29 @@
         tl (model/timeline (atom {:store st}))]
     (is (= 1 (:unreviewed tl)))
     (is (json-shaped? tl) (pr-str tl))))
+
+(deftest form-view-carries-the-tests-that-went-red-against-it
+  ;; Red evidence is per FORM. With a durable db the page says which tests went
+  ;; red against it, most often first; with no db the key is ABSENT, because no
+  ;; db is not 'never red'.
+  (let [st   (-> (store/empty-store)
+                 (store/ingest 'demo.r.core "(ns demo.r.core)\n\n(defn hello [] 1)\n"))
+        fid  (:id (store/form-named st 'demo.r.core 'hello))
+        conn (db/open! (str (java.nio.file.Files/createTempDirectory
+                                         "slopp-reds" (make-array java.nio.file.attribute.FileAttribute 0))))]
+    (try
+      (jdbc/execute! conn ["INSERT INTO form_reds (form_id, test, n, last_delta) VALUES (?,?,1,'d1'), (?,?,3,'d2')"
+                                fid "demo.r.core-test/rare" fid "demo.r.core-test/often"])
+      (testing "with a db: sorted by n descending"
+        (let [v (model/form-view (atom {:store st :db conn}) fid)]
+          (is (= [{:test "demo.r.core-test/often" :n 3} {:test "demo.r.core-test/rare" :n 1}]
+                 (:reds v)))
+          (is (json-shaped? v))))
+      (testing "with a db and nothing red: present and empty"
+        (let [st2 (store/ingest st 'demo.r.other "(ns demo.r.other)\n\n(defn quiet [] 2)\n")
+              v   (model/form-view (atom {:store st2 :db conn}) (:id (store/form-named st2 'demo.r.other 'quiet)))]
+          (is (= [] (:reds v)))))
+      (testing "no db: the key is absent"
+        (let [v (model/form-view (atom {:store st}) fid)]
+          (is (not (contains? v :reds)))))
+      (finally (.close conn)))))

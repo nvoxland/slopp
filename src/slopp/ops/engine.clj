@@ -2040,6 +2040,17 @@
              boundary? (dissoc :external-pending))]
     (assoc r :ms (- (System/currentTimeMillis) t0))))
 
+(defn forget-trace!
+  "Drop `qsym` from the session's trace map: its entry when it was a test, and
+  every appearance in a test's set when it was a form. A deleted test that
+  stayed in the map was named by mutation findings and by impact selection
+  long after it was gone."
+  [session qsym]
+  (swap! session update :test-map
+         (fn [tm] (when tm
+                    (into {} (map (fn [[t fs]] [t (disj (set fs) qsym)]))
+                          (dissoc tm qsym))))))
+
 (defn ^{:export "slopp-server"} refresh-cache!
   "Advance the cached store from the journal (the record of truth in a
   durable session): INCREMENTALLY when every foreign delta in the suffix
