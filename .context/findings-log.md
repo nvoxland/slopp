@@ -3471,3 +3471,66 @@ a second slopp server, because 7357 is the dev instance. n=1 app.
     `:string`; `:rest/request #'Order` makes the client send server-computed
     fields (the style skill now says to declare a separate request facet); a
     nested facet's own checks do not run.
+
+## 2026-11-03 — intent/delta mismatch baseline over the journal (9xm.3)
+
+A baseline for `slopp.rules/intent-mismatch-check` over the journal as it
+stood before the rule existed. The result is small: the journal holds few
+asks, and almost none name a form the way the rule reads names.
+
+| Measure | Count |
+|---|---|
+| Journal span | 2026-09-16 to 2026-11-02 (167 history rows; older work is the seeded import, with no asks) |
+| Asks that changed content (`:by-ask` rows) | 50 |
+| Asks whose text names at least one resolvable `ns/name` form | 2 rows (one text, sent as two turns) |
+| Of those, asks with a named form NOT changed in the row | 1 row |
+| Asks where NONE of the named forms changed | 1 row (0 once the two turns are merged) |
+| Share of all 50 asks | 2 to 4% name a form; 0 to 2% mismatch |
+
+**Method.** `report {since "start"}` composes the asks whole under `:by-ask`,
+each with `:changed`, `:added` and `:deleted` forms. Its `query_detail`
+remainder gave all 50 rows (the result is capped to 50 rows and the cap was
+not raised by `limit`; the 50 reach back to the first journal row, so it is
+the whole journal and not a window). I applied the rule's regex
+`([a-zA-Z][\w.\-]*)/([\w\-!?*<>=+]+)` to each ask and kept a match only if
+`store/form-named` resolves it. That gave 6 distinct candidates; 1 resolves.
+A form counts as touched if it is in `:changed`, `:added` or `:deleted`.
+
+**Limits.**
+- The grain is the ask (one turn), not the episode (the span between
+  `done` points). The rule works per episode, so an ask that names a form
+  changed in an earlier turn of the same episode counts here as a mismatch
+  and would not in the rule.
+- `:by-ask` omits asks that changed nothing. Those are the pure "named it,
+  did nothing" cases, so the mismatch count is a floor.
+- The rule uses each delta's own `:prompt`; I used the turn's ask text.
+  Most writes in this journal carry a short intent, not the whole ask.
+- Names resolve against today's store, so a form deleted since would not
+  match. No named candidate looked like one.
+- n is too small for a rate. The sample of 10 asked for does not exist.
+
+**Sample.** All the ask rows that carry a `ns/name`-shaped token (10 rows):
+
+| Row | Token | Resolves | Read |
+|---|---|---|---|
+| 2026-11-02 15:03 "Fix the comment in slopp.image.repl-test/an-image-reads-with-read-eval-off Then design the parse edge…" | the test | yes | Changed it. No mismatch. |
+| 2026-11-02 15:04, same text, second turn | the test | yes | Mismatch by the row. CONTEXT/CARRIED: the form was fixed in the previous turn, the turn then did the "design the parse edge" half (facet forms). |
+| 09-24 01:10, 00:28, 00:16 "`slopp build [dir] … [--main ns/fn]`…" | `ns/fn` | no | Usage text, not a form. |
+| 09-24 00:25, 09-23 23:51 "…live/relay-output! forwards it…" | `live/relay-output!` | no | An alias; the rule skips aliases. Form is `slopp-server.dev` side, work was done. |
+| 09-23 23:08 "`slopp dev [dir]`… the app image live/start! boots" | `live/start!` | no | Alias, context. |
+| 09-18 01:19 "…slopp/kernel/rt.clj is on no classpath…" | `slopp/kernel` | no | A path. |
+| 09-18 00:44 "{:webapp/redirect "/path"}" | `webapp/redirect` | no | A keyword. |
+
+Classification: 0 of 10 are an unfinished-work mismatch. 1 is a carried
+turn (context), 8 are not forms at all, 1 is a hit that was changed.
+
+**What this says about the advisory.**
+- At this journal's rate the rule almost never fires (0 to 1 of 50 asks).
+  Noise is not the risk here; silence is. Humans in this store name work in
+  prose and by alias (`live/start!`), not by a full `ns/name`.
+- The one fire was a false alarm of the episode kind (a carried turn), and
+  the per-episode rule already covers that case. So the 28% vs 80% signal
+  cannot be tested on this journal; there is no true mismatch in it.
+- Do not tune the rule from this. If it should matter, widen what counts as
+  a name first (alias resolution, bare form names), then re-measure on
+  asks that did no work, which `:by-ask` does not list.

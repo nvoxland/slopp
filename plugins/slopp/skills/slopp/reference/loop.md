@@ -156,7 +156,8 @@ ends a turn's batch by definition — its verdict is what decides the next move.
    narrow one, and that is exactly when `full_check` stops being optional. If your session pauses
    first, the hook fires done for you and the findings greet the next
    session's brief.
-   **`:spread {:forms :namespaces :modules}` on a `done` counts the production forms the episode changed; at 3+ modules it adds a `:spread-note`, because agent success falls sharply on changes that wide — a report, never a gate, so split the unit or review it closely.**
+   **`:unread-callees {form [callee ...]}` on a `done` names, for each changed form, the store forms it calls whose source this session never read and did not write: the edit was made blind to them. Read them (`query_source`) before you trust the change, or know the tests cover them.
+`:spread {:forms :namespaces :modules}` on a `done` counts the production forms the episode changed; at 3+ modules it adds a `:spread-note`, because agent success falls sharply on changes that wide — a report, never a gate, so split the unit or review it closely.**
    **`:host-stale` means DOUBT THE VERDICT.** `done` and `full_check` carry
    it when the process that produced the result is knowingly running code the
    store has moved past — a hot-reload that failed, or a snapshot host
