@@ -40,7 +40,8 @@ ends a turn's batch by definition — its verdict is what decides the next move.
    About to edit a function? `query_slice {ns name}` (add `match`+`window` on giant forms — the neighborhood, not the whole thing) is THE read: full
    source of that one form + interface CARDS (sig, doc, why, test
    warranty) for everything it reaches. TRUST the cards — you don't need
-   a callee's body to call it; if an assumption is wrong, the write turns
+   a callee's body to call it. When the form's keys belong to a facet, the slice
+   also carries `:facets` cards (fields, checks, views). If an assumption is wrong, the write turns
    red with `:implicated` (the covering tests re-run on every edit).
    Writes are OPTIMISTIC: compose patch matches from the
    brief/slice; a missed or ambiguous match returns the form's CURRENT

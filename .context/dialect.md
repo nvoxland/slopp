@@ -446,6 +446,20 @@ result's `:advisories` (surfaced by `edit_replace_form`/`edit_add_form`). So a
 write gate is fully dial-able
 `:off`/`:advisory`/`:refuse`, same as the done grain's `:off`/`:advisory`/`:error`.
 
+## Facet gates (D-facets)
+
+A store with at least one `:facet` def gets extra gates. Write gates:
+`facet-declaration` (checks and claims are `#'var`s to forms that exist with a
+`:doc`; views name declared fields; one owner per key), `facet-by-var`
+(`parse`/`project`/`parsed?` take `#'Facet`), `facet-reveal` (`reveal` only in
+a `^{:reveals "why"}` form), and two advisories, `facet-key-ownership` and
+`facet-adapter-raw`. Done rules: `:facet-integrity`, `:facet-fields`,
+`:facet-weakening` (discharged by `^{:weakening-ok "why"}`),
+and the advisories `:undeclared-travel` and `:facet-key-ownership-sweep`.
+Known gap: the analyzer counts `println` and clock reads through interop as
+pure, so a check can pass `:facet-integrity` and still have an effect. Why and
+what is not protected: `decisions.md` § `D-facets`.
+
 ## Enforcement stance
 
 Honest **labeling**, not capability restriction: the agent may write any

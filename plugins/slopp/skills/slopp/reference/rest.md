@@ -149,6 +149,31 @@ Decoded **in place**: your handler reads `:path-params`, `:query-params` and
 `:body` where it always did and finds them typed. `?depth=banana` against a
 declared `[:depth :int]` is a 400 before your handler runs.
 
+### A facet as the contract: `:rest/request #'Order`
+
+A route may name a facet instead of a malli schema. The facet is declared once
+(see the `slopp-style` skill, section 3a). Name it BY VAR:
+
+```clojure
+^{:rest/path "/api/orders" :http/method :post
+  :rest/request  #'NewOrder
+  :rest/response #'Order :facet/view :public}
+```
+
+- `:rest/request #'F` decodes each carrier, then parses the merge with `F`. The
+  handler gets the parsed value under `:body`. A failed check is a 400 that
+  names the check's `:doc`.
+- `:rest/response #'F :facet/view :v` projects the body to view `:v` and
+  redacts secrets. A body the handler broke is a logged, generic 500.
+- The generated client takes the schema from the facet: every field for a
+  request, the view's fields for a response.
+- A bare symbol is wrong here: route metadata is evaluated, so `Order` hands
+  the port the declaration's value, which `parse` refuses. Write `#'Order`.
+- A route with no facet contract and no schema still echoes its raw body. Give
+  every route that takes a body a contract.
+- Not covered yet: a facet over a COLLECTION body (a list of orders), and a
+  required contract on GET routes.
+
 **`:rest/response` describes the DOCUMENT, not the bytes.** For an ordinary
 endpoint that is automatic — the boundary round-trips your handler's return
 through the wire before judging it. For one that serializes its OWN body

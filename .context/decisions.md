@@ -8182,6 +8182,17 @@ reads back unparsed); inline validation inside the region.
 - *Shipping*: `slopp.facet` vendors with the `"_"` family, which the jar
   reads from its own `framework-files.edn`; a new shipped namespace needs a
   rebuilt jar and a process restart before a built app carries it.
+- *Locality* (d177c2b0e03ce): `query_slice` carries `:facets` cards
+  (`edit.facet/facet-cards`) for the facets a form's keys name: purpose,
+  fields, each check's `:doc` (never its body), views. Production facets
+  only, plus a test namespace's own fixtures.
+- *Dogfood* (`projects/facets-shop`, findings-log 2026-11-02): projection
+  costs roughly 35 to 45 microseconds per call. It found three defects,
+  fixed at d06869fec7c10: `change` dropped advisory write-gate findings (the
+  group path asked the gates only for a refusal, so rule 1 never reached an
+  author); a store requiring only `slopp.facet` was vendored nothing; and an
+  oracle eval string that failed whole crashed done. The open items are in
+  the facets follow-ups backlog.
 
 ## D-behaviour-axis amended (2026-11-02) — trust before overview
 

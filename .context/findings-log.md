@@ -3407,3 +3407,67 @@ on 46 forms in 22 external namespaces with no `parse` anywhere, and the other
 two families are un-namespaced so it cannot fire on them at all. Refusing now
 would block ordinary edits to most of the HTTP layer; revisit once a facet
 owns the `:http/*` request keys and `parse` exists to satisfy it.
+
+## 2026-11-02 — facets dogfood (projects/facets-shop)
+
+An order app built through slopp: `Line` and `Order` facets, a `:pure`
+`place` fn with a `:=>` over the Order fields, a `POST /api/orders` route
+(`:rest/request #'Order`, `:rest/response #'Order :facet/view :public`) and a
+file adapter. 12 tests, 20 assertions, green, tests red first. Driven through
+a second slopp server, because 7357 is the dev instance. n=1 app.
+
+**Measured.**
+- Exit cost: 100 POSTs through `slopp.rest/call`, 3 runs after 200 warmups.
+  With the response projection: 10.8 to 12.8 ms. With a hand-written
+  `select-keys` and the same parsed request: 7.2 to 8.0 ms. About 35 to 45
+  microseconds per call for the re-parse, the view and the seal check.
+- Rule 1 (key ownership) fired 0 times on real forms: the undeclared
+  namespaces only touched keys beside `parse` or in a `:rest/request` route,
+  so silence was right. Two deliberate probes also did not fire; that was
+  friction 5 below (FIXED: advisories were not shown).
+- A secret fails loudly. Removing `:rest/response` with no hand projection
+  made the JSON encoder throw on `slopp.facet.Secret` rather than print it.
+- The `done` oracle ran `place`'s `:=>` through the facet and found a real
+  bug: an unbounded `[:int {:min 0}]` price gave a counterexample with 1e18
+  prices. The fix was `:max`.
+- Weakening: removing the `:total` check passed the write with no warning.
+  `done` went red, but only because three app tests failed. No
+  weakening-specific finding showed in that run, so the rule's behaviour
+  without covering tests is untested here.
+- Editing a check fn re-seals correctly with no restart (the version folds in
+  check fn identity).
+
+**Frictions.**
+1. FIXED. A store that required only `slopp.facet` got no vendored copy, so
+   `ns_create` failed to load it. Fix: a store requiring only `slopp.facet`
+   is now vendored it. (Commit point d06869fec7c10.)
+2. OPEN. After `rest.enabled` was turned on, the app image did not boot
+   (`slopp.http` not on the classpath) until a `restart`; `done` kept
+   reporting `app-boot-failure`. Tracked as "rest.enabled needs a restart
+   before done boots the app".
+3. OPEN. A route that has no facet contract returned the full order, card
+   included, because the test namespace's `ctx` captured a stale route and did
+   not re-evaluate. Fix on the author side: make `ctx` a fn. The server side
+   (a route with no contract echoing its raw body) is OPEN.
+4. FIXED. The `:=>` oracle evaluated a schema string without the namespace's
+   aliases, and the failure string was seq'd into characters, which crashed
+   `done` with a `ClassCastException`. Fix: a failed oracle eval string is now
+   one formless finding. The alias gap itself stays; write `:malli/schema` as
+   literal data (now in the style skill).
+5. FIXED. Advisories never showed in write results. Fix: `change` now reports
+   `:advisories`.
+6. OPEN. `facet/raw` over a whole collection cannot be parsed per element.
+   An author must wrap each row. A facet over a collection is not built.
+7. OPEN. CLI sugar: `slopp change` takes no thread argument, and
+   `ns_add_require` needs the full vector text to get an alias.
+8. OPEN. Noise: a loosened facet showed its failing tests as
+   `:attribution :foreign` or `:untraced`, and `done` flagged `unused-public`
+   on a check fn the facet stopped referencing.
+9. OPEN. A `defn` with a docstring inside a `deftest` is a lint
+   `unused-value`; mutant survivors forced two extra tests (reasonable).
+10. OPEN. `query_slice` on `shop.core/place` returned no `:facets` card even
+    though its `:=>` names `#'shop.order/Order`.
+11. OPEN. Author confusion: a parsed secret is a `Secret`, but the `:=>` said
+    `:string`; `:rest/request #'Order` makes the client send server-computed
+    fields (the style skill now says to declare a separate request facet); a
+    nested facet's own checks do not run.

@@ -373,6 +373,14 @@ the subtree it widens to. **A marker slopp does not know waives nothing while
 reading exactly as though it does** — `^:unusedok` is not `^:unused-ok`, and
 nothing fails; `store_doctor` is what finds those.
 
+**Facet markers.** Three more markers belong to facets (`slopp-style`, section
+3a). `^{:facet "what the value is"}` on a `def` makes it a facet declaration.
+`^{:reveals "why"}` on a form lets it call `facet/reveal`; no other form may.
+`^{:weakening-ok "why"}` on a facet def discharges the `:facet-weakening`
+finding when you meant to loosen it. Route metadata adds `:facet/view` beside
+`:rest/response #'F` (see `rest.md`). `query_slice` on a form carries `:facets`
+cards for each facet its keys name: read them before you edit.
+
 **Before you write the WHY, check that the escape still applies.** A marker
 is a CLAIM about the code around it, and claims go stale — the caller it was
 waived for arrives later, and nothing revisits the waiver.

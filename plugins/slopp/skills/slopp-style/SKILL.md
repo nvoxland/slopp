@@ -238,6 +238,116 @@ keep accretion's safety without the trap:
   the synonym drift the advisory can only detect after the fact.
 - Validate/normalize nil at the boundary where data *enters*, not deep inside.
 
+## 3a. Facets: logic about a value, in one place
+
+A function schema (§4) describes a function. A facet describes a kind of
+value. It holds the shape, the checks, the secret fields and the views of
+that value in ONE declared place. The edge of the program then parses input
+into it, and the core reads plain maps.
+
+**Declare a facet when:**
+- a namespaced key crosses modules (`:order/total` is read in four places);
+- the value comes from outside (HTTP body, database row, file, queue);
+- a field is secret (a card number, a token).
+
+**The declaration.** A `def` with the `:facet` marker. The marker's value
+says what the facet is for.
+
+```clojure
+(defn total-matches? [{:order/keys [lines total]}]
+  (or (= total (reduce + (map :price lines)))
+      {:expected (reduce + (map :price lines)) :actual total}))
+
+(def ^{:facet "an order a customer placed"} Order
+  {:facet/fields {:order/id    :int
+                  :order/lines [:vector [:map [:price [:int {:min 0 :max 1000000}]]]]
+                  :order/total [:int {:min 0}]
+                  :order/card  {:schema :string :secret true}}
+   :facet/checks {:total-matches {:doc "the total is the sum of the line prices"
+                                  :fn  #'shop.order/total-matches?}}
+   :facet/views  {:public [:order/id :order/total]}})
+```
+
+- A check is a `#'var` to a pure fn. It gets the value. It returns `true`, or
+  failure data. Every check needs a `:doc`.
+- Checks run in written order. The first failure stops the rest.
+- A view lists fields. `project` returns only those fields.
+- One key has one owner. Two facets that declare the same key are refused.
+
+**Parse at the port, by VAR.** `(facet/parse #'Order x)` takes the var, never
+the var's value. It returns the parsed map, or failure data
+(`{:facet/failed {check {:doc ...}}}`). It does not throw. The port answers
+the sender. `parsed?` asks if a value carries a seal. `project` re-parses and
+then keeps one view.
+
+**REST routes do this for you.** Declare the facet on the route:
+
+```clojure
+^{:rest/path "/api/orders" :http/method :post
+  :rest/request  #'Order
+  :rest/response #'Order :facet/view :public}
+```
+
+The handler receives the parsed value under `:body`. A failed check is a 400
+that names the check's `:doc`. The response is projected to the view and
+secrets are redacted. A body the handler broke is a logged, generic 500.
+
+**Adapters return Raw.** A form marked `^{:adapter "db ..."}` wraps what it
+reads: `(facet/raw rows :db/orders)`. Nothing but `parse` opens a Raw. Wrap
+one map per Raw. For a vector of rows, wrap each row.
+
+**The core reads plain maps.** A namespace with a declared purity tier
+(`:pure` or `:internal`) is the core. Inside it, parsed values are plain
+maps with the seal in metadata. Read them with `(:order/total m)`. Do not
+re-validate inline.
+
+**In the shell, use an owned key only where it was parsed.** A namespace
+with no declared purity tier is the shell. There, a form that reads,
+destructures or builds a key a facet owns must parse that facet in the same
+form, be a route whose `:rest/request` names the facet, or live in the
+facet's own namespace. Otherwise the write gets an advisory naming the
+facet. `^:unsafe` does not clear it; a parse does.
+
+**`reveal` is for one kind of form.** `(facet/reveal secret)` opens a secret
+field. It is refused outside a form marked `^{:reveals "why"}`. Say why the
+form needs the plain value. Keep that form small.
+
+**Weakening a facet.** Removing a check, dropping a field, making a field
+optional, making a secret plain, or widening a view is a weakening. `done`
+fails on it. Discharge it with `^{:weakening-ok "why"}` on the facet def.
+A human can also endorse a facet def, as they endorse a test: after that,
+any change to it needs the human's ask to name it.
+
+**Lessons from the first dogfood app.**
+- **Declare a separate REQUEST facet.** The stored Order has fields the
+  server computes, such as `:order/total`. If a route names `#'Order` as its
+  request, the client must send them. Make `NewOrder` (what the client sends)
+  and `Order` (what is stored).
+- **A nested facet gives its shape only.** A `[:vector Line]` field checks
+  the shape of each Line. It does not run Line's checks. Put the check on the
+  outer facet, or parse each Line.
+- **A parsed secret field holds a Secret, not a string.** A core fn's `:=>`
+  schema must not say `:string` for it. Leave the key out of the schema.
+- **Write a `:malli/schema` as literal data.** It is read from source. A call
+  such as `(facet/fields-schema #'Order)` can fail in the oracle, where
+  aliases do not resolve. Spell out the fields, or use the fully qualified
+  name.
+- **A `:pure` fn's `:=>` output that is a facet's fields is checked at
+  `done`.** The oracle parses each generated output. It does not generate
+  inputs through the facet yet.
+
+**What a facet does NOT protect:**
+- code that runs in the same process and reaches past the gates;
+- a value derived from a secret (it is plain);
+- a scalar taken out of its map;
+- a computed key, `(get m k)`;
+- what a `:reveals` form does after it reveals;
+- what a check does inside (only tests cover that);
+- a printed value read back later (it is unparsed again).
+
+`query_slice` on a form shows `:facets` cards for the facets its keys name.
+Read the card before you edit code that touches those keys.
+
 ## 4. Contracts live at the module boundary
 
 The place a schema or a docstring earns its keep is the **module-external
@@ -406,6 +516,13 @@ cover, so drifting either way turns the suite red.
 | A test grading your change is not yours to edit | **Yes** — the write is refused; `flag_test` records the objection |
 | Tests fail when the code is wrong | **Advisory** — `done` mutation-tests changed functions (`:mutants-survived`, about 10s budget; `verify {op mutate}` for what it did not reach) |
 | An endorsed test is the human's | **Yes** — agent edits and self-endorsement are refused unless the ask names the test |
+| A facet declaration is well formed (checks resolve and have a `:doc`, views name fields, one owner per key) | **Yes** — write gate `facet-declaration`; `done` re-asks over every facet as `:facet-integrity` (`:error`, also checks each check is pure) and `:facet-fields` (`:error`, malli accepts the fields) |
+| `parse`/`project`/`parsed?` take a facet VAR | **Yes** — write gate `facet-by-var` (production code) |
+| An owned key is used only beside `parse`/`project`, or in the owner | **Advisory** — `facet-key-ownership` at write; `done` asks again over old forms as `:facet-key-ownership-sweep` (advisory) |
+| `reveal` only in a `^{:reveals "why"}` form | **Yes** — write gate `facet-reveal` refuses it |
+| A db/file/queue adapter returns `facet/raw` | **Advisory** — `facet-adapter-raw` |
+| A facet is not weakened (check removed, field dropped or made optional, secret made plain, view widened) | **Yes** — `done` `:facet-weakening` (`:error`); discharge with `^{:weakening-ok "why"}` |
+| A namespaced key that crosses modules has an owner | **Advisory** — `done` `:undeclared-travel` (only in a store with a production facet) |
 | Pure boundary fn has generated inputs | Judgment (no gate yet) |
 | Tests assert behaviour, not the fixture | Judgment |
 

@@ -87,10 +87,38 @@ source at all.
 | `^:reads` | This form only reads through an opaque dependency, so it needs no `!`. |
 | `^:unsafe` | Opt out of the dialect gate. |
 | `^{:adapter "port -- why"}` | This form IS the adapter for a port (`http`, `process`): the one place allowed to reach it directly. The first word names the port. |
+| `^{:facet "what the value is"}` | On a `def`: this is a facet declaration (fields, checks, views, secret fields). |
+| `^{:reveals "why"}` | This form may call `facet/reveal` to open a secret field. No other form may. |
+| `^{:weakening-ok "why"}` | On a facet def: you meant to loosen it (drop a check or field, widen a view). Discharges the `done` finding. |
 | `^:external` | On a test: it exercises IO, so it runs in its own JVM. |
 | `^:integration` | On a test: runs in-image with the rest. |
 | `^{:malli/schema ...}` | The form's boundary contract. Generatively checked at done. |
 | `^{:auto-declare "why"}` | Written by the pipeline, not by you. |
+
+## Facets
+
+A facet declares one kind of value in one place: its fields, its pure checks,
+its views and its secret fields. A port parses input into it. The core reads
+plain maps. A store with a facet gets these gates:
+
+- **Write, refused:** a declaration with a missing check, a missing `:doc`, a
+  view that names an unknown field, or two owners for one key; `parse`,
+  `project` or `parsed?` handed a facet's value or a computed map instead of
+  its `#'var`; `reveal` outside a
+  form marked `^{:reveals "why"}`.
+- **Write, advisory:** an owned key used outside the facet's own code and the
+  forms that parse it; a database, file or queue adapter that does not wrap
+  its result with `facet/raw`.
+- **At `done`, error:** a facet whose checks do not resolve or are not pure,
+  whose fields malli rejects, or that got weaker (a check removed, a field
+  dropped or made optional, a secret made plain, a view widened). Mark the
+  facet `^{:weakening-ok "why"}` when the change is on purpose.
+- **At `done`, advisory:** a namespaced key that crosses two or more modules
+  with no owner, and old forms that use a key whose facet came later.
+
+A facet does not protect against hostile code in the same process, a value
+derived from a secret, or a computed key such as `(get m k)`. The `slopp-style`
+skill (section 3a) shows how to write one.
 
 ## Naming
 
