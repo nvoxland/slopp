@@ -1289,127 +1289,6 @@
       {:path (str path) :versions h}
       {:error (str path " has never been tracked")})))
 
-(defn config-file!
-  "Structured config files: the store holds SEMANTIC key/values per path
-  (per-key delta history, like forms); the projection serializes them into
-  the file format (`:manifest` → sorted `K: V` lines). Set a key
-  (`:key`+`:value`, `:format` on first touch, default :manifest), remove one
-  (`:key`+`:unset true`), or read (path only: values + rendered preview).
-  The module manifest is NOT a config file — module_dep is its verb.
-
-  TWO paths validate before any delta lands: `capabilities` through the
-  capability registry and `rules` through the rule catalog. Unknown keys and
-  type-failing values are refused with teaching. Every other path records what
-  it was given, and the result SAYS so rather than looking like a checked
-  write."
-  [session path & {:keys [key value unset format prompt agent]}]
-  (let [entry (get-in (:store @session) [:config (str path)])]
-    (cond
-      (= "modules" (str path))
-      {:error "the module manifest is edge-grain, not a file — declare or retract one dependency at a time: module_dep {from \"x.y\" to \"a.b\"} (add) or module_dep {from \"x.y\" to \"a.b\" remove true}; read it via query_depends {modules true}"}
-
-      (and key unset)
-      (if-not (get-in entry [:values (str key)])
-        {:error (str key " is not set on " path)}
-        (do (engine/commit-appended! session
-                              #(first (store/record-config-unset % path key
-                                                                 :prompt prompt
-                                                                 :agent agent))
-                              [])
-            {:path (str path) :unset (str key)}))
-
-      (and key (some? value))
-      ;; THREE registries now. The `rules` one closed a real hole: with nothing
-      ;; to disagree with, a renamed dial and a MISTYPED dial were the same
-      ;; event — both accepted, both governing nothing, neither reported. The
-      ;; catalog always knew every rule; this path simply was not asking.
-      ;; `dev` arrives with its registry already written, so it is asked from
-      ;; the start rather than after somebody loses an afternoon to a field
-      ;; named `prot`.
-      (if-let [refusal (case (str path)
-                         "capabilities"
-                         (or (capabilities/config-refusal (str key) (str value))
-                             (capabilities/disable-refusal (:store @session)
-                                                           (str key) (str value)))
-                         "rules"
-                         (catalog/config-refusal (str key) (str value))
-                         "dev"
-                         (dev/config-refusal (str key) (str value))
-                         "dev.local"
-                         (dev/config-refusal (str key) (str value))
-                         nil)]
-        {:error refusal}
-        (let [fmt      (or (some-> format clojure.core/keyword)
-                           (:format entry) :manifest)
-              caps?    (= "capabilities" (str path))
-              ;; whether a REGISTRY stood behind this write, which is a
-              ;; different question from which path it was — and stopped being
-              ;; the same question the moment `rules` gained one
-              checked? (contains? #{"capabilities" "rules" "dev" "dev.local"} (str path))
-              ;; the prerequisites this write turns on WITH it, computed
-              ;; against the PRE-write store so the report names only what
-              ;; actually changed rather than restating the graph
-              implied  (when caps?
-                         (seq (capabilities/implied-puts (:store @session)
-                                                         (str key) (str value))))]
-          (engine/commit-appended!
-           session
-           (fn [st]
-             (reduce (fn [s k*]
-                       (first (store/record-config-put s path fmt k* "true"
-                                                       :prompt (str "implied by " key "=" value)
-                                                       :agent agent)))
-                     (first (store/record-config-put st path fmt key value
-                                                     :prompt prompt
-                                                     :agent agent))
-                     implied))
-           [])
-          ;; A path with no registry records the key and value AS GIVEN, so a
-          ;; caller cannot tell a checked write from an unchecked one unless the
-          ;; result says which happened (D-surface-honesty). That admission is
-          ;; what made the `rules` gap findable: slopp-ui probed a bogus key and
-          ;; the note named the registry it was not using.
-          (cond-> {:path (str path) :key (str key) :value (str value) :format fmt
-                   :verified (if checked? [:registry] [])
-                   :unverified (if checked? [] [:schema])}
-            (not checked?)
-            (assoc :note (str "recorded as given — no registry governs the "
-                              path " config, so neither the key nor the value"
-                              " was validated. `capabilities` (query_capabilities),"
-                              " `rules` (query_rules), `dev` and `dev.local` are the"
-                              " checked paths."))
-
-            ;; ABSENT when nothing was implied, the way the module manifest's
-            ;; :debt is: an empty vector on every write would train the reader
-            ;; to skip a key that has to be read when it IS there.
-            implied
-            (assoc :implied (vec implied)
-                   :implied-note (str "set with it, because " key
-                                      " requires them — a capability turned on"
-                                      " without its prerequisites looks enabled"
-                                      " and does nothing")))))
-
-      key
-      (if-let [v (get-in entry [:values (str key)])]
-        {:path (str path) :key (str key) :value v}
-        {:error (str key " is not set on " path)})
-
-      :else
-      (if entry
-        {:path (str path) :format (:format entry) :values (:values entry)
-         :rendered (store/render-config entry)}
-                {:error (str path " has no structured config"
-                     (when-let [twin (get-in (:store @session) [:files (str path)])]
-                       ;; the twin an old clone left: the rendering as a FILE,
-                       ;; the declaration gone. Say so, or the reader concludes
-                       ;; the project never declared anything.
-                       (str " — but a tracked FILE at that path exists (an"
-                            " import blobbed the rendering instead of restoring"
-                            " the declaration). Restore it: config_file {path \""
-                            path "\" key K value V} per line, then file_remove"
-                            " {path \"" path "\"}. Its lines:\n"
-                            (if (map? twin) (pr-str twin) twin))))}))))
-
 ^:reads (defn draft-test
   "Rock 5: a ready-to-EDIT deftest draft for `ns-sym/nm`. With `:code` (a
   driver expression) it OBSERVES real calls and turns each capture into an
@@ -5615,6 +5494,168 @@
                        (let [e (store/form-by-id st (:form-id d))]
                          (symbol (str ns-sym) (str (or (:name e) (:form-id d))))))
                      (:deltas r)))))))
+
+(defn- names-lib?
+  "True when `intent` names `lib` as a whole name: `org.example/left-pad` is
+  not named by `org.example/left-padding`, the look-alike case the rule exists
+  for."
+  [intent lib]
+  (boolean (and intent
+                (re-find (re-pattern (str "(?<![\\w./-])" (java.util.regex.Pattern/quote (str lib)) "(?![\\w-])"))
+                         intent))))
+
+(defn config-file!
+  "Structured config files: the store holds SEMANTIC key/values per path
+  (per-key delta history, like forms); the projection serializes them into
+  the file format (`:manifest` → sorted `K: V` lines). Set a key
+  (`:key`+`:value`, `:format` on first touch, default :manifest), remove one
+  (`:key`+`:unset true`), or read (path only: values + rendered preview).
+  The module manifest is NOT a config file — module_dep is its verb.
+
+  TWO paths validate before any delta lands: `capabilities` through the
+  capability registry and `rules` through the rule catalog. Unknown keys and
+  type-failing values are refused with teaching. Every other path records what
+  it was given, and the result SAYS so rather than looking like a checked
+  write."
+  [session path & {:keys [key value unset format prompt agent]}]
+  (let [entry (get-in (:store @session) [:config (str path)])]
+    (cond
+      (= "modules" (str path))
+      {:error "the module manifest is edge-grain, not a file — declare or retract one dependency at a time: module_dep {from \"x.y\" to \"a.b\"} (add) or module_dep {from \"x.y\" to \"a.b\" remove true}; read it via query_depends {modules true}"}
+
+      (and key unset)
+      (if-not (get-in entry [:values (str key)])
+        {:error (str key " is not set on " path)}
+        (do (engine/commit-appended! session
+                              #(first (store/record-config-unset % path key
+                                                                 :prompt prompt
+                                                                 :agent agent))
+                              [])
+            {:path (str path) :unset (str key)}))
+
+      (and key (some? value))
+      ;; THREE registries now. The `rules` one closed a real hole: with nothing
+      ;; to disagree with, a renamed dial and a MISTYPED dial were the same
+      ;; event — both accepted, both governing nothing, neither reported. The
+      ;; catalog always knew every rule; this path simply was not asking.
+      ;; `dev` arrives with its registry already written, so it is asked from
+      ;; the start rather than after somebody loses an afternoon to a field
+      ;; named `prot`.
+      (if-let [refusal (case (str path)
+                         "capabilities"
+                         (or (capabilities/config-refusal (str key) (str value))
+                             (capabilities/disable-refusal (:store @session)
+                                                           (str key) (str value)))
+                         "rules"
+                         (catalog/config-refusal (str key) (str value))
+                         "dev"
+                         (dev/config-refusal (str key) (str value))
+                         "dev.local"
+                         (dev/config-refusal (str key) (str value))
+                         ;; the dependency allow-list is the human's: an
+                         ;; entry the agent writes for itself would approve
+                         ;; its own guess
+                         "deps-allow"
+                         (when-not (names-lib? (:last-intent @session) (str key))
+                           (str "the deps-allow list holds libraries a human"
+                                " approved, and the human's ask does not name "
+                                key ". Ask them to name it, then write it here."))
+                         nil)]
+        {:error refusal}
+        (let [fmt      (or (some-> format clojure.core/keyword)
+                           (:format entry) :manifest)
+              caps?    (= "capabilities" (str path))
+              ;; whether a REGISTRY stood behind this write, which is a
+              ;; different question from which path it was — and stopped being
+              ;; the same question the moment `rules` gained one
+              checked? (contains? #{"capabilities" "rules" "dev" "dev.local"} (str path))
+              ;; the prerequisites this write turns on WITH it, computed
+              ;; against the PRE-write store so the report names only what
+              ;; actually changed rather than restating the graph
+              implied  (when caps?
+                         (seq (capabilities/implied-puts (:store @session)
+                                                         (str key) (str value))))]
+          (engine/commit-appended!
+           session
+           (fn [st]
+             (reduce (fn [s k*]
+                       (first (store/record-config-put s path fmt k* "true"
+                                                       :prompt (str "implied by " key "=" value)
+                                                       :agent agent)))
+                     (first (store/record-config-put st path fmt key value
+                                                     :prompt prompt
+                                                     :agent agent))
+                     implied))
+           [])
+          ;; A path with no registry records the key and value AS GIVEN, so a
+          ;; caller cannot tell a checked write from an unchecked one unless the
+          ;; result says which happened (D-surface-honesty). That admission is
+          ;; what made the `rules` gap findable: slopp-ui probed a bogus key and
+          ;; the note named the registry it was not using.
+          (cond-> {:path (str path) :key (str key) :value (str value) :format fmt
+                   :verified (if checked? [:registry] [])
+                   :unverified (if checked? [] [:schema])}
+            (not checked?)
+            (assoc :note (str "recorded as given — no registry governs the "
+                              path " config, so neither the key nor the value"
+                              " was validated. `capabilities` (query_capabilities),"
+                              " `rules` (query_rules), `dev` and `dev.local` are the"
+                              " checked paths."))
+
+            ;; ABSENT when nothing was implied, the way the module manifest's
+            ;; :debt is: an empty vector on every write would train the reader
+            ;; to skip a key that has to be read when it IS there.
+            implied
+            (assoc :implied (vec implied)
+                   :implied-note (str "set with it, because " key
+                                      " requires them — a capability turned on"
+                                      " without its prerequisites looks enabled"
+                                      " and does nothing")))))
+
+      key
+      (if-let [v (get-in entry [:values (str key)])]
+        {:path (str path) :key (str key) :value v}
+        {:error (str key " is not set on " path)})
+
+      :else
+      (if entry
+        {:path (str path) :format (:format entry) :values (:values entry)
+         :rendered (store/render-config entry)}
+                {:error (str path " has no structured config"
+                     (when-let [twin (get-in (:store @session) [:files (str path)])]
+                       ;; the twin an old clone left: the rendering as a FILE,
+                       ;; the declaration gone. Say so, or the reader concludes
+                       ;; the project never declared anything.
+                       (str " — but a tracked FILE at that path exists (an"
+                            " import blobbed the rendering instead of restoring"
+                            " the declaration). Restore it: config_file {path \""
+                            path "\" key K value V} per line, then file_remove"
+                            " {path \"" path "\"}. Its lines:\n"
+                            (if (map? twin) (pr-str twin) twin))))}))))
+
+(defn deps-allow-refusal
+  "nil when the store may take external dependency `lib`: it already has it
+  (a version change), the store's `deps-allow` config lists it, or the
+  human's ask (`intent`) names it. Else the teaching refusal.
+
+  A package an agent proposes may not exist, or may be a look-alike of one
+  that does (in published measurements about one suggestion in five named a
+  package that does not exist, and the same names recur, which is what makes
+  them squattable), and adding one downloads it and runs its code in the
+  image. So the agent's own pick is never enough: a human names the library."
+  [store lib intent]
+  (when-not (or (contains? (:deps store) lib)
+                (contains? (:client-deps store) lib)
+                (get-in store [:config "deps-allow" :values (str lib)])
+                (names-lib? intent lib))
+    (str lib " is not a dependency this store already has, is not on its"
+         " deps-allow list, and the human's ask does not name it. A package an"
+         " agent proposes can be one that does not exist, or a look-alike of one"
+         " that does, and adding it downloads and runs its code. Nothing was"
+         " downloaded. Ask the human: they name it in their request (\"add " lib
+         "\"), or they put it on the store's list: config_file {path \"deps-allow\""
+         " key \"" lib "\" value \"who checked it, and where\"}, which also needs"
+         " their ask to name it.")))
 
 (defn create-ns!
   "F4: bring a brand-new namespace into being — two modes:

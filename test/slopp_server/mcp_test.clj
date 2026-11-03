@@ -5131,3 +5131,20 @@
         (is (.exists (io/file dir ".slopp" "pending-intent"))))
       (finally (ops/close! sess)
                (sh/sh "rm" "-rf" dir)))))
+
+(deftest ^:external both-dependency-doors-ask-for-the-humans-word
+  ;; slopp-6u3.2. The TOOL is the door an agent's own pick arrives through;
+  ;; a git clone or import adds the dependencies a human chose to bring in,
+  ;; and calls ops/deps-add! directly.
+  (let [sess (external/open!)]
+    (try
+      (swap! sess assoc :last-intent "make the report faster")
+      (is (re-find #"deps-allow" (call! sess "deps_add" {:lib "org.example/left-pad" :version "1.0"})))
+      (is (not (contains? (:deps (:store @sess)) 'org.example/left-pad))
+          "refused before anything was recorded or downloaded")
+      (is (re-find #"org.example/left-pad"
+                   (str (:error (ops/config-file! sess "deps-allow" :key "org.example/left-pad" :value "looks fine"))))
+          "the agent cannot approve its own pick")
+      (swap! sess assoc :last-intent "allow org.example/left-pad, I checked it")
+      (is (nil? (:error (ops/config-file! sess "deps-allow" :key "org.example/left-pad" :value "the human checked it"))))
+      (finally (ops/close! sess)))))

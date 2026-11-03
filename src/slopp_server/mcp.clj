@@ -1728,12 +1728,17 @@
   hot query/edit clauses)."
   {"deps_add"
    (fn [session a sym]
-     (text! (ops/deps-add! session (sym :lib)
-                          (or (:coord a)
-                              (when (:version a)
-                                {:mvn/version (:version a)}))
-                          :agent (:agent a) :prompt (:prompt a)
-                          :client (:client a))))
+     (text! (if-let [refusal (ops/deps-allow-refusal (:store @session) (sym :lib)
+                                                    (:last-intent @session))]
+              ;; the tool is the door an agent's own pick arrives through;
+              ;; refused before deps-add!, which resolves and DOWNLOADS
+              {:error refusal}
+              (ops/deps-add! session (sym :lib)
+                             (or (:coord a)
+                                 (when (:version a)
+                                   {:mvn/version (:version a)}))
+                             :agent (:agent a) :prompt (:prompt a)
+                             :client (:client a)))))
    "deps_remove"
    (fn [session a sym]
      (text! (ops/deps-remove! session (sym :lib)

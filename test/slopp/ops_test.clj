@@ -2984,3 +2984,19 @@
     (testing "a plain def keeps today's behaviour: an existing endorsed one is protected, a new marker on one is not gated"
       (is (re-find #"ENDORSED" (str (refuse "tidy" (edit "plain-def" "(def ^{:endorsed \"pat: plain\"} plain-def 2)")))))
       (is (nil? (refuse "tidy" [{:action :add :ns "fc.core" :source "(def ^{:endorsed \"x\"} fresh 1)"}]))))))
+
+(deftest a-new-dependency-needs-the-humans-word
+  (let [st  (store/empty-store)
+        lib 'org.example/left-pad]
+    (is (re-find #"deps-allow" (str (ops/deps-allow-refusal st lib "add a json library")))
+        "the agent's own choice of package is refused, naming the human's way in")
+    (is (nil? (ops/deps-allow-refusal st lib "please add org.example/left-pad 1.0"))
+        "the human named it")
+    (is (nil? (ops/deps-allow-refusal
+               (first (store/record-config-put st "deps-allow" :manifest "org.example/left-pad" "checked on clojars"))
+               lib nil))
+        "the store's allow-list carries it")
+    (is (nil? (ops/deps-allow-refusal (first (store/record-deps-add st lib {:mvn/version "1.0"})) lib nil))
+        "a version change of a dependency the store already has")
+    (is (re-find #"deps-allow" (str (ops/deps-allow-refusal st lib "add org.example/left-padding")))
+        "a look-alike name in the ask is not the library")))
