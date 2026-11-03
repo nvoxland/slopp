@@ -858,3 +858,16 @@
     (is (nil? (engine/framework-injection bare files)) "a store that requires nothing of slopp is handed nothing")
     (is (nil? (engine/framework-injection owns files))
         "a store that DEFINES the namespace is not shadowed by the shipped copy")))
+
+(deftest a-test-that-reads-an-edited-def-is-not-foreign
+  ;; 3ce: the test READS a def; the tracer sees calls, not reads, so the
+  ;; trace was disjoint from the edit and the red came back :foreign
+  (let [st  (-> (store/empty-store)
+                (store/ingest 'at.core "(ns at.core)\n\n(def tools [1 2])\n\n(defn other [] 1)\n")
+                (store/ingest 'at.core-test "(ns at.core-test (:require [clojure.test :refer [deftest is]] [at.core :as c]))\n\n(deftest t (is (= 2 (count c/tools))))\n"))
+        sum {:failures [{:test 'at.core-test/t}]}
+        tm  '{at.core-test/t #{at.core/other}}]
+    (is (= {:attribution :mine :implicated '[at.core/tools]}
+           (select-keys (first (:failures (engine/implicate sum tm #{'at.core/tools} st))) [:attribution :implicated])))
+    (is (= :foreign (:attribution (first (:failures (engine/implicate sum tm #{'at.core/other-thing} st)))))
+        "a test that reaches nothing edited is still somebody else's")))

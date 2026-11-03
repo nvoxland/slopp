@@ -177,51 +177,6 @@
                             (empty? (set/intersection touched edited))))))
                failures)))))
 
-(defn implicate
-  "Rock 2: annotate each failure with the just-changed forms that failing
-  test actually exercises (trace map ∩ edited) — the correlation agents
-  otherwise re-derive from raw expected/actual on every red.
-
-  Each failure also carries `:attribution`, because that intersection has
-  THREE outcomes and reporting only the hits collapsed the last two:
-
-  - `:mine`     the test exercises a form this episode changed, or IS one
-                — `:implicated` names which
-  - `:foreign`  the test IS traced and its trace is disjoint from this
-                episode's edits — somebody else's red
-  - `:untraced` no trace for this test, so nothing was intersected and
-                neither answer is available
-
-  `:foreign` and `:untraced` both used to arrive as a missing `:implicated`
-  key, leaving 'assume it is mine' as the only safe reading — which is how
-  one agent's red comes to freeze every other agent's thread. Only
-  `:foreign` is evidence of innocence. `:untraced` is the ABSENCE of
-  evidence and must never be read as the presence of it, which is why an
-  empty trace counts as untraced rather than as a disjoint one.
-
-  The test's OWN name is checked against `edited` before its trace is,
-  because the trace maps a test to the source forms it exercises and so can
-  never name the test itself. Writing a failing test against code you did
-  not touch is the ordinary red-first move, and reading its trace alone
-  called it somebody else's."
-  [summary tmap edited]
-  (if-not (and (seq (:failures summary)) (seq edited))
-    summary
-    (let [edited (set edited)]
-      (update summary :failures
-              (fn [fs]
-                (mapv (fn [f]
-                        (let [own    (when (contains? edited (:test f)) [(:test f)])
-                              traced (seq (get tmap (:test f)))
-                              hits   (some->> traced set (set/intersection edited) seq)]
-                          (cond
-                            (or own hits)
-                            (assoc f :attribution :mine
-                                   :implicated (vec (sort (distinct (concat own hits)))))
-                            traced (assoc f :attribution :foreign)
-                            :else  (assoc f :attribution :untraced))))
-                      fs))))))
-
 (defn shape-episode-reds!
   "Mid-episode response diet (direction over repetition): full failure
   detail rides ONLY for tests newly red on THIS write; tests already
@@ -1944,6 +1899,80 @@
 
       :else (assoc r1 :diagnosis :genuine))))
 
+(defn- static-hits
+  "The `edited` forms test `t` reaches within three hops of the store's
+  reference graph — calls AND value reads, which is the difference that
+  matters: the tracer sees calls, so a test that reads a def has no trace
+  edge to it."
+  [store t edited]
+  (let [g     (group-by (juxt :from-ns :from-var) (refs/refs store))
+        start [(symbol (namespace t)) (symbol (name t))]
+        reach (loop [seen #{} frontier #{start} hop 0]
+                (if (or (empty? frontier) (> hop 3))
+                  (into seen frontier)
+                  (recur (into seen frontier)
+                         (into #{} (comp (mapcat #(get g %))
+                                         (keep (fn [r] (when (and (:to-ns r) (:to-name r))
+                                                         [(:to-ns r) (:to-name r)])))
+                                         (remove seen))
+                               frontier)
+                         (inc hop))))]
+    (seq (filter (fn [q] (reach [(symbol (namespace q)) (symbol (name q))])) edited))))
+
+(defn implicate
+  "Rock 2: annotate each failure with the just-changed forms that failing
+  test actually exercises (trace map ∩ edited) — the correlation agents
+  otherwise re-derive from raw expected/actual on every red.
+
+  Each failure also carries `:attribution`, because that intersection has
+  THREE outcomes and reporting only the hits collapsed the last two:
+
+  - `:mine`     the test exercises a form this episode changed, or IS one
+                — `:implicated` names which
+  - `:foreign`  the test IS traced and its trace is disjoint from this
+                episode's edits — somebody else's red
+  - `:untraced` no trace for this test, so nothing was intersected and
+                neither answer is available
+
+  `:foreign` and `:untraced` both used to arrive as a missing `:implicated`
+  key, leaving 'assume it is mine' as the only safe reading — which is how
+  one agent's red comes to freeze every other agent's thread. Only
+  `:foreign` is evidence of innocence. `:untraced` is the ABSENCE of
+  evidence and must never be read as the presence of it, which is why an
+  empty trace counts as untraced rather than as a disjoint one.
+
+  The test's OWN name is checked against `edited` before its trace is,
+  because the trace maps a test to the source forms it exercises and so can
+  never name the test itself. Writing a failing test against code you did
+  not touch is the ordinary red-first move, and reading its trace alone
+  called it somebody else's.
+
+  Given the `store`, a traced test whose trace misses the edit is checked
+  once more against the static reference graph before it is called
+  `:foreign` (`:via :static` on the result): a test that READS an edited def
+  has no trace edge to it, and a foreign attribution lets a red land
+  unexamined."
+  ([summary tmap edited] (implicate summary tmap edited nil))
+  ([summary tmap edited store]
+   (if-not (and (seq (:failures summary)) (seq edited))
+     summary
+     (let [edited (set edited)]
+       (update summary :failures
+               (fn [fs]
+                 (mapv (fn [f]
+                         (let [own    (when (contains? edited (:test f)) [(:test f)])
+                               traced (seq (get tmap (:test f)))
+                               hits   (some->> traced set (set/intersection edited) seq)]
+                           (cond
+                             (or own hits)
+                             (assoc f :attribution :mine
+                                    :implicated (vec (sort (distinct (concat own hits)))))
+                             traced (if-let [s (when store (static-hits store (:test f) edited))]
+                                      (assoc f :attribution :mine :implicated (vec (sort s)) :via :static)
+                                      (assoc f :attribution :foreign))
+                             :else  (assoc f :attribution :untraced))))
+                       fs)))))))
+
 (defn run-verification!
   "Diagnosed run of `affected` tests (grouped by their namespace), or of all of
   `default-ns`'s tests when there's no trace information — and of `default-ns`
@@ -2002,7 +2031,8 @@
                                            :include-integration? include-integration?)
                            by-affected)))
                      (:test-map @session)
-                     edited)
+                     edited
+                     (:store @session))
                     affected default-ns boundary?)
              ;; the done-point runs the external tier for REAL right after this, and
              ;; reports its own cap in :findings — an in-image deferral note there is
