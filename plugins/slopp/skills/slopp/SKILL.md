@@ -209,7 +209,10 @@ both), then call `done` again — your rewrite IS the resolution. Never
 `thread_drop` over a conflict; that discards your side. A SUBAGENT shares
 your MCP connection, so give it a thread of its own — `thread_open {thread
 "t-kid" parent "<your thread>"}` — and hand the id over in its prompt; its
-`done` lands into your thread, and yours lands the lot.
+`done` lands into your thread, and yours lands the lot. Writes and image
+calls on one session take turns (store-only reads do not), so a subagent on
+your session waits while you write; without its own thread its work and
+yours land together, unlabelled.
 
 ## When you need more
 

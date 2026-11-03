@@ -426,6 +426,16 @@ locking: all image work rides ONE nREPL session (per-eval serialization) and
 `traced-run`/hot-loads are single evals — keep multi-step image work inside
 one eval. `*pre-commit-hook*` is the deterministic test seam.
 
+**The session turn lock (2026-11-03, ao6/v35).** "No locks" held per write,
+not per CALL: a parent and its subagent share one MCP session, and two
+concurrent calls interleaved — a land by one replaced the store under the
+other's in-flight write (reported `{:landed 1}`, never journaled), and a
+read-only `mutate` loaded mutants a concurrent `test_run` answered against.
+`slopp-server.mcp/call-op!` now runs every op that writes or uses the image
+under `(locking session …)`; reentrant, so a call that calls back in does not
+deadlock. Store-only reads (`tools/read-only-tools` ∩ `tools/image-free-tools`)
+stay concurrent.
+
 ## `slopp.edit.refactor` (rename mechanics)
 
 Position-based: clj-kondo gives resolved sites; **use `:name-row`/`:name-col`
