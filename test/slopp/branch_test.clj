@@ -4,7 +4,7 @@
   semantics; merging down to main rides the m2 causal-delivery engine."
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.java.shell]
-            [slopp.ops :as ops] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store :as store] [slopp.store.db :as db] [slopp.store.render :as store.render]))
+            [slopp.ops :as ops] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store :as store] [slopp.store.db :as db] [slopp.store.render :as store.render] [slopp.index.refs :as refs]))
 
 (def seed
   (str "(ns br.core (:require [clojure.test :refer [deftest is]]))\n"
@@ -406,3 +406,27 @@
                        " that cannot land: "
                        (pr-str (select-keys (:result outcome) [:land :done :findings]))))))))
       (finally (clojure.java.shell/sh "rm" "-rf" dir)))))
+
+(deftest ^:external a-merge-runs-the-landed-forms-tests-in-other-namespaces
+  ;; 5u7.4: the merge verified "every test inside the touched namespaces",
+  ;; so a landed form whose test lives elsewhere merged green and broke.
+  ;; mr.core-test is not a namespace the merge touched: only mr.core changed
+  (let [sess (external/open!)]
+    (try
+      (is (nil? (:error (ops/ingest! sess 'mr.core "(ns mr.core)\n\n(defn f \"F.\" [x] x)\n"))))
+      (ops/module-dep! sess "mr.web" "mr.core" :prompt "the web module calls the core")
+      (is (nil? (:error (ops/ingest! sess 'mr.web "(ns mr.web (:require [mr.core :as core]))\n\n(defn g \"G.\" [x] (core/f x))\n"))))
+      (is (nil? (:error (ops/ingest! sess 'mr.web-test
+                                     "(ns mr.web-test (:require [clojure.test :refer [deftest is]] [mr.web :as web]))\n\n(deftest g-is-identity (is (= 1 (web/g 1))))\n"))))
+      (ops/test-run! sess 'mr.web-test)
+      (branch/branch! sess "feat")
+      (ops/edit-group-once! sess [{:action :replace :ns 'mr.core :name 'f
+                                   :source "(defn f \"F.\" [x] (inc x))"}]
+                            :prompt "f now adds one")
+      (branch/branch-switch! sess "main")
+      (let [r (branch/branch-merge! sess "feat")]
+        (is (nil? (:error r)) (pr-str r))
+        (is (pos? (+ (:fail (:test r) 0) (:error (:test r) 0)))
+            (str "the landed f breaks a test in another namespace: " (pr-str r)
+                 " covered-by: " (pr-str (refs/covered-by (:store @sess) (:test-map @sess) 'mr.core/f)))))
+      (finally (ops/close! sess)))))

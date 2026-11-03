@@ -22,7 +22,7 @@
             [slopp.edit :as edit]
             [slopp.image :as image]
             [slopp.image.repl :as repl]
-            [slopp.store :as store] [slopp.store.merge :as merge] [clojure.string :as str] [slopp.read.modules :as read.modules] [slopp.read.history :as history]))
+            [slopp.store :as store] [slopp.store.merge :as merge] [clojure.string :as str] [slopp.read.modules :as read.modules] [slopp.read.history :as history] [slopp.index.refs :as refs]))
 
 (defn merge-into-session!
   "Shared merge pipeline (m2 forks + m3 branches): replay `theirs` onto the
@@ -142,8 +142,25 @@
                                                        " an edge (module_dep {from .. to .."
                                                        " remove true})")}))
                     summary      (when (seq verify-nses)
-                                   (engine/run-verification! session verify-nses nil
-                                                      :edited edited))]
+                                   (engine/run-verification!
+                                    session verify-nses
+                                    ;; the landed forms' IMPACTED tests,
+                                    ;; wherever they live: "every test inside
+                                    ;; the touched namespaces" left a test in
+                                    ;; another namespace unrun, and a merge
+                                    ;; that broke it reported green. Traced
+                                    ;; tests, plus the tests that REACH each
+                                    ;; landed form statically, since a switch
+                                    ;; or a fresh image holds no trace. nil
+                                    ;; (the namespace run) when nothing is known
+                                    (some-> (seq (distinct
+                                                  (concat
+                                                   (engine/impacted-tests session st'' (:changed-form-ids r))
+                                                   (for [q edited
+                                                         c (refs/covered-by st'' (:test-map @session) q)]
+                                                     (:test c)))))
+                                            vec)
+                                    :edited edited))]
                 (when summary
                   (engine/commit-appended! session
                                     #(store/record-verification % verify-nses summary)
