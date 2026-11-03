@@ -139,6 +139,10 @@
    ;; a facet loosened on purpose: the author answers for it on the def
    {:marker :weakening-ok :kind :escape :discharges :facet-weakening :on :name
     :asks "who agreed to loosen this facet, and why is it safe?" :self-polices? false}
+   ;; an equivalent mutant: the VALUE maps each mutation label to why no
+   ;; input tells it apart, so it carries its own why and asks for none
+   {:marker :equivalent-mutants :kind :escape :discharges :mutants-survived :on :name
+    :asks nil :self-polices? false}
    ;; a secret's real value leaves the program only through a form that says so
    {:marker :reveals :kind :escape :discharges :facet-reveal :on :name
     :asks "what does this form hand the secret to, and why must it see the real value?" :self-polices? false}

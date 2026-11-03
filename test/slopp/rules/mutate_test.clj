@@ -159,3 +159,25 @@
       (is (= exactly (at exactly))))
     (testing "past sixty, the first sixty are kept and the cut is marked"
       (is (= (str (subs longer 0 60) "…") (at longer))))))
+
+(deftest an-equivalent-mutant-is-discharged-by-naming-it
+  ;; 4np: an equivalent mutant re-reported at every done that touched its
+  ;; form, and the only way to quiet it was to rewrite the code into a shape
+  ;; the mutator does not touch, which is gaming the tool
+  (let [st  (store/ingest (store/empty-store) 'eq.core
+                          (str "(ns eq.core)\n\n"
+                               "(defn ^{:equivalent-mutants {\"= -> not=\" \"the filter only drops work; both arms return the same set\"}}"
+                               " f [x] x)\n\n(defn g [x] x)\n"))
+        rs  [{:form 'eq.core/f :status :survived
+              :survivors [{:mutation "= -> not=" :at "(= a b)"} {:mutation "and -> or" :at "(and a b)"}]}
+             {:form 'eq.core/g :status :survived
+              :survivors [{:mutation "= -> not=" :at "(= a b)"}]}
+             {:form 'eq.core/f2 :status :killed}]
+        out (into {} (map (juxt :form identity)) (mutate/discharge st rs))]
+    (is (= ["and -> or"] (mapv :mutation (:survivors (out 'eq.core/f)))) "only the named mutation is discharged")
+    (is (= :survived (:status (out 'eq.core/g))) "another form's marker discharges nothing here")
+    (let [all (first (mutate/discharge st [{:form 'eq.core/f :status :survived
+                                           :survivors [{:mutation "= -> not=" :at "(= a b)"}]}]))]
+      (is (= :discharged (:status all)) "every survivor named: nothing left to report"))
+    (is (re-find #":equivalent-mutants" (:teach (first (mutate/findings [(out 'eq.core/g)]))))
+        "and the finding names the way to say it")))

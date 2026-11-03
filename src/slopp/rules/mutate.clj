@@ -252,7 +252,8 @@
                              ") still pass with that fault in place, so they watch this code"
                              " without constraining it. Add an assertion that fails on the"
                              " fault; if no input can tell the two apart (an equivalent"
-                             " mutant), there is nothing to do.")})
+                             " mutant), say so on the form: ^{:equivalent-mutants"
+                             " {\"<the mutation as printed>\" \"why no input tells them apart\"}}.")})
           (for [{:keys [form error]} (:restore-failed by)]
             {:form  form
              :teach (str "the real form could not be re-loaded after a mutant (" error
@@ -281,3 +282,23 @@
     (db/record-measurement! conn "mutation" nil
                             (select-keys r [:fid :form :sig :status :mutants :killed
                                             :timeout :invalid :survivors]))))
+
+(defn ^:export discharge
+  "`results` with every survivor its form DISCHARGES removed: a form's name
+  may carry `^{:equivalent-mutants {\"<mutation>\" \"why no input tells them
+  apart\"}}`, keyed by the mutation's label as findings print it. A result
+  whose survivors are all discharged becomes `:discharged`. An equivalent
+  mutant is not a gap in the tests, and without this the only way to quiet
+  one was to rewrite the code into a shape the mutator does not touch."
+  [store results]
+  (mapv (fn [{:keys [form status survivors] :as r}]
+          (if-not (= :survived status)
+            r
+            (let [named (some-> (store/form-named store (symbol (namespace form)) (symbol (name form)))
+                                store/form-name-meta :equivalent-mutants)
+                  left  (vec (remove #(contains? named (:mutation %)) survivors))]
+              (cond
+                (empty? named) r
+                (empty? left)  (assoc r :status :discharged :survivors [])
+                :else          (assoc r :survivors left)))))
+        results))

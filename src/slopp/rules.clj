@@ -1056,7 +1056,7 @@
       []
       (let [rs (mutate/mutate! image st* ts)]
         (when db (mutate/record! db rs))
-        (mutate/findings (remove #(= :untested (:status %)) rs))))))
+        (mutate/findings (remove #(= :untested (:status %)) (mutate/discharge st* rs)))))))
 
 (defn ^:export red-first-rate
   "How often the tests written were watched FAIL before the episode that wrote

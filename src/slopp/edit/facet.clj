@@ -21,13 +21,13 @@
     [(get aliases (symbol q) (symbol q)) (symbol (name sym))]
     [ns-sym sym]))
 
-(defn ^:export facets
+(defn ^:export ^{:equivalent-mutants {"= → not=" "the keyword filter only narrows which forms are read; facet-sexpr then keeps exactly the facet defs either way"}} facets
   "Every facet `store` declares, as {[ns name] declaration-sexpr}. Found
   through the keyword index (forms that name `:facet/fields`), so a store with
   no facets pays one lookup."
   [store]
   (into {} (for [r (refs/keyword-refs store)
-                 :when (#{:facet/fields} (:kw r))
+                 :when (= :facet/fields (:kw r))
                  :let [sx (some-> (store/form-by-id store (:from-form r)) facet-sexpr)]
                  :when sx]
              [[(:from-ns r) (symbol (name (second sx)))] (last sx)])))
