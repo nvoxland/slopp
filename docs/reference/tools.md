@@ -250,7 +250,7 @@ Three things worth knowing:
 
 | Tool | What it does |
 |---|---|
-| `done {label}` | Close a unit of work. Episode-scoped; reports rather than refuses. |
+| `done {label untested?}` | Close a unit of work. Episode-scoped; reports rather than refuses, and lands only when the episode is green. A changed function needs a test that fails in the state before the change (`:unproven-change`); `untested {"ns/name" "why"}` waives that for a change that keeps behaviour, for that exact version of the function, and the reason is reported. |
 | `full_check` | The whole store: every namespace linted, dead surface everywhere, both layering graphs (purity tiers and module rules), the rule catalog swept over every form, every test in every tier. `affected: true` is the middle gear. `:rules` is the only whole-store rule answer there is — a `done`-grain rule sees only what an episode changed, so turning a rule on never checks the code already there; `:not-swept` names the rules a whole-store run cannot ask. Carries `:app {:behind n}` when a managed app server is up — how far the SERVED image lags the store it just called green. |
 | `commit_point {label}` | Record a commit point. Green-gated; `force: true` records a red honestly. `target` marks an earlier spot. |
 | `test_run` | Spot-check specific tests. `{external true}` for the external tier, `{all true}` for the whole in-image suite. |

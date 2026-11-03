@@ -124,6 +124,21 @@ elsewhere without moving (`help {topic "threads"}`).
   red proves nothing — `done` flags it (`assertions-never-red`). When the
   test is a QUESTION — you don't know what the code does — `explore
   {op check}` it first: the red is the answer, and nothing lands.
+- **Every function you change needs a test that fails without the change.**
+  `done` checks it, so write code and tests in whatever order helps, spikes
+  included: it runs its own red/green. It rebuilds the state before your work
+  (every function changed since the last LANDED done goes back to its old
+  version together, and a new function becomes a stub that throws), runs the
+  tests that cover them, then puts your code back. A function none of whose
+  tests failed in that state, or that no in-image test runs, does not land
+  (`:unproven-change`), and a later done does not get past it. Docstring edits
+  and renames are not checked. Two exits, both visible in review: for a change
+  that keeps behaviour (a refactor), `done {untested {"ns/name" "why"}}`, which
+  covers that exact version until you edit it again; for a function no in-image
+  test can watch, `^{:untested-ok "why"}` on its name. A function only
+  `^:external` tests reach is reported, not held. A pull skips this for what
+  commits slopp stamped as passing brought, because they proved it where they
+  were written.
 - **Assert the behaviour, not the fixture.** A repro can be too minimal; a
   test whose expected value was copied from the actual value is not a test.
 - **A test that runs your code must also fail when the code is wrong.**

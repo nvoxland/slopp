@@ -455,8 +455,10 @@ The main `slopp` skill has the mechanics; these are the shapes worth writing.
 - **Write the failing reproduction test first.** Of the test shapes measured on
   agents, it has the strongest effect on correctness; a regression test written
   after the fix adds little. Mechanics: `change {tests ...}` and `:red-first`.
-  **Advisory today:** `done` flags `assertions-never-red` when a test was never
-  seen failing.
+  **Enforced:** `done` holds the landing when a changed function has no test
+  that fails in the state before the change (`:unproven-change`); the order you
+  wrote them in does not matter. **Advisory:** `assertions-never-red` when a test
+  gained assertions that were never seen failing.
 - **One property and one example per behaviour.** They catch different bugs (a
   published study: about 81% detection combined, about 69% each alone). For a
   `:pure` boundary fn with a `:=>` malli schema, the generative check at `done`
@@ -526,6 +528,7 @@ cover, so drifting either way turns the suite red.
 | Return data over a bare `throw` at a boundary | **Advisory** — `done` flags a module-external fn throwing a freshly-constructed non-`ex-info` exception (`:bare-throw`) |
 | No ambient global mutable state | **Advisory** — `done` flags a global `(def _ (atom/ref/agent …))` (`:ambient-state`) |
 | `?` / `*earmuffs*` predicate / dynamic-var naming | Judgment (no gate yet) |
+| A changed function has a test that fails without the change | **Yes** — `done` holds the landing (`:unproven-change`); exits: `done {untested {"ns/name" "why"}}` for a refactor, `^{:untested-ok "why"}` for a function no in-image test can watch |
 | Failing test seen red before green | **Advisory** — `done` flags `assertions-never-red` |
 | A test grading your change is not yours to edit | **Yes** — the write is refused; `flag_test` records the objection |
 | Tests fail when the code is wrong | **Advisory** — `done` mutation-tests changed functions (`:mutants-survived`, about 10s budget; `verify {op mutate}` for what it did not reach) |

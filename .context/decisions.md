@@ -8093,6 +8093,80 @@ elsewhere` line naming forms both threads hold, each (thread, form) pair said
 once per session. Measure before building the hold: how often the line
 fires on real parallel work.
 
+## D-red-proof (2026-11-03, user-directed) — a changed function lands only with a test that fails without the change, or a stated reason it needs none
+
+**Decision.** `done` holds the landing (an `:error` done rule,
+`:unproven-change`) when a production function changed in the episode has no
+PROOF. Proof is checked, not trusted to the order the agent wrote things in:
+the done loads each changed `defn`'s source from the last done into the image
+(the mutation-testing loop, with the old version as the one "mutant"), runs
+the in-image tests the trace map saw run it, and restores the current
+version. A test that fails against the old version is the proof. A new
+function needs a test that runs it. A change that touches only the docstring
+or the name is not a behaviour change and is skipped. Two exits exist and both
+are visible in review: `^{:untested-ok "why"}` on a function that no
+in-image test can watch, and a per-call waiver naming the forms whose change
+preserves behaviour (a refactor). What cannot be proven in the image (only
+`^:external` tests cover it, the old version no longer loads, the budget ran
+out) is an `:info` row, never a hold.
+
+**Why.** The research ranks a test that fails without the fix as the
+strongest single oracle (reproduction tests +5.0 against regression tests
++1.33 in Agentless; TENET +9.49), and "the whole suite is green" as weak
+evidence. It measured nothing about writing the test FIRST against writing it
+after, so the order is not the thing to enforce; the red against the old code
+is. Checks the agent cannot argue with work and advice does not; the
+history ablation showed it again on 2026-11-03, where Haiku read a recorded
+rule and shipped against it. Today a `change` whose tests never went red is
+only a note, and a fix written before its test is checked by nothing.
+Sub-threads holding only the tests were considered and not chosen: a child
+thread forks from its parent's head, so it would see the fix, and a sibling
+needs its own image. The old source is already on the done value as
+`:baselines`.
+
+**Cost.** This moves `done` off "reports, never refuses" for one rule, as
+`bare-throw` and `direct-http` already did. The risk is the one mutation
+testing met: a rule that fires on every untested function turns dones into
+noise. The exits are the answer, and the rule is measured on this store's own
+dones after it ships.
+
+**Built (slopp-9g1, 2026-11-03).** `mutate/prove!` and `rules/red-proof-check!`,
+registered as `:unproven-change`; `done {untested {...}}` is the waiver,
+`^{:untested-ok "why"}` the marker.
+
+**Revised the same day, with the user: from scratch, and one red state.** Slopp
+is for code written from scratch, so a new function with no test holds too, and
+imports of untested code are not a case to design for. Test fixtures must not
+drive the rule: a fixture whose subject is something else dials it off
+(`config_file rules unproven-change off`, 43 of them). The first version swapped
+one function at a time; it now rebuilds one state, the user's "sub-threads"
+idea done internally. Every changed function goes back together, a new function
+is a stub that throws, a changed `def` goes back too, and the covering tests run
+once. Real threads were not needed, and that shape fixes what one at a time
+could not: a new function could not go red, and a fix spread over two functions
+passed with either half.
+
+**What testing it found, all fixed:**
+- Measuring from the last done let a HELD done pass the next one, because the
+  held function looked unchanged. It is measured from the last LANDED done.
+- `done!` compressed a repeated finding into a count before deciding status, so
+  ANY `:error` rule stopped holding on the second done, and the agent lost the
+  name of what was wrong. A row that holds is never compressed.
+- A waiver is stored with a hash of the version it covered, so a later done on
+  that version needs no second one, and any further edit ends it.
+
+**Pulls.** A pull whose incoming commits all carry `Slopp-Commit:` and none
+`Slopp-Status: red` (`git/proven-range?`) skips the proof for forms whose text
+is exactly what those commits brought, so a local edit beside the pull is still
+judged. A stamp is a statement by the producer, not a signature. A pull still
+runs the suite.
+
+**Known limits.** When in-image tests run a function but only an `^:external`
+test proves its change, the done holds, and the exit is a waiver naming that
+test. A fresh clone has no coverage until its first suite run, so its first pull
+reports `:info` rather than judging. The `change {done ...}` close does not take
+the waiver yet; `done` does.
+
 ## D-deps-allow (2026-11-02) — a new dependency needs the human's word
 
 **Decision.** The `deps_add` tool refuses a library the store does not already

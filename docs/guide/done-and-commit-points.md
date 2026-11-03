@@ -147,7 +147,24 @@ episode without paying for the entire store.
 ## A green has to be earned by tests that would fail
 
 A passing test only counts if it would have failed on wrong code. `done`
-checks that in three ways.
+checks that in four ways.
+
+**It puts the old code back.** `done` runs its own red/green loop. It rebuilds
+the state before the work: every function changed since the last landed done
+goes back to its old version together, and a new function becomes a stub that
+throws. The tests that cover them run once, then the real code is restored. For
+each function, at least one of its tests has to fail in that state: that is the
+evidence the change was needed. If none fails, or no test runs the function, the
+done does not land, and `:unproven-change` names the function; a later done does
+not get past it. The agent can write code and tests in any order, spikes
+included. Going back together matters: a fix spread over two functions passes
+with either half alone. Docstring edits and renames are not checked. A refactor
+that keeps behaviour is waived on the done call, `done {untested {"ns/name"
+"why"}}`, for that exact version, and a function no in-image test can watch
+carries `^{:untested-ok "why"}`. Both reasons show in review. A function that
+only `^:external` tests reach is reported but not held, because the image cannot
+run those tests. A pull skips the check for what its incoming commits brought
+when slopp stamped all of them as passing.
 
 **It breaks the code on purpose.** Each function the episode changed gets up
 to five small faults -- `<` becomes `<=`, `and` becomes `or`, `10` becomes
