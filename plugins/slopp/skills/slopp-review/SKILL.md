@@ -43,6 +43,11 @@ conclusions, so the review reasons about findings, not source dumps.
    `verify {op mutate}` runs the pass over what earlier dones did not reach.
    Start at the top of the risk ranking, not the top of a file.
 
+   A row with `:escapes` (flag `:escape`) uses an escape hatch: the sorted
+   markers it carries (`:unsafe`, `:adapter`, `:reveals`, `:weakening-ok`, ...).
+   Each adds to `:risk`; `:unsafe` and `:reveals` add the most. Read the marker's
+   stated why first, and ask whether the rule it waives could simply be met.
+
    **Read `:evidence` on the row, not just the flags.** A quiet row is not one
    fact, it is four, and the row names which:
 
