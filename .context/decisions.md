@@ -8028,8 +8028,8 @@ declaration map: `:facet/fields` (malli field schemas), `:facet/checks`
 (pure check vars), `:facet/claims`, `:facet/views`, and `:secret` fields. A
 value is data + facts + an access policy. The facts are a seal: an HMAC over
 the content hash, the facet id and the facet version, with a key random per
-image. The version folds in the check fns' form versions, so editing a check
-body stales live seals.
+image. The version folds in the identity of each check fn its vars hold
+now, so re-evaluating a check body stales live seals with no restart.
 
 Two holders ship. **Raw** (only `parse` opens it) is what a port delivers.
 **Secret** is self-redacting (`#secret ns/key`); only a `:reveals` form opens
@@ -8119,8 +8119,11 @@ reads back unparsed); inline validation inside the region.
   private mutable field opened only with the namespace's private token;
   HMAC-SHA256 seal over a canonical text of the value (map and set order
   normalised, secrets by content). Ships with every store (the `"_"`
-  family). Stated limits of this cut: the version is a hash of the
-  declaration until rendering stamps it; a nested facet contributes its
+  family). The version is the declaration's hash plus the identity of each
+  check and claim fn object (commit point d8e196e817f8c). The plan had
+  rendering stamp form versions onto the def; that would put stamps into
+  rendered source and the git projection, and a seal never leaves its image,
+  so in-image identity is enough. Stated limits of this cut: a nested facet contributes its
   shape, not its checks; checks that declare `:sources` are not run by
   `parse`; reloading `slopp.facet` itself makes a new key, so every live
   seal goes stale.
