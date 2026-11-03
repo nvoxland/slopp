@@ -353,6 +353,15 @@
   gain."
   #{"off" "advisory" "error" "refuse"})
 
+(def ^:export fixed-catalog
+  "The prose for the FIXED rules (`slopp.rules/fixed-rules`): on for every
+  store at one severity, listed by `query_rules` so the catalog a reader sees
+  is complete, and kept OUT of `rule-catalog` because every row there is a
+  legal dial and these are not."
+  [{:rule :dialect :grain :form :dialable false
+    :escape "^:unsafe on the one form, with what obligation the author takes on; a human reviews it. There is no dial"
+    :teach "eval, read-time eval (#=), loaders, resolvers, binding, alter-var-root and user macros are subtracted from the language: each makes the oracle's guarantees unsound for every form, not just the one using it"}])
+
 (defn ^:export config-refusal
   "The `rules` config write gate: a teaching error for a key naming no rule or a
   value outside [[rule-severities]] — nil when the write may land.
@@ -380,7 +389,7 @@
   stranger."
   [k v]
   (let [k     (str k)
-        names (map (comp name :rule) rule-catalog)]
+        names (map (comp name :rule) (concat rule-catalog fixed-catalog))]
     (cond
       (not (some #{k} names))
       (let [segs  (set (str/split k #"-"))
@@ -397,6 +406,11 @@
                (str " Did you mean " (str/join " / " close) "?"))
              " query_rules lists every rule with its grain and effective"
              " severity."))
+
+      (some #(= k (name (:rule %))) fixed-catalog)
+      (str k " is not dialable: it is a fixed rule, on for every store, because"
+           " turning it off would make the other guarantees unsound. Its escape is"
+           " per form and reviewed by a human — query_rules names it.")
 
       (not (rule-severities (str v)))
       (str (str v) " is not a severity — a rules dial takes "

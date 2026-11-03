@@ -1582,3 +1582,10 @@
     (is (empty? (run (store/ingest (store/empty-store) 'rf.core "(ns rf.core)\n(defn f [] 1)\n")))
         "a store with no sink is not asked")
     (is (some #{:facet-claims-reach} (map :key rules/done-advisories)))))
+
+(deftest the-dialect-is-listed-and-cannot-be-dialed
+  (let [row (first (filter #(= :dialect (:rule %)) (rules/query-rules (atom {:store (store/empty-store)}))))]
+    (is (= :refuse (:severity row)) (pr-str row))
+    (is (false? (:dialable row))))
+  (is (re-find #"not dialable" (str (catalog/config-refusal "dialect" "off"))))
+  (is (nil? (catalog/config-refusal "bare-throw" "advisory")) "an ordinary rule still dials"))

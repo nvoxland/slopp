@@ -1737,34 +1737,6 @@
   (merge (gates/write-gate-severities)
          (into {} (map (juxt :key :severity)) done-advisories)))
 
-(defn ^:export query-rules
-  "The D9 enforcement catalog for THIS store: every rule with its grain, its
-   EFFECTIVE per-store severity (the `rules` config override else the rule's
-   DECLARED default), how to discharge it, and what it means. The one place to
-   see what's enforced and at what grade — dial any rule with `config_file {path
-   \"rules\" key <rule> value <severity>}` (`:off`/`:advisory`/`:error`/`:refuse`).
-
-   Lives HERE, beside the registries, rather than in `api.query`: the declared
-   default belongs to the code that ENFORCES each rule, and `api.query` is
-   `:pure` while this namespace is `:external` — a query that reports what a
-   shell owns cannot live in the core. `catalog/rule-rows` joins the prose to
-   `declared-severities`, so what this reports and what refuses a write cannot
-   disagree.
-
-   WRITE-gate (`:form`) severity is one of `:off` (skip), `:advisory` (warn-but-
-   proceed — the teaching rides the write result's `:advisories`), or `:refuse`
-   (block); `:error` has no write-gate meaning and reports as `:refuse`.
-   Done-grain rules keep the full `:off`/`:advisory`/`:error` range."
-  [session]
-  (let [st (:store @session)]
-    (mapv (fn [{:keys [rule grain severity] :as r}]
-            (let [eff (gates/rule-severity st rule severity)]
-              (assoc r :severity
-                     (if (= grain :form)
-                       (case eff (:off :advisory) eff :refuse)
-                       eff))))
-          (catalog/rule-rows (declared-severities)))))
-
 (defn ^:export sweep-plan
   "Which sweepable advisories will RUN over `st*`, and which will not with WHY:
   `{:swept [key …] :not-swept [{:rule :why :severity} …]}`.
@@ -1885,3 +1857,46 @@
     (assoc plan
            :forms    (count ids)
            :findings (run-checks session st* ids run))))
+
+(def ^:export fixed-rules
+  "Rules that are ALWAYS on at a fixed severity: the third registry beside the
+  write gates and the done advisories, so `query_rules` can list a rule that
+  no dial governs instead of leaving it out. The dialect is the founding
+  member: it subtracts the features (eval, reader eval, loaders, user
+  macros) whose presence makes every other guarantee unsound, so turning it
+  off is not a project's call. Its one escape is per FORM and human-reviewed:
+  `^:unsafe`."
+  [{:key :dialect :severity :refuse}])
+
+(defn ^:export query-rules
+  "The D9 enforcement catalog for THIS store: every rule with its grain, its
+   EFFECTIVE per-store severity (the `rules` config override else the rule's
+   DECLARED default), how to discharge it, and what it means. The one place to
+   see what's enforced and at what grade — dial any rule with `config_file {path
+   \"rules\" key <rule> value <severity>}` (`:off`/`:advisory`/`:error`/`:refuse`).
+   The FIXED rules (`fixed-rules`, e.g. the dialect) close the list with
+   `:dialable false`: they are on for every store and no dial reaches them.
+
+   Lives HERE, beside the registries, rather than in `api.query`: the declared
+   default belongs to the code that ENFORCES each rule, and `api.query` is
+   `:pure` while this namespace is `:external` — a query that reports what a
+   shell owns cannot live in the core. `catalog/rule-rows` joins the prose to
+   `declared-severities`, so what this reports and what refuses a write cannot
+   disagree.
+
+   WRITE-gate (`:form`) severity is one of `:off` (skip), `:advisory` (warn-but-
+   proceed — the teaching rides the write result's `:advisories`), or `:refuse`
+   (block); `:error` has no write-gate meaning and reports as `:refuse`.
+   Done-grain rules keep the full `:off`/`:advisory`/`:error` range."
+  [session]
+  (let [st (:store @session)]
+    (into
+     (mapv (fn [{:keys [rule grain severity] :as r}]
+             (let [eff (gates/rule-severity st rule severity)]
+               (assoc r :severity
+                      (if (= grain :form)
+                        (case eff (:off :advisory) eff :refuse)
+                        eff))))
+           (catalog/rule-rows (declared-severities)))
+     (map (fn [r] (assoc r :severity (:severity (first (filter #(= (:rule r) (:key %)) fixed-rules))))))
+     catalog/fixed-catalog)))
