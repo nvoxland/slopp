@@ -793,3 +793,81 @@
                                  (db/unlanded-count conn line history/content-ops)
                                  0)}
               (nil? conn) (assoc :note "an ephemeral session has no journal: the id is yours to carry, but nothing here persists it")))))))
+
+^:reads (defn- thread-forms
+  "The forms thread `line` has changed and not landed, as sorted `ns/name`
+  symbols named by store `st`. Copies a rebase replayed in (`:merged-from`)
+  are landed work and stay out; a form `st` does not hold has no name here.
+  A thread whose head is still its base has written nothing and is answered
+  without walking its journal, which is most open threads at rest."
+  [conn st line]
+  (if (= (db/line-head conn line) (db/line-base conn line))
+    []
+    (->> (db/unlanded-deltas conn line)
+         (remove :merged-from)
+         store/suffix-touched
+         (keep (fn [fid]
+                 (when-let [e (store/form-by-id st fid)]
+                   (symbol (str (store/ns-of-form-id st fid))
+                           (str (or (:name e) (:id e)))))))
+         sort
+         vec)))
+
+^:reads (defn ^:export others-at-work
+  "The forms OTHER open threads on this session's branch have changed and not
+  landed: `[{:thread <id a caller passes> :held <a live process has it>
+  :idle-ms n :forms [ns/name ...]}]`, most recently used first. Empty when
+  nobody else holds work, and for an ephemeral session.
+
+  This is the parallel-work WARNING. Threads already make concurrent writes
+  safe: a second done on the same form rebases and reports the conflict.
+  What they cannot catch is a decision conflict, where two agents each land a
+  sound green change and the later reverses the earlier's reason. Saying who
+  else is changing what, before the overlap, is the cheapest answer, and it
+  refuses nothing. Nothing new is stored: each thread's own un-landed deltas
+  are the record ([[thread-forms]]). A form the other thread CREATED is not
+  listed, since nothing here can overlap it yet."
+  [session]
+  (if-let [conn (:db @session)]
+    (let [mine (:line @session)
+          st   (:store @session)
+          now  (System/currentTimeMillis)]
+      (vec (for [t (db/open-threads conn (engine/session-branch-line session))
+                 :when (not= mine (:id t))
+                 :let [forms (thread-forms conn st (:id t))]
+                 :when (seq forms)]
+             {:thread  (:agent t)
+              :held    (db/process-live? (:owner-pid t) (:owner-started t))
+              :idle-ms (- now (or (:used-at t) now))
+              :forms   forms})))
+    []))
+
+(defn ^:export overlap-note!
+  "A one-line warning naming the forms this session's thread and another open
+  thread have BOTH changed and not landed, or nil. Each (thread, form) pair is
+  said once per session: the pairs already said are kept on the session, so a
+  later write that adds no new overlap says nothing. A warning repeated on
+  every write is one the reader learns to skip.
+
+  Nothing is refused. Both changes may be right; the point is that the two
+  agents learn of each other before both land and the later one quietly
+  reverses the earlier one's reason."
+  [session]
+  (when-let [conn (:db @session)]
+    (when-let [mine (:line @session)]
+      (let [held (set (thread-forms conn (:store @session) mine))
+            seen (::overlaps-said @session #{})
+            new  (when (seq held)
+                   (for [{:keys [thread forms] :as o} (others-at-work session)
+                         :let [both (vec (remove #(seen [thread %]) (filter held forms)))]
+                         :when (seq both)]
+                     (assoc o :both both)))]
+        (when (seq new)
+          (swap! session update ::overlaps-said (fnil into #{})
+                 (for [{:keys [thread both]} new f both] [thread f]))
+          (str "also being changed elsewhere, not landed: "
+               (str/join "; " (for [{:keys [thread both held]} new]
+                                (str (str/join ", " both) " by thread " thread
+                                     (if held " (live)" " (idle)"))))
+               ". Both changes stand and nothing is refused; check that the two"
+               " do not decide different things (thread_list shows who is working)."))))))

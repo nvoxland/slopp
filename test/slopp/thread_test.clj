@@ -19,7 +19,7 @@
             [slopp.ops.engine :as engine]
             [slopp.ops.external :as external]
             [slopp.store.db :as db]
-            [slopp.store.render :as store.render] [next.jdbc :as jdbc] [slopp.store :as store] [slopp.read.history :as history]))
+            [slopp.store.render :as store.render] [next.jdbc :as jdbc] [slopp.store :as store] [slopp.read.history :as history] [clojure.string :as str]))
 
 (def ^:private seed "(ns th.core)\n\n(defn f [x] (inc x))\n")
 
@@ -777,5 +777,70 @@
             (is (= line (engine/session-line a)) "the session keeps its line")
             (is (not= (db/line-base conn line) (db/line-head conn trunk))
                 "and the line keeps its base rather than following the branch"))
+          (finally (ops/close! a) (ops/close! b))))
+      (finally (clojure.java.shell/sh "rm" "-rf" dir)))))
+
+(deftest ^:external others-at-work-names-the-forms-another-thread-holds
+  ;; The parallel-work warning (D-holds). Threads already make concurrent
+  ;; WRITES safe; what they cannot see is two agents deciding different
+  ;; things about the same form. The first answer is to say early who else
+  ;; is changing what, without refusing anything.
+  (let [dir (str (System/getProperty "java.io.tmpdir") "/slopp-others-" (System/nanoTime))]
+    (try
+      (let [setup (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "setup"})]
+        (try
+          (ops/ingest! setup 'th.core "(ns th.core)\n\n(defn f [x] (inc x))\n\n(defn g [x] (dec x))\n" :agent "setup")
+          (is (= "main" (:landed (branch/land-thread! setup))) "fixture: the seed reached main")
+          (finally (ops/close! setup))))
+      (let [a (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-a"})
+            b (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-b"})]
+        (try
+          (is (= [] (branch/others-at-work a)) "nobody else has written yet: nothing to say")
+          (ops/edit-replace! a 'th.core 'f "(defn f [x] (+ x 10))" :prompt "a" :agent "agent-a")
+          (ops/edit-replace! b 'th.core 'g "(defn g [x] (- x 20))" :prompt "b" :agent "agent-b")
+          (testing "each session sees the OTHER thread's forms, never its own"
+            (is (= [{:thread "agent-b" :forms '[th.core/g]}]
+                   (mapv #(select-keys % [:thread :forms]) (branch/others-at-work a))))
+            (is (= [{:thread "agent-a" :forms '[th.core/f]}]
+                   (mapv #(select-keys % [:thread :forms]) (branch/others-at-work b)))))
+          (testing "the brief carries it, so a session is told when it starts"
+            (let [brief (ops/session-brief a)]
+              (is (= '[th.core/g] (:forms (first (:others-at-work brief)))))
+              (is (str/includes? (str (:others-at-work-note brief)) "not landed"))))
+          (testing "a thread that landed leaves the list"
+            (branch/land-thread! b)
+            (is (= [] (branch/others-at-work a)))
+            (is (nil? (:others-at-work (ops/session-brief a))) "and the brief says nothing"))
+          (finally (ops/close! a) (ops/close! b))))
+      (finally (clojure.java.shell/sh "rm" "-rf" dir)))))
+
+(deftest ^:external an-overlap-with-another-thread-is-said-once
+  ;; The write-time half of the parallel-work warning (D-holds): when a write
+  ;; leaves my thread and another open thread both holding un-landed changes
+  ;; to one form, say so, naming the other thread. Said ONCE per overlap: a
+  ;; warning repeated on every later write is one the reader learns to skip.
+  (let [dir (str (System/getProperty "java.io.tmpdir") "/slopp-overlap-" (System/nanoTime))]
+    (try
+      (let [setup (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "setup"})]
+        (try
+          (ops/ingest! setup 'th.core "(ns th.core)\n\n(defn f [x] (inc x))\n\n(defn g [x] (dec x))\n" :agent "setup")
+          (is (= "main" (:landed (branch/land-thread! setup))) "fixture: the seed reached main")
+          (finally (ops/close! setup))))
+      (let [a (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-a"})
+            b (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-b"})]
+        (try
+          (ops/edit-replace! a 'th.core 'f "(defn f [x] (+ x 10))" :prompt "a" :agent "agent-a")
+          (ops/edit-replace! b 'th.core 'g "(defn g [x] (- x 20))" :prompt "b" :agent "agent-b")
+          (testing "disjoint work: nothing to say"
+            (is (nil? (branch/overlap-note! b))))
+          (ops/edit-replace! b 'th.core 'f "(defn f [x] (+ x 30))" :prompt "b2" :agent "agent-b")
+          (testing "both threads now hold f: the note names it and the other thread"
+            (let [note (branch/overlap-note! b)]
+              (is (string? note))
+              (is (str/includes? (str note) "th.core/f"))
+              (is (str/includes? (str note) "agent-a"))
+              (is (not (str/includes? (str note) "th.core/g")) "g is b's alone")))
+          (testing "and it is said once"
+            (is (nil? (branch/overlap-note! b))))
           (finally (ops/close! a) (ops/close! b))))
       (finally (clojure.java.shell/sh "rm" "-rf" dir)))))

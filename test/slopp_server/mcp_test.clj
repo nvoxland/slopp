@@ -5244,3 +5244,31 @@
         (is (< store-ms 400) (str "a store read does not wait: " store-ms "ms"))
         (is (>= image-ms 300) (str "an image read waits its turn: " image-ms "ms")))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-write-that-overlaps-another-thread-says-so-once
+  ;; The write-time half of the parallel-work warning (D-holds), at the door
+  ;; every tool answer passes through: a leading line, like the "since your
+  ;; last call" note, because a key buried in a write result is one nobody
+  ;; reads. Said once per overlap, and never a refusal.
+  (let [dir (str (System/getProperty "java.io.tmpdir") "/slopp-ovl-" (System/nanoTime))]
+    (try
+      (let [setup (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "setup"})]
+        (try
+          (ops/ingest! setup 'ov.core "(ns ov.core)\n\n(defn ^:unused-ok f \"F.\" [x] (inc x))\n" :agent "setup")
+          (is (= "main" (:landed (branch/land-thread! setup))) "fixture: the seed reached main")
+          (finally (ops/close! setup))))
+      (let [a (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-a"})
+            b (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "agent-b"})
+            w (fn [s body] (call! s "change" {:prompt "ovl" :impl [{:ns "ov.core" :name "f" :source body}]}))]
+        (try
+          (is (not (str/includes? (w a "(defn ^:unused-ok f \"F.\" [x] (+ x 1))") "also being changed elsewhere"))
+              "the first writer overlaps nobody")
+          (let [r (w b "(defn ^:unused-ok f \"F.\" [x] (+ x 2))")]
+            (is (re-find #"(?m)^;; also being changed elsewhere" r) r)
+            (is (str/includes? r "ov.core/f"))
+            (is (str/includes? r "agent-a"))
+            (is (str/includes? r ":status :green") "a warning, not a refusal: the write stands"))
+          (is (not (str/includes? (w b "(defn ^:unused-ok f \"F.\" [x] (+ x 3))") "also being changed elsewhere"))
+              "said once")
+          (finally (ops/close! a) (ops/close! b))))
+      (finally (sh/sh "rm" "-rf" dir)))))

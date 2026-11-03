@@ -2202,6 +2202,21 @@
   "Every handler-map entry (Q4) — call-tool checks here first."
   (merge env-handlers! file-handlers! sync-handlers! change-handlers!))
 
+(defn- with-overlap-note!
+  "Run `call` (a no-argument fn returning a tool result) and, when it MOVED
+  this session's head, lead the answer with the parallel-work warning: forms
+  this thread and another open thread both hold un-landed
+  (`branch/overlap-note!`, which says each overlap once). Gated on the head
+  so a read pays nothing; asking the journal rather than a list of write
+  tool names, because such a list has missed a write tool before."
+  [session call]
+  (let [h0 (:head (:store @session))
+        r  (call)]
+    (if-let [note (when (not= h0 (:head (:store @session)))
+                    (try (branch/overlap-note! session) (catch Exception _ nil)))]
+      (update-in r [:content 0 :text] #(str ";; " note "\n" %))
+      r)))
+
 (defn- call-op!
   "THE dispatch seam every route crosses — family dispatch, the bare `--call`
   door, and explore's recursive entries — so it is where a shape is
@@ -2285,7 +2300,7 @@
                           ;; that shape a response know those, and none of them
                           ;; is on the path back to here.
                           *response-facts* facts]
-                  (try (call-tool! session params)
+                  (try (with-overlap-note! session #(call-tool! session params))
                        (catch Exception e
                          (assoc (text! (str "error: " (ex-message e)))
                                 :isError true))))
