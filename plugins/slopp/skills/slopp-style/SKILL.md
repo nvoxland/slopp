@@ -465,7 +465,10 @@ The main `slopp` skill has the mechanics; these are the shapes worth writing.
 - **A test that never fails when the code is wrong is coverage, not a check.**
   **Advisory:** `done` mutation-tests the functions you changed and reports
   each surviving fault (`:mutants-survived`). Kill a survivor with an
-  assertion that fails on it; an equivalent mutant needs nothing.
+  assertion that fails on it. An equivalent mutant (no input tells it from
+  the real code) is said once, on the form: `^{:equivalent-mutants {"= → not="
+  "why no input tells them apart"}}`, keyed by the mutation as `done` prints
+  it. Never rewrite the code into a shape the mutator skips to quiet one.
 - **Literal-only inputs let an implementation special-case the test.** Generated
   inputs are the one measured defence. Judgment.
 - **Assert behaviour through the public boundary.** Do not mock the unit under
