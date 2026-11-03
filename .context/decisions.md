@@ -8127,6 +8127,61 @@ reads back unparsed); inline validation inside the region.
   shape, not its checks; checks that declare `:sources` are not run by
   `parse`; reloading `slopp.facet` itself makes a new key, so every live
   seal goes stale.
+- *Endorsement* (d190c06834b5f): `endorsement-refusal` covers a `:facet`
+  def as it covers a `deftest`; replacing, deleting or newly endorsing one
+  needs the human's ask to name it.
+- *Rule 3, facet integrity* (d0ce211595bf3): write gates
+  `facet-declaration` (checks and claims are `#'var`s to forms that exist,
+  with a `:doc`; views name declared fields; one owner per key, a test
+  namespace's fixture facets compared only within that namespace) and
+  `facet-by-var` (production; `parse`/`project`/`parsed?` take `#'Facet`, or
+  a local, never a facet def's value or a computed map). Done checks
+  `:facet-integrity` (`:error`: the declaration gate over every facet, so two
+  threads landing owners of one key go red at land; and each check without
+  `:sources` must be `analyzer-pure?`) and `:facet-fields` (`:error`, in the
+  image: malli accepts the fields). Known gap: the analyzer counts `println`
+  and clock reads through Java interop as pure.
+- *Rules 1, 2, 4* (df4a9105036f0): `facet-key-ownership` (advisory,
+  production): in an `:external` namespace an owned key is used only in a
+  form that parses or projects that facet, in a route whose `:rest/request`
+  names it, or in the facet's own namespace; only PRODUCTION facets own keys,
+  so slopp's own store (test fixtures only) is unaffected. Read and literal
+  construction are one rule, so the keyword index did not need a third
+  `via`. `facet-reveal` (refuse, production): `reveal` only in a
+  `^{:reveals "why"}` form; `:reveals` is a registered escape marker.
+  `facet-adapter-raw` (advisory): an `:adapter` whose port word is `db`,
+  `jdbc`, `sql`, `file` or `queue` calls `facet/raw`.
+- *The port* (df4a9105036f0, dd6d826f138c1): a route declares
+  `:rest/request #'Order` (by var: route metadata is evaluated, so a bare
+  symbol would hand the port the declaration's value, which `parse` refuses)
+  and `:rest/response #'Order :facet/view :public`. `rest.contract/decode-request`
+  decodes each carrier, then parses the merge: the handler gets the parsed
+  value under `:body`, a failed check is a 400 naming its `:doc`.
+  `rest.contract/shape-response`, reached by the dispatcher through the
+  `:rest/shape-response` key so `slopp.http` never learns what a facet is,
+  projects the body to the view and redacts secrets; a body the handler broke
+  is a logged generic 500. The generated client inlines the schema from the
+  declaration's source (`edit.facet/schema-form`): all fields for a request,
+  the view for a response. Not done: requiring a contract on GET routes
+  (advisory planned), and a facet over a COLLECTION body (a list of orders).
+- *Done rules* (db109f6db08da): `:facet-weakening` (`:error`, against the
+  last done's source of each changed facet def: a check removed, a check
+  moved out of `parse` by declaring `:sources`, a field dropped, a secret
+  made plain, a field made optional, a view widened; discharged by
+  `^{:weakening-ok "why"}`); `:undeclared-travel` (advisory, only in a store
+  with a production facet, marker vocabulary excluded); and
+  `:facet-key-ownership-sweep` (rule 1 asked again, so a form written before
+  its key's facet existed is found).
+- *The oracle* (d25282f5a067a): a pure `:=>` fn whose output schema is a
+  facet's fields is checked through a wrapper that parses each generated
+  call's output with that facet; the invariant is asserted only when every
+  facet-shaped input also parsed, so an invalid generated input is never
+  blamed on the fn. NOT built: generating inputs THROUGH a facet. Random
+  generation filtered by a check such as "the total is the sum of the lines"
+  almost never passes, so it needs a generator the facet provides.
+- *Shipping*: `slopp.facet` vendors with the `"_"` family, which the jar
+  reads from its own `framework-files.edn`; a new shipped namespace needs a
+  rebuilt jar and a process restart before a built app carries it.
 
 ## D-behaviour-axis amended (2026-11-02) — trust before overview
 
