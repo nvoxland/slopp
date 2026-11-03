@@ -1924,7 +1924,9 @@
         http-fs (subtree "slopp/http.clj" "http")
         rest-fs (subtree "slopp/rest.clj" "rest")
         common  {"slopp/lang.cljc"  (src-of "slopp/lang.cljc")
-                 "slopp/cache.clj"  (src-of "slopp/cache.clj")}
+                 "slopp/cache.clj"  (src-of "slopp/cache.clj")
+                 ;; the rest port parses a facet-typed request through it
+                 "slopp/facet.clj"  (src-of "slopp/facet.clj")}
         files   {"_" common "http" http-fs "rest" rest-fs}
         deps    '{"cli"  {metosin/malli {:mvn/version "0.20.1"}}
                   "rest" {metosin/malli {:mvn/version "0.20.1"}}
