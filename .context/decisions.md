@@ -8021,6 +8021,28 @@ comprehend: 86%) as a record with visible absence, not a gate. The claim
 answers the parallel-work finding: decision conflict, not merge conflict, is
 what breaks parallel agents (16 agents overwriting one fix).
 
+## D-review-marker (2026-11-03) — a human's review of a commit point is a marker only the human's door writes
+
+**Decision.** A commit point is immutable, so "a human reviewed this" is a
+new no-content marker op, `:review`, registered in `store.fields/markers`
+(an unregistered op makes `merge-logs` refuse): `{:op :review :target
+<commit-point delta id> :verdict :endorsed|:flagged :by <identity> :note "…"}`.
+It is written ONLY through an authenticated HTTP endpoint the change screen
+calls, with `:by` taken from the request's resolved `:http/identity`. No MCP
+or CLI tool writes one: the record's whole value is that a person, not an
+agent, looked. The timeline carries each commit point's latest review and
+lists unreviewed milestones first. A record with visible absence, never a
+gate: nothing refuses an unreviewed commit point.
+
+**Why.** Delegation without comprehension measured 39% against 86% for
+generate-then-comprehend (RCT). The reviewer screens exist; what was missing
+is a durable answer to "did anyone read this", which a reviewer can scan for
+the gaps.
+
+**Not decided here.** Episode claims on forms (slopp-5u7.5) need a record
+SHARED across threads, which a per-thread marker is not; that is its own
+decision.
+
 ## D-deps-allow (2026-11-02) — a new dependency needs the human's word
 
 **Decision.** The `deps_add` tool refuses a library the store does not already
