@@ -19,7 +19,7 @@
   a rename rebuilds the image, so it needs a real session."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.store :as store]
-            [slopp.ops :as ops] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history] [clojure.edn] [clojure.string :as str] [slopp.edit.refactor :as refactor])
+            [slopp.ops :as ops] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history] [clojure.edn] [clojure.string :as str] [slopp.edit.refactor :as refactor] [slopp-server.api.model :as model] [slopp.ops.branch :as branch])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
 
@@ -1310,4 +1310,48 @@
           (is (str/includes? src "one zone from") src))
         (testing "and the run says what it left, rather than reporting a clean sweep"
           (is (some #{"zone"} (:not-swept r)) (pr-str (select-keys r [:not-swept :remaining])))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-rename-keeps-ONE-identity-through-history-prompts-merge-and-the-form-page
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'rid
+                   (str "(ns rid\n  (:require [clojure.test :refer [deftest is]]))\n"
+                        "(defn old-name [x] (* x 2))\n"
+                        "(defn caller [x] (+ 1 (old-name x)))\n"
+                        "(defn unrelated [x] (- x 1))\n"
+                        "(deftest caller-t (is (number? (caller 2))))\n"))
+      (ops/edit-replace! sess 'rid 'old-name "(defn old-name [x] (* x 3))"
+                         :prompt "triple it before the rename")
+      (let [id (:id (store/form-named (:store @sess) 'rid 'old-name))
+            r  (ops/rename! sess 'rid 'old-name 'new-name :prompt "clearer name")]
+        (is (some? id))
+        (is (nil? (:error r)))
+        (testing "the form id is unchanged under the new name"
+          (is (= id (:id (store/form-named (:store @sess) 'rid 'new-name))))
+          (is (nil? (store/form-named (:store @sess) 'rid 'old-name))))
+        (testing "form history under the NEW name still has the version written before"
+          (let [vs (history/query-form-history (ops/with-history sess) 'rid 'new-name)]
+            (is (some #(= "triple it before the rename" (:prompt %)) vs))))
+        (testing "the per-form prompt index keeps an ask under the same id"
+          (is (string? (get (store/prompt-by-form (:store @sess)) id))))
+        (testing "the form page model answers for the id with the new name"
+          (let [v (model/form-view sess id)]
+            (is (= id (:form-id v)))
+            (is (= "new-name" (:name v)))
+            (is (= "rid/new-name" (:form v)))))
+        (testing "a merge: branch edits the renamed form, main edits another, no conflict"
+          (is (= "feat" (:branch (branch/branch! sess "feat"))))
+          (ops/edit-replace! sess 'rid 'new-name "(defn new-name [x] (* x 4))"
+                             :prompt "quadruple on the branch")
+          (is (= "main" (:switched (branch/branch-switch! sess "main"))))
+          (ops/edit-replace! sess 'rid 'unrelated "(defn unrelated [x] (- x 2))"
+                             :prompt "unrelated edit on main")
+          (let [m (branch/branch-merge! sess "feat")
+                e (store/form-named (:store @sess) 'rid 'new-name)]
+            (is (nil? (:error m)))
+            (is (empty? (:conflicts m)))
+            (is (= id (:id e)))
+            (is (re-find #"\* x 4" (str (:node e))))
+            (is (re-find #"x 2" (str (:node (store/form-named (:store @sess) 'rid 'unrelated))))))))
       (finally (ops/close! sess)))))
