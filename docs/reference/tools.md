@@ -287,6 +287,8 @@ exist for the leftovers: work somebody started and nobody finished.
 | `branch_switch {name}` | Check out another branch; the live image follows. |
 | `branch_merge {name}` | Merge a branch into the current line. The branch survives. |
 | `branch_delete {name}` | Delete a branch (never the current one). |
+
+Other threads' un-landed work is also said without asking: `session_brief` carries `:others-at-work`, and a write that changes a form another open thread also holds leads its answer with an `;; also being changed elsewhere` line, once per overlap. It is a warning; nothing is refused.
 | `query_branches` | Branches with head deltas; marks the current one. |
 | `merge_from {dir}` | Merge a diverged **copy** of the project from another directory. |
 

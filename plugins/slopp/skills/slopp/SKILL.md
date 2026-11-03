@@ -218,6 +218,16 @@ calls on one session take turns (store-only reads do not), so a subagent on
 your session waits while you write; without its own thread its work and
 yours land together, unlabelled.
 
+A merge only catches two changes to the same TEXT. It does not catch two
+agents deciding different things about one form, where each lands green
+and the later one quietly reverses the earlier one's reason. So slopp
+says who else is at work: `session_brief` lists `:others-at-work` (other
+threads' un-landed forms), and a write that touches a form another open
+thread also holds leads its answer with `;; also being changed
+elsewhere …`, once per overlap. Nothing is refused. When you see it, read
+that form's recent asks (`query_history`) and make sure the two changes
+agree, or tell the user they conflict.
+
 ## When you need more
 
 `help {topic}` — `tools` (the families and every op), `web` (pages, routes, client code), `rest` (typed APIs),

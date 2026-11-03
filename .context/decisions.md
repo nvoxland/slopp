@@ -8055,6 +8055,44 @@ started with no `:http/auth-config`, so no request resolves an identity and
 every POST is a 401. Choosing how a person signs in to the local UI is open
 (slopp-nnt).
 
+## D-holds (2026-11-03, user-directed) — parallel work is WARNED first; a hold, when built, is a table row shared across threads
+
+**Decision.** The parallel-episode primitive (slopp-5u7.5) starts as a
+warning, not a refusal. `session_brief` and every form-changing write report
+the forms that OTHER open threads on this branch have changed and not landed,
+naming the thread and whether a live process holds it. Nothing is refused and
+nothing new is stored: the answer is read from the threads' own un-landed
+deltas. If the warning is hit often enough to justify a lock, the lock is a
+"hold": a row in a table outside every line (like `lines`' owner columns),
+written when an episode starts on a form and removed by its done or a
+thread drop. It is NOT a marker op, and it does not travel through merges.
+The word is "hold", because "claims" already means a route's authorization
+claims in facets.
+
+**Why.** Threads already make concurrent WRITES safe: a second done on the
+same form rebases and reports the conflict. What they do not catch is a
+DECISION conflict, where two agents each land a sound green change and the
+later one reverses the earlier one's reason. That is the failure the research
+names (16 agents overwriting one fix), but slopp has not observed it: parallel
+sessions on one store are rare and subagent threads only became usable with
+slopp-7jr. So the first step is the cheapest one that tells an agent early
+and can be measured. A marker op cannot carry it in either form: written to a
+thread it is invisible to every other thread until a done lands it, and that
+done is the moment it would be released.
+
+**Revises** D-review-marker (2026-11-02), which made `:claim` a marker op
+before threads existed. `:review` stays a marker op.
+
+**Built (warning half).** `slopp.ops.branch/others-at-work` reads every
+other open thread's un-landed forms (a thread whose head is its base is
+skipped without walking its journal); `session_brief` carries it as
+`:others-at-work`, capped at ten forms per thread. `slopp-server.mcp/handle!`
+wraps each call in `with-overlap-note!`: when the call moved the head,
+`branch/overlap-note!` leads the answer with one `;; also being changed
+elsewhere` line naming forms both threads hold, each (thread, form) pair said
+once per session. Measure before building the hold: how often the line
+fires on real parallel work.
+
 ## D-deps-allow (2026-11-02) — a new dependency needs the human's word
 
 **Decision.** The `deps_add` tool refuses a library the store does not already
