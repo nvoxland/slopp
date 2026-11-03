@@ -180,3 +180,20 @@
     (is (not-any? :source vs) "no whole sources")
     (is (= ["-  (inc x))" "+  (dec x))"] (:diff (second vs))) "only the lines that changed")
     (is (some #{"+  (inc x))"} (:diff (first vs))) "the first version is all added")))
+
+(deftest a-forms-history-can-show-only-the-versions-that-landed-green
+  ;; 5u7.2: per-edit history is noisy; a reader often wants only what held.
+  ;; Opt-in: revert and report read the full history.
+  (let [rep (fn [s src ask] (first (store/replace-node s 'hg.core 'f (p/parse-string src) :prompt ask)))
+        s0 (store/ingest (store/empty-store) 'hg.core "(ns hg.core)\n\n(defn f [x]\n  (inc x))\n" :prompt "one")
+        s0 (store/record-verification s0 'hg.core {:pass 1 :fail 0 :error 0})
+        s1 (store/record-verification (rep s0 "(defn f [x]\n  (dec x))" "two") 'hg.core {:pass 0 :fail 1 :error 0})
+        s2 (store/record-verification (rep s1 "(defn f [x]\n  (* 2 x))" "three") 'hg.core {:pass 1 :fail 0 :error 0})
+        sess (atom {:store s2})]
+    (is (= ["one" "two" "three"] (mapv :prompt (history/query-form-history sess 'hg.core 'f)))
+        "default stays the full history")
+    (is (= [:green :red :green] (mapv :status (history/query-form-history sess 'hg.core 'f))))
+    (is (= ["one" "three"] (mapv :prompt (history/query-form-history sess 'hg.core 'f :green true))))
+    (let [vs (history/query-form-history sess 'hg.core 'f :green true :diff true)]
+      (is (= ["one" "three"] (mapv :prompt vs)))
+      (is (= ["-  (inc x))" "+  (* 2 x))"] (:diff (second vs))) "diff is green to green"))))

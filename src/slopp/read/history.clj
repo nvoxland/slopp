@@ -1072,7 +1072,7 @@
   - `:effort true` — what the form COST to get green (`history/form-effort`):
     red→green cycles, distinct asks, recorded time, and how much of the life
     that time actually covers."
-  [session ns-sym nm & {:keys [format effort diff]}]
+  [session ns-sym nm & {:keys [format effort diff green]}]
   (let [st (with-log session)
         id (:id (store/form-named st ns-sym nm))]
     (when id
@@ -1103,9 +1103,11 @@
                                                  [:result :ms])))))]
         (cond
           effort (form-effort (symbol (str ns-sym) (str nm)) versions)
-          diff (compact-versions versions)
+          diff (compact-versions (if green (filterv #(= :green (:status %)) versions) versions))
           (= "text" (some-> format name))
-          (render-form-history-text (symbol (str ns-sym) (str nm)) versions)
+          (render-form-history-text (symbol (str ns-sym) (str nm))
+                                    (if green (filterv #(= :green (:status %)) versions) versions))
+          green (filterv #(= :green (:status %)) versions)
           :else versions)))))
 
 (defn ^:export latest-reviews

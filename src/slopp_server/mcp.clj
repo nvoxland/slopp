@@ -2819,7 +2819,8 @@
                                               (cond-> {:kind :form-history
                                                        :versions (history/query-form-history session (sym :ns) (sym :name)
                                                                                         :format (:format a)
-                                                                                        :diff (:diff a))}
+                                                                                        :diff (:diff a)
+ :green (:green a))}
                                                 ;; red evidence only with a durable db: no db is not 'never red'
                                                 (and fid (:db @session))
                                                 (assoc :reds (model/form-reds (:db @session) fid))))

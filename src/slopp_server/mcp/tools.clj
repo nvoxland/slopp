@@ -189,6 +189,7 @@
                                :effort {:type "boolean"}
                                :dead_ends {:type ["boolean" "string"]}
  :diff {:type "boolean" :description "with {ns name}: each version as its ask, verdict and CHANGED lines instead of its whole source — the cheap read mid-task"}
+ :green {:type "boolean" :description "with {ns name}: only the versions that landed green (opt-in; with diff true the diff is between consecutive green versions)"}
                                :format {:type "string" :enum ["edn" "text"]}}}}
    {:name "query_changes"
     :description "THE code-level change view — net per-form diffs (:was/:now) + red/green arc. Your open episode by default, or a span via :from/:to. :from takes NAMED ANCHORS as well as delta ids: \"start\" (the whole lifetime), \"last-commit\" (since the last commit-point), \"last-done\". This is what answers 'show me what changed, WITH the code' — reach for it instead of shelling out to git diff; format=text renders line diffs."
