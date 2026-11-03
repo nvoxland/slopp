@@ -399,6 +399,10 @@
   failure `framework-injection` describes as the framework arriving intact and
   failing inside itself.
 
+  - `slopp.facet` — the facet rules refuse a read of a key a facet owns until
+    the value goes through `slopp.facet/parse`, so every store that can declare
+    a facet must have the namespace that discharges the rule.
+
   THE derivation two readers consume: `build.clj` files these under `\"_\"`, and
   the leak guard permits a family namespace to reach them."
   '{slopp.lang         "slopp/lang.cljc"

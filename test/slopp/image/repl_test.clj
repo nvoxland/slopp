@@ -497,9 +497,11 @@
         "ordinary data still reads as data")))
 
 (deftest an-image-reads-with-read-eval-off
-  ;; The dialect gate refuses #= at write time; the image is the second line.
-  ;; The JVM property sets the reader's ROOT value at startup, so every thread
-  ;; nREPL later starts inherits it — a binding made inside an -e init would
+  ;; For DATA the image reads at runtime — a read-string inside an ^:unsafe
+  ;; boundary form, the nREPL reading what it is sent. Not for code: Clojure's
+  ;; loader turns read-eval back on for every file it loads, which is why the
+  ;; write gate is the defence there. The JVM property sets the ROOT value, so
+  ;; every thread nREPL starts inherits it — a binding made in an -e init would
   ;; not, because clojure.main runs both under its own thread bindings.
   (doseq [cmd [(vec (#'repl/default-cmd nil []))
                (vec (#'repl/default-cmd nil ["-Xms8m"]))]]

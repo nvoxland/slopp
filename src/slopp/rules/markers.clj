@@ -132,6 +132,10 @@
     ;; clojure.core/>, :uri excludes the query string). It already carries its
     ;; why by construction, which is why it asks for none.
     :asks nil :self-polices? false}
+   ;; a facet: the def holds a value's declaration (fields, checks, views),
+   ;; and the marker's VALUE says what that value is, so it asks for nothing
+   {:marker :facet        :kind :declaration :discharges nil :on :name
+    :asks nil :self-polices? false}
    {:marker :generated    :kind :internal :discharges nil     :on :name
     :asks nil :self-polices? false}
    {:marker :auto-declare :kind :internal :discharges nil     :on :form
