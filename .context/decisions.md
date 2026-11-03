@@ -8044,7 +8044,7 @@ SHARED across threads, which a per-thread marker is not; that is its own
 decision.
 
 **Built** (zrs.4, d5d5802d9db9f). `store/record-review`, `:review` in
-`fields/markers` and `travelling-markers`; `ops/review-commit!` refuses a bad
+`fields/markers` and `travelling-markers`; `slopp-server.review/review-commit!` (moved out of the agent-facing `slopp.ops` surface, d64809497e863) refuses a bad
 verdict, a missing `:by` or a target that is not a commit point; the endpoint
 `POST /api/projects/:slug/review` (`:http/auth :authenticated`, `:by` from
 `:http/sub`) lives in its own namespace, `slopp-server.review`, because the
