@@ -3559,3 +3559,14 @@ separators ("1,234.50"), and the easy fix (strip commas) breaks "12,50".
   up to two hours, and so does its scoring session for ten minutes. At the
   default cap of six, the first full batch was refused at every write and
   voided; the batched runner restarts the dev instance between batches.
+
+**Round 2, after slopp-8ge (same day, same seeds, prompt and model).** With a
+form's last ask on source reads, in the ask bundle, and as a leading line on a
+write that replaces a form an earlier ask shaped: constraint kept 10/10 in the
+history cell against 0/10 without history; the reason named 10/10 against
+0/10; the spec met 10/10 in both. The WRITE-TIME line did the work: all ten
+history agents first wrote the comma-stripping fix, met the earlier ask in
+that write's answer, and corrected before landing. Only three had also met it
+on a read. So recorded intent changes outcomes once it is delivered, and the
+moment that delivers it is the write that would undo it, not the read before.
+One task, one model, n=10: a strong signal, not yet a general result.
