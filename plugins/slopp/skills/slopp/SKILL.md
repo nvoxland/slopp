@@ -131,10 +131,14 @@ elsewhere without moving (`help {topic "threads"}`).
   five small ways (`<` → `<=`, `and` → `or`, `10` → `11`) and re-runs the
   tests that run it. `:mutants-survived` names each fault no test noticed and
   the expression it sits in — add an assertion that fails on it. A mutant no
-  input can tell apart from the original (an equivalent mutant) needs
-  nothing. `done` spends at most about 10s on this; what it did not reach is
-  listed `:unchecked`, and `verify {op mutate}` checks it later (`{ns X}`
-  checks a whole namespace).
+  input can tell apart from the original (an equivalent mutant) is
+  discharged on its form: `^{:equivalent-mutants {"<the mutation as printed>"
+  "why no input tells them apart"}}`. `done` spends at most about 10s on
+  this; what it did not reach is listed `:unchecked`, and `verify {op mutate}`
+  checks it later (`{ns X}` checks a whole namespace). A mutant that runs past
+  its time limit counts as killed, but its loop can keep running in the image
+  and slow every later run; when `done` lists one `:timed-out`,
+  `build {op restart}` clears it.
 - **A test grading your change is not yours to edit.** Changing a test whose
   traced coverage reaches a form you changed this episode is refused. If you
   believe it is wrong, `flag_test {ns name reason}` records that for the human
