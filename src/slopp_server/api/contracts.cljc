@@ -679,6 +679,15 @@
             :doc (str "the tests that reach this form BY NAME, with how each is"
                       " known — the warranty's count made readable")}
     [:map [:count {:doc "every test that reaches it, before the cap"} :int] [:shown {:doc "the first eight, observed runs first then by hops"} [:sequential [:map [:test {:doc "the deftest, ns/name — the name is a hyphenated sentence"} :string] [:via {:doc "how it is known: observed, static, declared — not the same evidence"} [:sequential :string]] [:hops {:optional true :doc "static distance; absent when only observed or declared"} :int]]]]]]
+   [:test-specs {:optional true
+                 :doc (str "what each SHOWN test asserts, keyed by :test — the name is a"
+                           " claim and this is the check beside it. One row per shown"
+                           " test whose body is in the store; kept beside :tests so that"
+                           " shape does not move")}
+    [:sequential [:map
+                  [:test {:doc "the deftest, ns/name — matches a :tests :shown entry"} :string]
+                  [:assertion {:doc "its first is form, on one line, at most 120 characters"} :string]
+                  [:assertions {:doc "how many is/are forms the deftest holds"} :int]]]]
    [:note {:doc (str "the standing caveat on :callers and :callees, in words: the"
                      " edges come from a SYNTACTIC reader over the store, so they are"
                      " a FLOOR and not a census — a call reached through a binding or"

@@ -987,3 +987,20 @@
         "g changed and no test was SEEN running it; one delta was housekeeping")
     (is (= {:changed 2 :no-observed-test nil :system-deltas 1} (cv nil))
         "with no trace map the count is unknown, not zero")))
+
+(deftest a-covering-test-entry-carries-its-first-assertion-and-the-count
+  ;; A test name is a claim; the assertion beside it is the check. Without it a
+  ;; reader cannot tell coverage theater from a real expectation. The specs ride
+  ;; beside :tests, keyed by :test, so the shape of :tests itself does not move.
+  (let [st   (-> (store/empty-store)
+                 (store/ingest 'demo.z.core "(ns demo.z.core)\n\n(defn hello [] 1)\n")
+                 (store/ingest 'demo.z.core-test
+                               (str "(ns demo.z.core-test (:require [clojure.test :refer [deftest is]] [demo.z.core :as c]))\n\n"
+                                    "(deftest hello-says-one\n  (is (= 1 (c/hello)))\n  (is (number? (c/hello))))\n")))
+        sess (atom {:store st :test-map {'demo.z.core-test/hello-says-one #{'demo.z.core/hello}}})
+        v    (model/form-view sess (:id (store/form-named st 'demo.z.core 'hello)))]
+    (is (= [{:test "demo.z.core-test/hello-says-one"
+             :assertion "(is (= 1 (c/hello)))"
+             :assertions 2}]
+           (:test-specs v)))
+    (is (json-shaped? v))))

@@ -1047,6 +1047,132 @@ gaps    (gaps-by-ns st (:test-map @session))
                    store/form-name-meta
                    :endorsed)))
 
+(defn- range-deltas
+  "The deltas inside the range (`from`, `to`]: after `from`, up to and
+  including `to`, oldest first."
+  [st from to]
+  (let [after (rest (drop-while #(not= from (:id %)) (store/deltas st)))
+        [a b] (split-with #(not= to (:id %)) after)]
+    (concat a (take 1 b))))
+
+(defn- range-prompts
+  "`{form-id ask}` for the asks that changed each form INSIDE the range
+  (`from`, `to`]: the latest authored delta there that names the form. Same
+  rules as `store/prompt-by-form` — both `:form-id` and `:form-ids` count, a
+  `:system` delta never replaces an author's ask, no `:prompt` adds nothing —
+  but bounded by the range, because the form's NEWEST ask can belong to a
+  later change and a reviewer reading this range would be shown its intent."
+  [st from to]
+  (reduce (fn [m d]
+            (if (and (:prompt d) (not (:system d)))
+              (reduce #(assoc %1 %2 (:prompt d)) m
+                      (cond-> (vec (:form-ids d)) (:form-id d) (conj (:form-id d))))
+              m))
+          {} (range-deltas st from to)))
+
+(defn ^:export change-view
+  "What changed between two commit-points, grouped module → namespace → form
+  with a count at every rung so a collapsed row still says how much is
+  under it. `from`/`to` are commit-point delta ids — exactly the pair
+  `timeline` hands over in each row's `:range`.
+
+  Two rungs, not three: wave 1 made components REAL namespace prefixes, so
+  a component IS a module and `module-of` answers both.
+
+  Per form: the ask that changed it IN THIS RANGE (not its newest one, which
+  can belong to a later change), the LINE diff (never whole sources — a
+  reviewer reads changes), and how many distinct forms call it now. The
+  caller count spans every `:via` the graph records, and the graph is a
+  syntactic reader, so it is a floor rather than a census."
+  [session from to]
+  (let [st  (:store @session)
+        ids (into #{} (map :id) (store/deltas st))]
+    ;; a range arrives from a URL, so both ends are user input. "Nothing
+    ;; changed here" and "that is not a range" are different answers, and
+    ;; only the second one is a 404.
+    (when (and (contains? ids from) (contains? ids to))
+      (let [ch        (history/query-changes session :from from :to to)
+            by-target (refs/refs-by-target st)
+            prompts   (range-prompts st from to)
+            rows      (for [{:keys [form form-id status was now]} (:forms ch)
+                            :let [ns-sym (symbol (namespace form))]]
+                        (cond-> {:form    (str form)
+                                 :form-id form-id
+                                 ;; keyword VALUES become strings here, for the same
+                                 ;; reason `:form` is `(str form)`: a key round-trips
+                                 ;; symmetrically through JSON and a value does not.
+                                 ;; `diff-lines` keeps its keywords — it also feeds
+                                 ;; the agent-facing text renderer, and shaping for
+                                 ;; the wire is this layer's job, not its producer's.
+                                 :status  (name status)
+                                 :ns      (str ns-sym)
+                                 :module  (edit.modules/module-of ns-sym)
+                                 :diff    (mapv (fn [[k text]] [(name k) text])
+                                                (history/diff-lines was now))
+                                 :callers (count (distinct (map (juxt :from-ns :from-var)
+                                                                (get by-target form []))))}
+                          (get prompts form-id) (assoc :why (get prompts form-id))))]
+        {:from    from
+         :to      to
+         :count   (count rows)
+         :spread  (edit.modules/spread (map #(symbol (:ns %)) rows))
+         :modules (->> rows
+                       (group-by :module)
+                       (sort-by key)
+                       (mapv (fn [[m rs]]
+                               {:module     m
+                                :count      (count rs)
+                                :namespaces (->> rs
+                                                 (group-by :ns)
+                                                 (sort-by key)
+                                                 (mapv (fn [[n fs]]
+                                                         {:ns    n
+                                                          :count (count fs)
+                                                          :forms (vec (sort-by :form
+                                                                               (map #(dissoc % :ns :module) fs)))})))})))
+         :arc     (vec (:verification-arc ch))
+         ;; what this screen did NOT see, said on the screen: a deterministic
+         ;; view that hides its gaps reads as more certain than it is
+         :absence {:changed          (count rows)
+                   :no-observed-test (when-let [tmap (:test-map @session)]
+                                       (count (remove (fn [{:keys [form status]}]
+                                                        (or (= "deleted" status)
+                                                            (some #(contains? (:via %) :observed)
+                                                                  (refs/covered-by st tmap (symbol form)))))
+                                                      rows)))
+                   :system-deltas    (count (filter :system (range-deltas st from to)))}}))))
+
+(defn- test-spec
+  "`{:assertion :assertions}` for deftest `q`, read from its body in the store:
+  the FIRST `is` form on one line (at most 120 characters) and how many
+  `is`/`are` forms the body holds. A test name is a claim; this is the check
+  beside it. Empty when the form is absent or holds no assertion."
+  [st q]
+  (let [root  (:node (store/form-named st (symbol (namespace q)) (symbol (name q))))
+        asrt? (fn [nd]
+                (and (= :list (n/tag nd))
+                     (let [f (first (filter n/sexpr-able? (n/children nd)))]
+                       (and f (= :token (n/tag f))
+                            (contains? #{"is" "are"} (n/string f))))))
+        found (when root (filter asrt? (tree-seq n/inner? n/children root)))]
+    (if-let [a (first found)]
+      (let [s (str/replace (n/string a) #"\s+" " ")]
+        {:assertion  (if (> (count s) 120) (str (subs s 0 119) "…") s)
+         :assertions (count found)})
+      {})))
+
+(defn- with-test-specs
+  "`view` with `:test-specs` — `[{:test :assertion :assertions}]`, one per
+  shown test whose body is in the store and holds an assertion. A SIBLING of
+  `:tests`, keyed by `:test`, so the shape of each shown entry stays as it was."
+  [view st]
+  (assoc view :test-specs
+         (into []
+               (keep (fn [row]
+                       (let [s (test-spec st (symbol (:test row)))]
+                         (when (seq s) (assoc s :test (:test row))))))
+               (get-in view [:tests :shown]))))
+
 (defn ^:export form-view
   "One form's page model, addressed by form ID — ids are stable across
   edits and names are not, so the id is the permalink.
@@ -1166,99 +1292,5 @@ gaps    (gaps-by-ns st (:test-map @session))
                                        " is a floor, not a census — a call reached through a"
                                        " binding or built at runtime is not here")}
                         (dissoc (json-card (orient/form-card session ns-sym nm)) :form))
-           graph (assoc :graph graph)))))))
-
-(defn- range-deltas
-  "The deltas inside the range (`from`, `to`]: after `from`, up to and
-  including `to`, oldest first."
-  [st from to]
-  (let [after (rest (drop-while #(not= from (:id %)) (store/deltas st)))
-        [a b] (split-with #(not= to (:id %)) after)]
-    (concat a (take 1 b))))
-
-(defn- range-prompts
-  "`{form-id ask}` for the asks that changed each form INSIDE the range
-  (`from`, `to`]: the latest authored delta there that names the form. Same
-  rules as `store/prompt-by-form` — both `:form-id` and `:form-ids` count, a
-  `:system` delta never replaces an author's ask, no `:prompt` adds nothing —
-  but bounded by the range, because the form's NEWEST ask can belong to a
-  later change and a reviewer reading this range would be shown its intent."
-  [st from to]
-  (reduce (fn [m d]
-            (if (and (:prompt d) (not (:system d)))
-              (reduce #(assoc %1 %2 (:prompt d)) m
-                      (cond-> (vec (:form-ids d)) (:form-id d) (conj (:form-id d))))
-              m))
-          {} (range-deltas st from to)))
-
-(defn ^:export change-view
-  "What changed between two commit-points, grouped module → namespace → form
-  with a count at every rung so a collapsed row still says how much is
-  under it. `from`/`to` are commit-point delta ids — exactly the pair
-  `timeline` hands over in each row's `:range`.
-
-  Two rungs, not three: wave 1 made components REAL namespace prefixes, so
-  a component IS a module and `module-of` answers both.
-
-  Per form: the ask that changed it IN THIS RANGE (not its newest one, which
-  can belong to a later change), the LINE diff (never whole sources — a
-  reviewer reads changes), and how many distinct forms call it now. The
-  caller count spans every `:via` the graph records, and the graph is a
-  syntactic reader, so it is a floor rather than a census."
-  [session from to]
-  (let [st  (:store @session)
-        ids (into #{} (map :id) (store/deltas st))]
-    ;; a range arrives from a URL, so both ends are user input. "Nothing
-    ;; changed here" and "that is not a range" are different answers, and
-    ;; only the second one is a 404.
-    (when (and (contains? ids from) (contains? ids to))
-      (let [ch        (history/query-changes session :from from :to to)
-            by-target (refs/refs-by-target st)
-            prompts   (range-prompts st from to)
-            rows      (for [{:keys [form form-id status was now]} (:forms ch)
-                            :let [ns-sym (symbol (namespace form))]]
-                        (cond-> {:form    (str form)
-                                 :form-id form-id
-                                 ;; keyword VALUES become strings here, for the same
-                                 ;; reason `:form` is `(str form)`: a key round-trips
-                                 ;; symmetrically through JSON and a value does not.
-                                 ;; `diff-lines` keeps its keywords — it also feeds
-                                 ;; the agent-facing text renderer, and shaping for
-                                 ;; the wire is this layer's job, not its producer's.
-                                 :status  (name status)
-                                 :ns      (str ns-sym)
-                                 :module  (edit.modules/module-of ns-sym)
-                                 :diff    (mapv (fn [[k text]] [(name k) text])
-                                                (history/diff-lines was now))
-                                 :callers (count (distinct (map (juxt :from-ns :from-var)
-                                                                (get by-target form []))))}
-                          (get prompts form-id) (assoc :why (get prompts form-id))))]
-        {:from    from
-         :to      to
-         :count   (count rows)
-         :spread  (edit.modules/spread (map #(symbol (:ns %)) rows))
-         :modules (->> rows
-                       (group-by :module)
-                       (sort-by key)
-                       (mapv (fn [[m rs]]
-                               {:module     m
-                                :count      (count rs)
-                                :namespaces (->> rs
-                                                 (group-by :ns)
-                                                 (sort-by key)
-                                                 (mapv (fn [[n fs]]
-                                                         {:ns    n
-                                                          :count (count fs)
-                                                          :forms (vec (sort-by :form
-                                                                               (map #(dissoc % :ns :module) fs)))})))})))
-         :arc     (vec (:verification-arc ch))
-         ;; what this screen did NOT see, said on the screen: a deterministic
-         ;; view that hides its gaps reads as more certain than it is
-         :absence {:changed          (count rows)
-                   :no-observed-test (when-let [tmap (:test-map @session)]
-                                       (count (remove (fn [{:keys [form status]}]
-                                                        (or (= "deleted" status)
-                                                            (some #(contains? (:via %) :observed)
-                                                                  (refs/covered-by st tmap (symbol form)))))
-                                                      rows)))
-                   :system-deltas    (count (filter :system (range-deltas st from to)))}}))))
+           graph (assoc :graph graph)
+           true  (with-test-specs st)))))))

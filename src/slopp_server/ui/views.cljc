@@ -3485,7 +3485,7 @@
 
   `:via` arrives as a STRING — it is a keyword in the store and JSON has no
   keywords, so this renders it directly rather than calling `name` on it."
-  [{:keys [why warranty note tests] :as data}]
+  [{:keys [why warranty note tests test-specs] :as data}]
   (let [{:keys [callers callees]} (callgraph/ego (callgraph/from-form-view data) (:form-id data))
         row  (fn [r]
                [:article
@@ -3525,10 +3525,15 @@
       (when (seq (:shown tests))
         (into [:ul]
               (for [{:keys [test via hops]} (:shown tests)
-                    :let [i (str/index-of test "/")]]
+                    :let [i (str/index-of test "/")
+                          {:keys [assertion assertions]} (first (filter #(= test (:test %)) test-specs))]]
                 [:li (behaviour (if i (subs test (inc i)) test))
                  " " [:small (str (str/join ", " via)
-                                  (when hops (str " · " (plural hops "hop"))))]])))
+                                  (when hops (str " · " (plural hops "hop"))))]
+                 (when assertion
+                   [:p [:code assertion]
+                    (when assertions
+                      [:small " " (plural assertions "assertion")])])])))
       (let [more (- (or (:count tests) 0) (count (:shown tests)))]
         (when (pos? more)
           [:p [:small (str "and " more " more reach it")]]))]

@@ -5489,3 +5489,16 @@
     (testing "zero untested still says so, and an old answer without the key renders nothing"
       (is (str/includes? none "0 of 3 changed forms had no test observed running them"))
       (is (not (str/includes? bare "test observed"))))))
+
+(deftest a-form-rail-shows-the-assertion-under-the-test-sentence
+  (let [text (fn [h] (str/join " " (filter string? (tree-seq coll? seq h))))
+        v    (views/form-rail {:form-id "f1" :warranty {:covered 1}
+                               :callers [] :callees [] :note "a floor"
+                               :tests {:count 1
+                                       :shown [{:test "demo.core-test/rate-rounds-up"
+                                                :via ["static"] :hops 1}]}
+                               :test-specs [{:test "demo.core-test/rate-rounds-up"
+                                             :assertion "(is (= 3 (rate 2.5)))"
+                                             :assertions 2}]})]
+    (is (re-find #"\(is \(= 3 \(rate 2\.5\)\)\)" (text v)))
+    (is (re-find #"2 assertions" (text v)))))
