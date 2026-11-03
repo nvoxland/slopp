@@ -1990,6 +1990,26 @@
                         {:closed false :why "the done is red — see :findings" :findings (:findings d)})
                       (close-extras! session (assoc a :label lbl) d)))))))
 
+^:unsafe (defn ^:export reserve-owner!
+  "Bring an app OWNER (a project's reader) current with its branch and
+  re-serve its managed app from the advanced value. The server calls this to
+  keep a dev instance current with a landing by ANY writer on the shared
+  store: `refresh-app!` alone re-serves from the owner's CURRENT store value,
+  so the owner must absorb the landing FIRST. Returns `refresh-app!`'s
+  result."
+  [owner]
+  (engine/refresh-cache! owner)
+  (refresh-app! owner))
+
+(defn- stamp-rejected
+  "`steps` with the write's optional `rejected` (what was tried or weighed
+  and dropped) on each step that names none of its own, so the group lands
+  it on every delta. Blank or absent leaves the steps as they were."
+  [steps rejected]
+  (if (and (string? rejected) (not (str/blank? rejected)))
+    (mapv #(update % :rejected (fn [r] (or r rejected))) steps)
+    steps))
+
 (def ^:private change-handlers!
   "The write VERB (s11) plus its aliases, and `check`. `change`: a whole
   unit of work as one call — tests land first and the result reports which
@@ -2005,8 +2025,8 @@
   call-op! -> tail-handlers! -> this map -> call-op!.)"
   (let [change-fn
         (fn [session a _sym]
-          (let [tests0 (wire-steps (or (:tests a) []))
-                impl0  (wire-steps (or (:impl a) []))
+          (let [tests0 (stamp-rejected (wire-steps (or (:tests a) [])) (:rejected a))
+                impl0  (stamp-rejected (wire-steps (or (:impl a) [])) (:rejected a))
                 guard  (ops/protected-test-refusal (:store @session) (:test-map @session)
                                           (or (:agent a) (:agent-id @session))
                                           (:last-intent @session)
@@ -2167,17 +2187,6 @@
 (def ^:private tail-handlers!
   "Every handler-map entry (Q4) — call-tool checks here first."
   (merge env-handlers! file-handlers! sync-handlers! change-handlers!))
-
-^:unsafe (defn ^:export reserve-owner!
-  "Bring an app OWNER (a project's reader) current with its branch and
-  re-serve its managed app from the advanced value. The server calls this to
-  keep a dev instance current with a landing by ANY writer on the shared
-  store: `refresh-app!` alone re-serves from the owner's CURRENT store value,
-  so the owner must absorb the landing FIRST. Returns `refresh-app!`'s
-  result."
-  [owner]
-  (engine/refresh-cache! owner)
-  (refresh-app! owner))
 
 (defn- call-op!
   "THE dispatch seam every route crosses — family dispatch, the bare `--call`

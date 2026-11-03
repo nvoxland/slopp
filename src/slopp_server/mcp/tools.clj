@@ -248,6 +248,7 @@
                                       :description "this change FINISHES the unit: close it in the same call under this label — done, landed, the suite, the whole-store verdict when cheap (:closed); a red change closes nothing"}
                                :commit {:type ["boolean" "string"]
                                         :description "and take a commit point (true, or its label) — the write that finishes an ask is one turn"}
+                               
                                :verbose {:type "boolean"}}
                   :required ["prompt"]}}
    {:name "edit_revert"
@@ -879,13 +880,14 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
 (defn accepted-arg-keys
   "The full set of argument keys tool `name` accepts: its inputSchema
    properties plus the universal cross-cutting keys (:agent stamped by the
-   dispatch, :prompt intent, :verbose full payload). There are no aliases —
+   dispatch, :prompt intent, :verbose full payload, :rejected the alternative a
+   write weighed and dropped). There are no aliases —
    one argument has one spelling, and the schema is it. nil for a name the
    server does not advertise (an unknown name) — that tool opts OUT of strict validation rather than
    refusing every key."
   [name]
   (when-let [d (some #(when (= name (:name %)) %) registry)]
-    (into #{:agent :prompt :verbose :thread :branch}
+    (into #{:agent :prompt :verbose :thread :branch :rejected}
           (keys (get-in d [:inputSchema :properties])))))
 
 (defn unknown-arg-keys
@@ -1061,7 +1063,8 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
                   :properties {:prompt {:type "string"}
                                :tests {:type "array" :items {:type "object"}}
                                :impl {:type "array" :items {:type "object"}}
-                               :accept {:type "array" :items {:type "string"}}}
+                               :accept {:type "array" :items {:type "string"}}
+                               }
                   :required ["prompt"]}}])
 
 (def dieted-tools

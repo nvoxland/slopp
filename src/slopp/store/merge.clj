@@ -54,7 +54,7 @@
   work again."
   [store their]
   (let [their-id (if (map? their) (:id their) their)
-        carry    (when (map? their) (select-keys their [:system :group]))
+        carry    (when (map? their) (select-keys their [:system :group :rejected]))
         tag      (fn [ds] (if (seq ds)
                             (conj (pop ds) (merge (assoc (peek ds) :merged-from their-id) carry))
                             ds))]

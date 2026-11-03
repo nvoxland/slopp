@@ -1086,6 +1086,7 @@
                                      :status (status-after st (:id d))
                                      :at (human-time (:at d))}
                               (ti (:id d)) (assoc :turn-intent (ti (:id d)))
+                              (:rejected d) (assoc :rejected (:rejected d))
                               (and origin (= :ingest (:op d)))
                               (assoc :origin
                                      (cond-> {:git-sha (:sha origin) :remote (:remote origin)}

@@ -541,7 +541,7 @@
                  :else
                  (if-let [[st' d] (store/replace-node st ns name node
                                                       :prompt prompt :group gid
-                                                      :agent agent)]
+                                                      :agent agent :rejected (:rejected step))]
                    (if-let [merr (gates/gate-refusal st' ns (or nm' name))]
                      {:error merr}
                      (cond-> {:store st' :delta d
@@ -569,7 +569,7 @@
                  :else
                  (if-let [[st' d] (store/append-form st ns node
                                                      :prompt prompt :group gid
-                                                     :agent agent)]
+                                                     :agent agent :rejected (:rejected step))]
                    (if-let [merr (when nm (gates/gate-refusal st' ns nm))]
                      {:error merr}
                      {:store st' :delta d :hot [:load (:form-id d)]})
@@ -583,6 +583,7 @@
                  plan
                  (apply-group-step st gid prompt agent
                                    {:action :replace :ns ns :name name
+                                    :rejected (:rejected step)
                                     :source (:new-form-src plan)})))
     :require (if-let [f (store/form-named st ns ns)]
                (let [r (edit/add-require-source (n/string (:node f)) (:require step))]
@@ -590,6 +591,7 @@
                    r
                    (apply-group-step st gid prompt agent
                                      {:action :replace :ns ns :name ns
+                                      :rejected (:rejected step)
                                       :source (:src r)})))
                {:error (str "no namespace " ns " (ingest it first)")})
     :delete  (or (edit/ns-form-delete-error ns name)
@@ -602,7 +604,7 @@
                                         ns (second vs) ns (pr-str (nth vs 2))))]
                    (if-let [[st' d] (store/remove-form st ns name
                                                        :prompt prompt :group gid
-                                                       :agent agent)]
+                                                       :agent agent :rejected (:rejected step))]
                      (cond-> {:store st' :delta d :hot [:unmap ns name]}
                        post (assoc :post-eval post))
                      (edit/missing-form-error st ns name))))
@@ -4458,10 +4460,15 @@
   and reports), a rename with callers stranded OUTSIDE the group refuses
   against the FINAL shape (`rename-callers-refusal`), and a :replace no
   runtime evidence reaches is flagged `:untested`."
-  [session steps & {:keys [prompt agent]}]
-  (if (empty? steps)
+  [session steps0 & {:keys [prompt agent rejected]}]
+  (if (empty? steps0)
     {:error "edit-group needs at least one step"}
     (let [t0 (System/nanoTime)
+          ;; the alternative the write weighed and dropped rides each step
+          ;; to its delta; a step that names its own keeps it
+          steps (if rejected
+                  (mapv #(update % :rejected (fn [r] (or r rejected))) steps0)
+                  steps0)
           base0 (:store @session)
           pre-warned (into #{}
                            (mapcat (fn [ns-sym]
@@ -6365,11 +6372,11 @@
   reported per step; the completeness judgement is still `done`'s, and a
   whole feature in one call meets the same gates a whole feature in one form
   does."
-  [session steps & {:keys [prompt agent no-auto-require protect-tests]}]
+  [session steps & {:keys [prompt agent no-auto-require protect-tests rejected]}]
   (let [;; qualified in, alias on store: the rewrites and their requires are
         ;; part of the group, and the result says what moved
         {steps :steps, canon :canonicalized, owed :requires} (canonicalize-steps session steps)
-        once   (fn [] (cond-> (edit-group-once! session steps :prompt prompt :agent agent)
+        once   (fn [] (cond-> (edit-group-once! session steps :prompt prompt :agent agent :rejected rejected)
                         (seq canon) (assoc :canonicalized canon)
                         (seq owed)  (assoc :auto-require (first owed) :auto-requires (vec owed))))
         guard  (when protect-tests

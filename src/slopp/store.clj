@@ -1116,7 +1116,7 @@
   `nm` may be a name the form defines OR its form id — names win, matching
   `form-named` (#131): an id is a registration's only handle, and editing a
   defmethod addresses it that way."
-  [store ns-sym nm node & {:keys [prompt op group agent system] :or {op :replace}}]
+  [store ns-sym nm node & {:keys [prompt op group agent system rejected] :or {op :replace}}]
   (let [elems (get-in store [:namespaces ns-sym :elements])
         idx   (or (first (keep-indexed
                           (fn [i e] (when (and (= :form (:kind e)) (= nm (:name e))) i))
@@ -1135,6 +1135,7 @@
                               :sources {(:id elem) (n/string node)}}
                        group  (assoc :group group)
                        agent  (assoc :agent agent)
+                       rejected (assoc :rejected rejected)
                        system (assoc :system true))]
         [(-> store
              (assoc-in [:namespaces ns-sym :elements] (assoc elems idx new-elem))
@@ -1148,7 +1149,7 @@
   `nm` may be a name the form defines OR its form id — names win, matching
   `form-named` (#131): an id is a registration's only handle, and the delete
   path addresses defmethods that way."
-  [store ns-sym nm & {:keys [prompt group agent]}]
+  [store ns-sym nm & {:keys [prompt group agent rejected]}]
   (let [elems (get-in store [:namespaces ns-sym :elements])
         by-name (fn [e] (and (= :form (:kind e)) (= nm (:name e))))
         by-id   (fn [e] (and (= :form (:kind e)) (= (str nm) (:id e))))
@@ -1164,7 +1165,8 @@
                                   :removed-source (n/string (:node (nth elems idx)))
                                   :prompt prompt :at (now-ms)}
                            group (assoc :group group)
-                           agent (assoc :agent agent))]
+                           agent (assoc :agent agent)
+                           rejected (assoc :rejected rejected))]
         [(-> store'
              (assoc-in [:namespaces ns-sym :elements] new-elems)
              (record-delta delta))
@@ -1873,7 +1875,7 @@
   an anchor would be a fact the store recomputes a moment later — `:before`
   was exactly that, and it is gone. Returns [store' delta]; nil when the
   namespace doesn't exist."
-  [store ns-sym node & {:keys [prompt group agent]}]
+  [store ns-sym node & {:keys [prompt group agent rejected]}]
   (when-let [elems (get-in store [:namespaces ns-sym :elements])]
     (let [[fid store]  (gen-id store "f")
           [did store'] (gen-id store "d")
@@ -1885,7 +1887,8 @@
                                 :at (now-ms)
                                 :sources {fid (n/string node)}}
                          group (assoc :group group)
-                         agent (assoc :agent agent))]
+                         agent (assoc :agent agent)
+                         rejected (assoc :rejected rejected))]
       [(-> store'
            (assoc-in [:namespaces ns-sym :elements] (conj elems form-elem))
            (record-delta delta))

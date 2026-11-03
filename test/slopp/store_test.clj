@@ -1028,3 +1028,17 @@
         "registered, or merge-logs refuses the whole merge")
     (is (contains? fields/travelling-markers :flag-test)
         "it is a fact for the human, so it outlives the thread it was written on")))
+
+(deftest a-write-can-carry-the-alternative-it-rejected
+  ;; 5u7.1: commit messages keep the goal and drop the failed approaches
+  (let [s0 (store/ingest (store/empty-store) 'rj.core "(ns rj.core)\n(defn a [] 1)\n")
+        [s1 d1] (store/replace-node s0 'rj.core 'a (p/parse-string "(defn a [] 2)")
+                                    :prompt "two" :rejected "tried a cache; stale reads")
+        [_ d2]  (store/append-form s1 'rj.core (p/parse-string "(defn b [] 3)")
+                                   :prompt "b" :rejected "considered a macro; opaque")
+        [_ d3]  (store/remove-form s1 'rj.core 'a :prompt "drop" :rejected "kept a shim; dead weight")
+        [_ d4]  (store/replace-node s0 'rj.core 'a (p/parse-string "(defn a [] 5)") :prompt "plain")]
+    (is (= "tried a cache; stale reads" (:rejected d1)))
+    (is (= "considered a macro; opaque" (:rejected d2)))
+    (is (= "kept a shim; dead weight" (:rejected d3)))
+    (is (not (contains? d4 :rejected)) "absent unless given")))

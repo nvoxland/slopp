@@ -5158,3 +5158,16 @@
     (is (= {:forms 5 :namespaces 4 :modules 3} (:spread wide)))
     (is (= "wide change" (:spread-note wide)))
     (is (not (contains? narrow :spread)))))
+
+(deftest ^:external a-change-can-carry-the-alternative-it-rejected
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "rw.core" :source "(ns rw.core)\n(defn f [x] x)\n"})
+      (let [r (call! sess "change"
+                     {:prompt "f increments"
+                      :rejected "tried a cache; stale reads"
+                      :impl [{:ns "rw.core" :name "f" :source "(defn f [x] (inc x))"}]})
+            h (history/query-form-history (ops/with-history sess) 'rw.core 'f)]
+        (is (re-find #":ok true" r) r)
+        (is (= "tried a cache; stale reads" (:rejected (last h)))))
+      (finally (ops/close! sess)))))

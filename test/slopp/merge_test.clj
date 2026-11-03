@@ -738,3 +738,17 @@
     (is (true? (:system (first (by-op :replace)))) "housekeeping stays housekeeping")
     (is (= #{"g-theirs"} (set (map :group merged))) "one group stays one group")
     (is (not (:system (first (by-op :add)))) "and an authored add stays authored")))
+
+(deftest a-replayed-delta-keeps-what-it-rejected
+  ;; 5u7.1: the merge replay carried :system and :group; the rejected
+  ;; alternative is provenance and must survive it too
+  (let [b      (base)
+        ours   (replace! b 'a "(defn a [x] (+ x 1))")
+        theirs (-> b
+                   (store/replace-node 'm.core 'b (p/parse-string "(defn b [x] (+ x 2))")
+                                       :prompt "p" :agent "them" :rejected "tried memo; stale")
+                   first)
+        r      (merge/merge-logs ours theirs)
+        merged (filter :merged-from (store/deltas (:store r)))]
+    (is (empty? (:conflicts r)))
+    (is (= ["tried memo; stale"] (mapv :rejected merged)))))

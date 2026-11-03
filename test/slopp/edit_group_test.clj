@@ -7,7 +7,7 @@
   it would be for one form. An edit that is correct alone and wrong in company
   is the whole reason this verb exists."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.ops :as ops] [slopp.read.query :as query] [slopp.ops.external :as external]))
+            [slopp.ops :as ops] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history]))
 
 (def buggy
   (str "(ns gdemo\n  (:require [clojure.test :refer [deftest is]]))\n"
@@ -178,4 +178,21 @@
                                     [{:action :add :ns 'gfac.web :source "(defn k [] 2)"}]
                                     :prompt "nothing to advise")]
         (is (not (contains? r :advisories)) "absent when there is nothing to say"))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-group-carries-what-it-rejected-on-every-delta-and-history-shows-it
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'rg.core "(ns rg.core)\n(defn f [x] x)\n(defn g [x] (f x))\n")
+      (let [r (ops/edit-group-once!
+               sess
+               [{:action :replace :ns 'rg.core :name 'f :source "(defn f [x] (inc x))"}
+                {:action :replace :ns 'rg.core :name 'g :source "(defn g [x] (f (f x)))"}]
+               :prompt "bump" :rejected "tried a cache; stale reads")]
+        (is (nil? (:error r)))
+        (is (= 2 (count (:deltas r))))
+        (is (every? #(= "tried a cache; stale reads" (:rejected %)) (:deltas r)))
+        (let [h (history/query-form-history (ops/with-history sess) 'rg.core 'f)]
+          (is (= "tried a cache; stale reads" (:rejected (last h))))
+          (is (not (contains? (first h) :rejected)))))
       (finally (ops/close! sess)))))
