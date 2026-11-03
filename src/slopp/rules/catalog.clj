@@ -320,7 +320,10 @@
     :teach "a namespaced data key used in two or more modules with no owner is a value's contract that exists only as code agreeing on it"}
    {:rule :facet-key-ownership-sweep :grain :done
     :escape "as facet-key-ownership: parse where the value arrives, declare :rest/request #'Facet, or move the logic into a declared tier"
-    :teach "a form written before its key's facet was declared is a violation no write looks at again"}])
+    :teach "a form written before its key's facet was declared is a violation no write looks at again"}
+   {:rule :facet-claims-reach :grain :done
+    :escape "declare the claims on the route (:facet/claims [...]) so its port checks them; there is no marker"
+    :teach "a route that reaches a sink demanding a claim, through any chain of calls, without declaring that claim lets any caller of the route do what the sink guards"}])
 
 (defn ^:export rule-rows
   "The rule catalog with each rule's DECLARED default `:severity` merged in from

@@ -264,7 +264,7 @@
   the server's, and the reader is not owed the details."
   [row resp]
   (let [v (:rest/response row)]
-    (if (and (var? v) (contains? resp :body))
+    (if (and (var? v) (contains? resp :body) (<= 200 (:status resp 200) 299))
       (let [out (facet/project v (:facet/view row) (:body resp))]
         (if-let [failed (:facet/failed out)]
           (throw (ex-info (str "response fails " (symbol v) ": "
@@ -272,3 +272,31 @@
                           {:facet/failed (vec (keys failed))}))
           (assoc resp :body out)))
       resp)))
+
+(defn ^:export check-claims
+  "nil when every claim the route declares (`:facet/claims [k ...]`) holds for
+  this request, else the response to send instead of running the handler.
+
+  Each claim is a fn the route's REQUEST facet declares under `:facet/claims`,
+  called as `(f parsed-value actor sources)`: the actor is the identity the
+  PORT resolved (`:http/identity`), never one the handler built, and sources
+  are the request's resolved dependencies (`:http/deps`). A claim that needs
+  an actor the request does not have is a 401; one that does not hold is a
+  403 naming the claim's `:doc` and nothing of its failure data, which may
+  name values the caller should not learn. Claims are not re-run at `project`,
+  so a parsed value cached across requests cannot carry one actor's claim
+  into another's request."
+  [row req]
+  (when-let [ks (seq (:facet/claims row))]
+    (let [v      (:rest/request row)
+          claims (when (var? v) (:facet/claims @v))
+          actor  (:http/identity req)]
+      (or (when-not (var? v)
+            {:status 500 :body {:error "internal server error"}})
+          (when-not actor
+            {:status 401 :body {:error "unauthenticated"}})
+          (some (fn [k]
+                  (let [{:keys [doc] f :fn} (get claims k)]
+                    (when-not (and f (true? (f (:body req) actor (:http/deps req))))
+                      {:status 403 :body {:error (str "forbidden: " (or doc (str "claim " k " is not declared")))}})))
+                ks)))))

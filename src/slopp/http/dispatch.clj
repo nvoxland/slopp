@@ -280,8 +280,13 @@
                                                    {:http/read kind}))))
                          reads (when-let [decl (:http/reads row)]
                                  (into {} (map fetch) decl))
-                         resp  ((:handler row)
-                                (cond-> req' reads (assoc :http/reads reads)))
+                         resp  (let [req'' (cond-> req' reads (assoc :http/reads reads))]
+                                ;; a route's declared CLAIMS hold before its
+                                ;; handler runs; checked by key, as the
+                                ;; contract is, so this namespace never
+                                ;; learns what a claim is
+                                (or (when-let [cc (:rest/check-claims ctx)] (cc row req''))
+                                    ((:handler row) req'')))
                          effects (seq (:http/effects resp))
                          undeclared (seq (remove #(contains? declared (first %))
                                                  effects))]

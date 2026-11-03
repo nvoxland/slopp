@@ -1206,6 +1206,52 @@
              :when t]
          {:form (symbol (str ns-sym) (str (:name e))) :teach t})))
 
+(defn facet-claims-reach-check
+  "Done-advisory (`:error`): every route that REACHES a sink, through any
+  chain of calls, declares the claims the sink demands. A sink says what it
+  needs (`^{:facet/requires [:shop/write]}` on `delete-order!`); a route says
+  what its port checks (`:facet/claims [:shop/write]`); this joins the two
+  over the static call graph. It over-approximates (a path the value never
+  takes still counts), which is the safe direction for a permission. Asked
+  only of a store that has a sink."
+  [_session st* _changed]
+  (let [nses  (keys (:namespaces st*))
+        sinks (into {} (for [nsx nses
+                             e   (store/forms st* nsx)
+                             :when (and (:name e) (str/includes? (n/string (:node e)) ":facet/requires"))
+                             :let [r (seq (:facet/requires (store/form-name-meta e)))]
+                             :when r]
+                         [[nsx (:name e)] (set r)]))]
+    (if (empty? sinks)
+      []
+      (let [routes (for [nsx nses
+                         e   (store/forms st* nsx)
+                         :when (:name e)
+                         :let [m (store/form-name-meta e)]
+                         :when (or (:rest/path m) (:http/path m))]
+                     [[nsx (:name e)] m])
+            edges  (reduce (fn [g r] (if (and (:to-ns r) (:to-name r))
+                                       (update g [(:from-ns r) (:from-var r)] (fnil conj #{}) [(:to-ns r) (:to-name r)])
+                                       g))
+                           {} (refs/refs st*))
+            reach  (fn [start] (loop [seen #{} todo [start]]
+                                 (if-let [x (peek todo)]
+                                   (if (seen x)
+                                     (recur seen (pop todo))
+                                     (recur (conj seen x) (into (pop todo) (get edges x))))
+                                   seen)))]
+        (vec (for [[k m] routes
+                   :let [have    (set (:facet/claims m))
+                         r       (reach k)
+                         hit     (filter (fn [[s _]] (r s)) sinks)
+                         missing (sort (distinct (for [[_ need] hit c need :when (not (have c))] c)))]
+                   :when (seq missing)]
+               {:form  (symbol (str (first k)) (str (second k)))
+                :teach (str "this route reaches " (vec (sort (map (fn [[[n s] _]] (symbol (str n) (str s))) hit)))
+                            ", which demand " (vec missing) ", and the route does not declare them."
+                            " Declare :facet/claims " (vec missing) " on the route, so its port"
+                            " checks them with the actor it resolved before the handler runs.")}))))))
+
 (def done-advisories
   "The done-time advisory registry (D9 rule-registry — the done-grain sibling of
    `edit.modules/per-form-write-gates`): an ordered list of {:key :severity
@@ -1606,6 +1652,13 @@
     :check #'facet-key-ownership-check
     :sweep true
     :selftest-note "fires only when the key's facet lives in another namespace, and the fixture harness ingests one; slopp.rules-test/undeclared-travel-and-key-ownership-are-asked-again-at-done pins it"}
+   ;; a permission is a reach question: a sink's demand, a route's declaration
+   {:key :facet-claims-reach :severity :error :applies-to :production
+    :check #'facet-claims-reach-check
+    :sweep true
+    :fires-on (str "(ns rf.core)\n"
+                   "(defn ^{:facet/requires [:x/write]} del! [id] id)\n"
+                   "(defn ^{:rest/path \"/x\" :http/method :post} h [r] (del! 1))\n")}
    ])
 
 (defn run-done-advisories!

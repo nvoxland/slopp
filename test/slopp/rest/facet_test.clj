@@ -2,7 +2,7 @@
   "A route typed by a facet, end to end through the real encoding: the port parses what arrives and the handler sees a parsed value; the port projects what leaves to the route's view, with secrets redacted; a failed check is a 400 naming the check; a value the handler broke fails at the exit."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.rest :as slopp.rest]
-            [slopp.facet :as facet]))
+            [slopp.facet :as facet] [slopp.http.dispatch :as dispatch]))
 
 (defn qty-positive?
   "A quantity is at least one; anything but `true` is failure data."
@@ -57,3 +57,34 @@
               :method :get :path "/api/lookup" :auth :public
               :rest/request #'Lookup :rest/response [:map [:next :int]]}]})]
     (is (= 3 (:next (:body (slopp.rest/call c {:method :get :path "/api/lookup?lookup/qty=2"})))))))
+
+(defn owns?
+  "The acting user owns the thing; failure data names no field value."
+  [thing actor _sources]
+  (or (= (:http/sub actor) (:own/by thing)) {:reason :not-the-owner}))
+
+(def ^{:facet "a thing someone owns, in the claims tests"} Owned
+  {:facet/fields {:own/id :int :own/by :string}
+   :facet/claims {:own/write {:doc "the acting user owns it" :fn #'owns?}}})
+
+(deftest a-route-declares-the-claims-its-port-evaluates
+  ;; the actor is the one the PORT resolved (:http/identity on the request);
+  ;; the handler builds no context and cannot run before the claim holds
+  (let [ran  (atom 0)
+        ctx  (slopp.rest/validating
+              {:http/routes
+               [{:handler (fn [_] (swap! ran inc) {:status 200 :body {:ok true}})
+                 :method :post :path "/api/owned" :auth :public
+                 :rest/request #'Owned :rest/response [:map [:ok :boolean]]
+                 :facet/claims [:own/write]}]})
+        call (fn [who] (dispatch/handle!
+                        ctx (cond-> {:request-method :post :uri "/api/owned"
+                                     :body {:own/id 1 :own/by "alice"}}
+                              who (assoc :http/identity {:http/sub who}))))]
+    (is (= 200 (:status (call "alice"))))
+    (let [r (call "bob")]
+      (is (= 403 (:status r)))
+      (is (re-find #"the acting user owns it" (pr-str (:body r))) "says which claim")
+      (is (not (re-find #"not-the-owner" (pr-str r))) "and nothing of the claim's data"))
+    (is (= 401 (:status (call nil))) "a claim needs an actor")
+    (is (= 1 @ran) "the handler ran only for the actor the claim admitted")))

@@ -1565,3 +1565,20 @@
         "a form written before its key's facet existed is found at done")
     (is (empty? (rules/undeclared-travel-check nil (store/ingest (store/empty-store) 'pay.card "(ns pay.card)\n(defn g [m] (:ship/to m))\n") nil))
         "a store with no production facet is not asked")))
+
+(deftest a-sink-is-reached-only-through-routes-that-declare-its-claim
+  (let [st  (fn [route-meta]
+              (store/ingest (store/empty-store) 'rf.core
+                            (str "(ns rf.core)\n"
+                                 "(defn ^{:facet/requires [:x/write]} del! [id] id)\n"
+                                 "(defn helper [id] (del! id))\n"
+                                 "(defn ^{:rest/path \"/x\" :http/method :post " route-meta "} h [r] (helper 1))\n"
+                                 "(defn ^{:rest/path \"/y\" :http/method :get} other [r] 1)\n")))
+        run (fn [s] (rules/facet-claims-reach-check nil s (mapv :id (store/forms s 'rf.core))))]
+    (let [f (run (st ""))]
+      (is (= '[rf.core/h] (mapv :form f)) "through a helper, and only the route that reaches it")
+      (is (re-find #":x/write" (str (:teach (first f))))))
+    (is (empty? (run (st ":facet/claims [:x/write]"))))
+    (is (empty? (run (store/ingest (store/empty-store) 'rf.core "(ns rf.core)\n(defn f [] 1)\n")))
+        "a store with no sink is not asked")
+    (is (some #{:facet-claims-reach} (map :key rules/done-advisories)))))

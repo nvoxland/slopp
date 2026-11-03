@@ -81,7 +81,8 @@
               (:rest/response m) (assoc :rest/response (:rest/response m))
               (:http/media-type m) (assoc :http/media-type (:http/media-type m))
               (:webapp/shell m) (assoc :webapp/shell (:webapp/shell m))
-              (:facet/view m) (assoc :facet/view (:facet/view m)))}))))
+              (:facet/view m) (assoc :facet/view (:facet/view m))
+              (:facet/claims m) (assoc :facet/claims (:facet/claims m)))}))))
 
 (defn ^:export performers-from-namespaces
   "The performer vocabulary off loaded var metadata: {kind → the var,
