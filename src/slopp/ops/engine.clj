@@ -1754,12 +1754,16 @@
              (catch Exception _ nil)))))))
 
 (defn- host-dir
-  "The store directory this process booted from, or nil for a process that
-  did not boot from a store (a jar launch carries rt.clj on its classpath).
-  Reached through the late-ref carrier, and any failure reads as absence."
+  "The store directory this process runs from, or nil for a process that
+  runs from a jar alone (it carries rt.clj on its classpath). Two ways in:
+  the kernel's boot record, for a process the kernel booted from a store, and
+  `slopp.managed-for`, which a manager sets to the store dir before starting
+  its entry — the dev instance is that process, and it has no boot record.
+  Any failure reads as absence."
   []
-  (:dir (try ((store/late-ref 'slopp.kernel.boot/current-boot-info))
-             (catch Throwable _ nil))))
+  (or (:dir (try ((store/late-ref 'slopp.kernel.boot/current-boot-info))
+                 (catch Throwable _ nil)))
+      (System/getProperty "slopp.managed-for")))
 
 (defn start-spare!
   "Kick off a background-warming spare image (D5 warm spare) if enabled.

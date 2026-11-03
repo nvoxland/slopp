@@ -893,3 +893,17 @@
         (is (nil? (engine/image-rt! without nil))
             "a host that did not boot from a store has rt.clj on its classpath: nothing to hand down"))
       (finally (.close conn) (sh/sh "rm" "-rf" dir)))))
+
+(deftest the-host-dir-is-the-store-a-manager-named
+  ;; The dev instance is started by its runner with `slopp.managed-for` set to
+  ;; the store it serves, and it has no boot record of its own. Reading only
+  ;; the boot record left it with no host store, so the runtime fallback
+  ;; never fired in the one process it was written for.
+  (let [before (System/getProperty "slopp.managed-for")]
+    (try
+      (System/setProperty "slopp.managed-for" "/w/host-store")
+      (is (= "/w/host-store" (#'engine/host-dir)))
+      (finally
+        (if before
+          (System/setProperty "slopp.managed-for" before)
+          (System/clearProperty "slopp.managed-for"))))))
