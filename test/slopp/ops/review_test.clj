@@ -336,3 +336,20 @@
         "no durable store, no index: say nothing rather than zero")
     (is (= {:reds 0} (review/red-signal reds #{"f2"} "f2" 3 #{"f2"}))
         "a form CREATED in current work: its red-first red predates it, so the index cannot credit it")))
+
+(deftest review-scan-rows-carry-the-escape-markers-the-form-uses
+  ;; An escape hatch that is not a visible risk is used silently. The set of
+  ;; escape markers comes from the registry, so each row names what it waives.
+  (let [st  (-> (store/empty-store)
+                (store/ingest 'es.core (str "(ns es.core)\n"
+                                            "(defn ^{:adapter \"http — the client; tests pass a fake\"} fetch [x] x)\n"
+                                            "^:unsafe (defn risky [x] x)\n"
+                                            "(defn plain [x] x)\n")))
+        r   (review/review-scan (atom {:store st :test-map {}}))
+        row (fn [n] (first (filter #(= (symbol "es.core" n) (:form %)) (:top r))))]
+    (is (= [:adapter] (:escapes (row "fetch"))) (pr-str (row "fetch")))
+    (is (= [:unsafe] (:escapes (row "risky"))) (pr-str (row "risky")))
+    (is (empty? (:escapes (row "plain"))) (pr-str (row "plain")))
+    (is (> (:risk (row "risky")) (:risk (row "fetch")) ) (pr-str (:top r)))
+    (is (> (:risk (row "fetch")) (:risk (row "plain"))) (pr-str (:top r)))
+    (is (pos? (:escape (:totals r))) (pr-str (:totals r)))))

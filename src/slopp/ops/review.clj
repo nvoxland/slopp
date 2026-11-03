@@ -31,7 +31,7 @@
             [slopp.index.refs :as refs]
             [slopp.index :as index]
             [slopp.store.render :as store.render]
-            [slopp.store :as store] [slopp.ops.done :as done] [slopp.store.db :as db]))
+            [slopp.store :as store] [slopp.ops.done :as done] [slopp.store.db :as db] [slopp.rules.markers :as markers]))
 
 (defn red-signal
   "What the red index says about one form, for a review row. `reds-by-fid` is
@@ -59,6 +59,28 @@
               (not (contains? created fid)))
          (assoc :never-red true))))))
 
+(def escape-weights
+  "Risk each escape marker adds to a review row; a marker not listed weighs 1.
+  `:unsafe` weighs 3: it waives the dialect, the rules that keep the form
+  verifiable at all. `:reveals` weighs 3: it hands a secret's real value to the
+  world. Every other escape weighs 1: it waives one named rule and says why."
+  {:unsafe 3 :reveals 3})
+
+(defn form-escapes
+  "The sorted vector of escape markers the form `s` (its sexpr) carries.
+  The set comes from `markers/marker-registry` entries of `:kind :escape`, never
+  a hand list, so a new escape marker is ranked by being declared. A marker
+  `:on :form` is read off the whole form's metadata; `:on :name` off the
+  defined symbol's."
+  [s]
+  (vec (sort (for [{:keys [marker on kind]} markers/marker-registry
+                   :when (and (= :escape kind)
+                              (get (if (= :form on)
+                                     (meta s)
+                                     (when (seq? s) (meta (second s))))
+                                   marker))]
+               marker))))
+
 ^:reads (defn ^:export review-scan
   "Whole-codebase (or one-ns) REVIEW TRIAGE — the fileless store's answer
   to 'where do I look first'. For every form it surfaces what the store
@@ -79,7 +101,10 @@
   evidence-less and is nonetheless not a gap anyone can close. ONE analysis pass (analyze + lint
   share the memoized kondo). Drill into a flagged form with query_slice.
   `:ns` scopes to one namespace; `:limit` caps the rows (default 25), the
-  tail in :omitted. Clean forms drop out."
+  tail in :omitted. Each row also carries `:escapes`, the sorted escape
+  markers the form uses (every `:kind :escape` entry of the marker registry),
+  and each adds to `:risk`: `:unsafe` +3 (waives the dialect), `:reveals` +3
+  (hands a secret to the world), any other +1 (waives one named rule). Clean forms drop out."
   [session & {:keys [ns limit] :or {limit 25}}]
   (let [st    (:store @session)
         nses  (if ns [(symbol (str ns))] (sort (keys (:namespaces st))))
@@ -266,6 +291,7 @@
                                     hops                           :static
                                     off-platform                   :off-platform
                                     :else                          :none)
+                         escapes  (form-escapes s)
                          flags    (cond-> []
                                     untested       (conj :untested)
                                     off-platform   (conj :off-platform)
@@ -275,7 +301,8 @@
                                     (pos? lints)   (conj :lint)
                                     doc?           (conj :undocumented)
                                     bang?          (conj :effectful)
-                                    (:never-red rs) (conj :never-red))
+                                    (:never-red rs) (conj :never-red)
+                                    (seq escapes)  (conj :escape))
                          risk     (+ (if untested 4 0)
                                      ;; 1, not untested's 4: a standing fact about
                                      ;; the platform is worth SEEING and is not a
@@ -291,11 +318,13 @@
                                      ;; 1: a covered form in current work whose
                                      ;; tests have never failed beside it — the
                                      ;; oracle may not constrain it
-                                     (if (:never-red rs) 1 0))]
+                                     (if (:never-red rs) 1 0)
+                                     (reduce + 0 (map #(get escape-weights % 1) escapes)))]
                    :when (and (not skip?) (pos? risk))]
                (cond-> {:form q :risk risk :loc loc :callers callers
                         :covered traced :flags flags :evidence evidence}
                  (= :static evidence) (assoc :hops hops)
+                 (seq escapes)        (assoc :escapes escapes)
                  (contains? rs :reds) (assoc :reds (:reds rs))))
         ranked (sort-by (juxt (comp - :risk) (comp - :callers) (comp str :form)) rows)]
     (cond-> {:reviewed (if ns (str ns) (str (count nses) " namespaces"))
