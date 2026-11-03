@@ -1,5 +1,5 @@
 (ns slopp-server.review-test
-  "zrs.4: the review endpoint lives in its OWN namespace (slopp-server.api.review) so the server-surface control lists that pin slopp-server.api.endpoints and the typed document stay true; the write session reaches it by late binding to a new process fn. server/context is restored to what it was; th…" (:require [clojure.test :refer [deftest is testing use-fixtures]] [slopp.store :as store] [slopp-server.api.server :as server] [slopp.http :as http] [slopp.rest :as slopp.rest]))
+  "zrs.4: the review endpoint lives in its OWN namespace (slopp-server.review) so the server-surface control lists that pin slopp-server.api.endpoints and the typed document stay true; the write session reaches it by late binding to a new process fn. server/context is restored to what it was; th…" (:require [clojure.test :refer [deftest is testing]] [slopp.store :as store] [slopp-server.api.server :as server] [slopp.http :as http] [slopp.rest :as slopp.rest]))
 
 (deftest a-review-is-written-only-by-an-authenticated-POST
   (let [st (assoc (store/empty-store)
