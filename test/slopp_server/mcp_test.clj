@@ -5171,3 +5171,10 @@
         (is (re-find #":ok true" r) r)
         (is (= "tried a cache; stale reads" (:rejected (last h)))))
       (finally (ops/close! sess)))))
+
+(deftest a-green-done-names-the-callees-an-edit-was-blind-to
+  (let [base {:done "d1" :findings {:episode-status :green :test-status :green}}]
+    (is (= '{ur.core/c [ur.core/b]}
+           (:unread-callees (#'mcp/terse-done (assoc base :unread-callees '{ur.core/c [ur.core/b]})))))
+    (is (not (contains? (#'mcp/terse-done base) :unread-callees))
+        "and stays one line when every callee was read")))

@@ -2487,6 +2487,17 @@ client-deps (merge (:client-deps st) (:client provided))
       (seq pruned-reqs)   (assoc :pruned-requires pruned-reqs)
       (:status iso)       (assoc :external iso)
       (seq changed)       (merge (done/spread-report st changed))
+      ;; where locality failed, measured: only when this session keeps a
+      ;; read ledger (the MCP door does; a one-shot CLI call does not), so
+      ;; absence of a ledger is never reported as "read nothing"
+      (and (seq changed) (contains? @session :slopp-server.mcp/ledger))
+      (as-> m (if-let [u (not-empty (done/unread-callees st changed (map first (keys (:slopp-server.mcp/ledger @session)))))]
+                (assoc m :unread-callees u
+                       :unread-note (str "these changed forms call store forms whose source this"
+                                         " session never read: the edit was made blind to them."
+                                         " Not an error; the tests may cover it. It is where"
+                                         " the slice was not enough."))
+                m))
       land                (assoc :land land)
       (seq gap)           (assoc :landed-gap
                                  {:forms (mapv (fn [[ns* nm]] (symbol (str ns*) nm)) gap)

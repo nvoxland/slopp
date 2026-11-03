@@ -743,6 +743,8 @@
           (:landed (:land r))            (assoc :landed (:landed (:land r)))
           ;; spread is shown only when wide: a narrow change stays one line
           (>= (get-in r [:spread :modules] 0) 3) (merge (select-keys r [:spread :spread-note]))
+          ;; an edit made blind to a callee is a fact that needs the agent
+          (seq (:unread-callees r))      (assoc :unread-callees (:unread-callees r))
           ;; the number a handoff quotes, on the answer it reads first
           ;; (eval24 opus: without it, test_run {all} after every green done)
           (:test r)                      (assoc :suite (let [s (:test r)]

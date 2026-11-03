@@ -176,3 +176,15 @@
         (is (nil? (:spread-note r))))
       (finally
         (ops/close! sess)))))
+
+(deftest unread-callees-name-what-an-edit-was-made-blind-to
+  (let [st  (-> (store/empty-store)
+                (store/ingest 'ur.core "(ns ur.core)\n\n(defn a [x] x)\n\n(defn b [x] x)\n\n(defn c [x] (+ (a x) (b x) (d x)))\n\n(defn d [x] x)\n")
+                (store/ingest 'ur.core-test "(ns ur.core-test (:require [ur.core :as u]))\n\n(defn t [] (u/a 1))\n"))
+        fid (fn [n nm] (:id (store/form-named st n nm)))]
+    (is (= '{ur.core/c [ur.core/b]}
+           (done/unread-callees st [(fid 'ur.core 'c) (fid 'ur.core 'd) (fid 'ur.core-test 't)]
+                                #{(fid 'ur.core 'a)}))
+        "a was read, d was written this episode, the test form is not production: b is the blind spot")
+    (is (= {} (done/unread-callees st [(fid 'ur.core 'c)] (map #(fid 'ur.core %) '[a b d])))
+        "every callee read")))

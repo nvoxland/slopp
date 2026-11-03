@@ -34,7 +34,7 @@
             [slopp.index :as index]
             [slopp.index.normalize :as normalize]
             [slopp.store.render :as store.render]
-            [slopp.store :as store] [rewrite-clj.node :as n] [slopp.read.history :as history] [slopp.edit.modules :as edit.modules]))
+            [slopp.store :as store] [rewrite-clj.node :as n] [slopp.read.history :as history] [slopp.edit.modules :as edit.modules] [slopp.index.refs :as refs]))
 
 (defn normalize-rewrites "Which of the episode's `changed` form ids the normalizer would actually
   rewrite, as `[{:form-id :form :node :applied}]` — pure, nothing committed.
@@ -272,3 +272,27 @@
       (cond-> {:spread sp}
         (>= (:modules sp) 3)
         (assoc :spread-note (str "This episode spans " (:modules sp) " modules: wide changes are where agents fail most. Consider splitting it, or review it more closely."))))))
+
+(defn ^:export unread-callees
+  "`{changed-form [callee ...]}`: for each changed PRODUCTION form, the store
+  forms it calls that the agent was never sent (`held-fids`, the read ledger's
+  form ids) and did not itself change this episode. The locality claim is
+  that everything needed to edit a form is in what the agent read or is
+  checked by the oracle; this is the measured half, where an edit was made
+  blind to a callee. A report, never a gate: the oracle may well have
+  covered it."
+  [st changed held-fids]
+  (let [held    (set held-fids)
+        mine    (set changed)
+        by-from (group-by :from-form (refs/refs st))]
+    (into (sorted-map)
+          (for [fid changed
+                :let [e  (store/form-by-id st fid)
+                      ns (store/ns-of-form-id st fid)]
+                :when (and e (:name e) ns (not (store.render/test-ns? ns)))
+                :let [cs (sort (distinct (for [r (get by-from fid)
+                                               :let [t (:to-form r)]
+                                               :when (and t (not (held t)) (not (mine t)))]
+                                           (symbol (str (:to-ns r)) (str (:to-name r))))))]
+                :when (seq cs)]
+            [(symbol (str ns) (str (:name e))) (vec cs)]))))
