@@ -3,7 +3,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.edit.facet :as edit.facet]
             [slopp.edit.gates :as gates]
-            [slopp.store :as store]))
+            [slopp.store :as store] [rewrite-clj.node :as n]))
 
 (defn- st
   "A store holding `shop.order` with `body` after its ns form."
@@ -138,3 +138,29 @@
            (edit.facet/weakenings old (update old :facet/fields dissoc :x/c))))
     (is (= [] (edit.facet/weakenings old (assoc-in old [:facet/fields :x/d] :int)))
         "a new field is a stronger contract, not a weaker one")))
+
+(deftest facet-cards-name-the-facets-a-forms-keys-belong-to
+  (let [decl (str "(defn total-ok? [o] (= 1 1))\n"
+                  "(def ^{:facet \"an order\"} Order {:facet/fields {:shop/id :int :shop/total :int} "
+                  ":facet/checks {:total-ok {:doc \"the total is the sum of the lines\" :fn #'total-ok?}} "
+                  ":facet/views {:public [:shop/id]}})\n")
+        base (st decl)
+        s    (store/ingest base 'shop.core "(ns shop.core)\n(defn place [o] (:shop/total o))\n(defn other [o] (:x/y o))\n")
+        sx   (fn [ns-sym nm] (n/sexpr (:node (store/form-named s ns-sym nm))))
+        cards (edit.facet/facet-cards s (sx 'shop.core 'place) 'shop.core)]
+    (is (= 1 (count cards)) (pr-str cards))
+    (let [c (first cards)]
+      (is (= 'shop.order/Order (:facet c)))
+      (is (= "an order" (:purpose c)))
+      (is (= [:shop/id :shop/total] (vec (sort (:fields c)))))
+      (is (= {:total-ok "the total is the sum of the lines"} (:checks c)))
+      (is (= {:public [:shop/id]} (:views c)))
+      (is (not (re-find #"total-ok\?" (pr-str (dissoc c :checks)))) "no check body rides"))
+    (is (= [] (edit.facet/facet-cards s (sx 'shop.core 'other) 'shop.core)))
+    (testing "a test namespace also sees its own fixture facets, production ones never lose"
+      (let [t (store/ingest s 'shop.core-test "(ns shop.core-test)\n(def ^{:facet \"fx\"} Fx {:facet/fields {:fx/k :int}})\n(defn f [m] [(:fx/k m) (:shop/id m)])\n")
+            cs (edit.facet/facet-cards t (n/sexpr (:node (store/form-named t 'shop.core-test 'f))) 'shop.core-test)]
+        (is (= ['shop.core-test/Fx 'shop.order/Order] (mapv :facet cs)) (pr-str cs)))
+      (let [t (-> (store/ingest s 'shop.core-test "(ns shop.core-test)\n(def ^{:facet \"fx\"} Fx {:facet/fields {:fx/k :int}})\n")
+                (store/ingest 'shop.other-test "(ns shop.other-test)\n(defn f [m] (:fx/k m))\n"))]
+        (is (= [] (edit.facet/facet-cards t (n/sexpr (:node (store/form-named t 'shop.other-test 'f))) 'shop.other-test)))))))

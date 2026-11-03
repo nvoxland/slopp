@@ -36,7 +36,7 @@
             [slopp.edit :as edit]
             [slopp.index.refs :as refs]
             [slopp.store.render :as store.render]
-            [slopp.store :as store] [slopp.index.derive :as derive] [slopp.index.analyze :as analyze] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http] [slopp.read.graph :as graph] [slopp.edit.gates :as gates] [slopp.rules.catalog :as catalog] [slopp.rules.cli :as rules.cli] [slopp.rules.rest :as rules.rest] [slopp.rules.webapp :as rules.webapp]))
+            [slopp.store :as store] [slopp.index.derive :as derive] [slopp.index.analyze :as analyze] [slopp.project.capabilities :as capabilities] [slopp.rules.http :as rules.http] [slopp.read.graph :as graph] [slopp.edit.gates :as gates] [slopp.rules.catalog :as catalog] [slopp.rules.cli :as rules.cli] [slopp.rules.rest :as rules.rest] [slopp.rules.webapp :as rules.webapp] [slopp.edit.facet :as facet]))
 
 (defn ^:export query-sources
   "Batched read (ONE call, several targets): `targets` is a vector of
@@ -142,6 +142,7 @@
                                         (not verbose) (dissoc :why))))
                         shown)
           src     (n/string (:node e))
+          fcs     (facet/facet-cards (:store @session) (n/sexpr (:node e)) ns-sym)
           target  (if match
                     (let [lines (vec (str/split-lines src))
                           w     (or (some-> window str parse-long) 25)
@@ -179,6 +180,7 @@
                                     " {targets [\"" root "\"]} for it whole")})))]
       (cond-> {:target target
                :cards cards}
+        (seq fcs) (assoc :facets fcs)
         (> (count reached) limit) (assoc :omitted (- (count reached) limit))))
     (edit/missing-form-error (:store @session) ns-sym nm)))
 

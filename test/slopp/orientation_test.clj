@@ -594,3 +594,21 @@
         (is (= 'fuel (get a 'ab.fuel)) (pr-str a))
         (is (= 'str (get a 'clojure.string)) (pr-str a)))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-slice-carries-the-facets-its-forms-keys-name
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'shop.order
+                   (str "(ns shop.order)\n(defn total-ok? [o] (= 1 1))\n"
+                        "(def ^{:facet \"an order\"} Order {:facet/fields {:shop/id :int :shop/total :int} "
+                        ":facet/checks {:total-ok {:doc \"the total is the sum of the lines\" :fn #'total-ok?}} "
+                        ":facet/views {:public [:shop/id]}})\n"))
+      (ops/ingest! sess 'shop.core
+                   "(ns shop.core)\n(defn place [o] (:shop/total o))\n(defn plain [o] (inc o))\n")
+      (let [r (query/query-slice sess 'shop.core 'place)
+            c (first (:facets r))]
+        (is (= 'shop.order/Order (:facet c)) (pr-str r))
+        (is (= {:total-ok "the total is the sum of the lines"} (:checks c)))
+        (is (not (re-find #"total-ok\?" (pr-str (:facets r))))))
+      (is (not (contains? (query/query-slice sess 'shop.core 'plain) :facets)))
+      (finally (ops/close! sess)))))

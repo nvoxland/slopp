@@ -330,3 +330,33 @@
                          required (set (for [[k v] fields :when (not (and (map? v) (:optional v)))] k))]
                    :when (and (every? #(contains? fields %) ks) (every? ks required))]
                (symbol (str n) (str nm)))))))
+
+(defn ^:export facet-cards
+  "One card per distinct facet that owns a key `form-sexpr` (written in
+  `ns-sym`) uses, sorted by facet name; [] when none. A card is
+  {:facet 'ns/Name :purpose \"...\" :fields [keys] :checks {k doc} :views {view [keys]}}
+  - the check DOCS, never the check bodies. The facets considered are the
+  production ones (`owners`), plus, when `ns-sym` is a test namespace, the
+  facets declared in that same namespace; another namespace's fixtures are not
+  visible."
+  [store form-sexpr ns-sym]
+  (let [test? (store.render/test-ns? ns-sym)
+        decls (into {} (filter (fn [[[n _] _]]
+                                 (or (not (store.render/test-ns? n)) (and test? (= n ns-sym)))))
+                    (facets store))
+        owned (into {} (for [[[n nm] decl] decls
+                             k (keys (:facet/fields decl))]
+                         [k [n nm]]))
+        used  (into (sorted-set) (keep (fn [[kw _]] (owned kw))) (refs/form-keyword-uses form-sexpr))
+        purposes (into {} (for [[n nm] used
+                                :let [e (store/form-named store n nm)
+                                      sx (some-> e facet-sexpr)]
+                                :when sx]
+                            [[n nm] (:facet (meta (second sx)))]))]
+    (vec (for [id used
+               :let [decl (decls id)]]
+           {:facet (symbol (str (first id)) (str (second id)))
+            :purpose (purposes id)
+            :fields (vec (keys (:facet/fields decl)))
+            :checks (into {} (for [[k c] (:facet/checks decl)] [k (:doc c)]))
+            :views (into {} (for [[v fs] (:facet/views decl)] [v (vec fs)]))}))))
