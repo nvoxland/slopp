@@ -2068,19 +2068,24 @@
 
 (defn- view-line!
   "The line whose rows ARE `line-id`'s view: itself when it holds rows, else
-  — for an OPEN thread — its parent branch: a rowless open thread has
-  written nothing, so its view is the branch's (fork on write). A landed or
-  abandoned thread has no view by design and resolves to itself, empty;
-  showing a settled line its branch's rows would make it read as live.
-  Every reader of a view resolves through here, so an open thread that has
-  not written cannot be shown an empty store."
+  — for an OPEN thread — whatever its parent's view is: a rowless open thread
+  has written nothing, so it reads the line it forks from (fork on write).
+  That line may itself be a rowless thread — `thread_open {parent}` mints a
+  parent and a child together — so the walk continues up until it reaches a
+  line with rows or one that is not an open thread. A landed or abandoned
+  thread has no view by design and resolves to itself, empty; showing a
+  settled line its branch's rows would make it read as live. Every reader of
+  a view resolves through here, so an open thread that has not written
+  cannot be shown an empty store."
   [conn line-id]
-  (if (line-has-view? conn line-id)
-    line-id
-    (or (one-col (jdbc/execute-one!
-                  conn ["SELECT parent FROM lines
-                          WHERE id = ? AND kind = 'thread' AND status = 'open'" line-id]))
-        line-id)))
+  (loop [line line-id]
+    (if (line-has-view? conn line)
+      line
+      (if-let [parent (one-col (jdbc/execute-one!
+                                conn ["SELECT parent FROM lines
+                                        WHERE id = ? AND kind = 'thread' AND status = 'open'" line]))]
+        (recur parent)
+        line))))
 
 ^:reads (defn ^:export
   

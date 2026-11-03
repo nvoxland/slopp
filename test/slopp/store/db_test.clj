@@ -1798,3 +1798,22 @@
             "credited once per changed form; a test with no row is simply absent")
         (is (= [] (db/reds-by-test conn []))))
       (finally (.close conn)))))
+
+(deftest ^:external a-rowless-child-of-a-rowless-thread-reads-the-branch
+  ;; thread_open {parent} mints a parent thread and a child under it in one
+  ;; call, so NEITHER has written. Fork on write says a line with no rows
+  ;; reads the line it forks from — and that line may itself be rowless.
+  ;; Resolving only one level up handed the child its parent's (empty) rows,
+  ;; and the subagent's session opened on a store with no namespaces at all.
+  (let [dir  (temp-dir)
+        conn (db/open! dir)]
+    (try
+      (let [nses  (fn [line] (set (keys (:namespaces (db/load-store conn line)))))
+            s1    (store/ingest (store/empty-store) 'th.one "(ns th.one)\n\n(def a 1)\n")
+            trunk (db/trunk-line-id! conn)]
+        (is (true? (db/append! conn s1 (store/deltas s1) ['th.one] trunk nil)))
+        (let [parent (db/adopt-thread! conn trunk "agent-parent")
+              child  (db/adopt-thread! conn parent "agent-child")]
+          (is (= #{'th.one} (nses parent)) "the rowless parent reads the branch")
+          (is (= #{'th.one} (nses child)) "and so does its rowless child")))
+      (finally (.close conn)))))
