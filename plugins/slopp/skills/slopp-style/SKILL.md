@@ -292,6 +292,17 @@ The handler receives the parsed value under `:body`. A failed check is a 400
 that names the check's `:doc`. The response is projected to the view and
 secrets are redacted. A body the handler broke is a logged, generic 500.
 
+**Claims: who may do it, checked by the port.** A facet may declare claims
+beside its checks: `:facet/claims {:shop/write {:doc "the acting user owns the
+order" :fn #'may-write?}}`, where the fn takes `[value actor sources]` and
+returns `true` or failure data. A route declares which claims it needs:
+`:facet/claims [:shop/write]`. Its port checks them before the handler runs,
+with the actor the port resolved (never one the handler builds): no actor is a
+401, a failed claim is a 403 naming the claim's `:doc`. A function that must
+only run under a claim says so: `^{:facet/requires [:shop/write]}` on
+`delete-order!`. `done` is red when any route reaches it, through any chain of
+calls, without declaring that claim.
+
 **Adapters return Raw.** A form marked `^{:adapter "db ..."}` wraps what it
 reads: `(facet/raw rows :db/orders)`. Nothing but `parse` opens a Raw. Wrap
 one map per Raw. For a vector of rows, wrap each row.

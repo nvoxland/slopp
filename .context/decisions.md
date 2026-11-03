@@ -8216,6 +8216,17 @@ reads back unparsed); inline validation inside the region.
   author); a store requiring only `slopp.facet` was vendored nothing; and an
   oracle eval string that failed whole crashed done. The open items are in
   the facets follow-ups backlog.
+- *Claims* (gxv.2, dbea9d8a6e38d): a route's `:facet/claims [k ...]` are
+  checked by `rest.contract/check-claims`, reached by the dispatcher through
+  `:rest/check-claims`, before the handler: `(f parsed actor sources)` with
+  the port's `:http/identity` and `:http/deps`; 401 without an actor, 403
+  naming the claim's doc. `:facet-claims-reach` (done, `:error`): a route
+  reaching a `^{:facet/requires [...]}` sink through any call chain must
+  declare those claims. `shape-response` now projects only 2xx bodies, so a
+  401/403/4xx error body is not run through the view. NOT built: the
+  generative check that a claim fn never grants more than its declaration
+  says (it needs a statement of 'what the declaration says' that a claim fn
+  could be checked against).
 
 ## D-behaviour-axis amended (2026-11-02) — trust before overview
 

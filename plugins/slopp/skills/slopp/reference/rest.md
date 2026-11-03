@@ -171,6 +171,11 @@ A route may name a facet instead of a malli schema. The facet is declared once
   the port the declaration's value, which `parse` refuses. Write `#'Order`.
 - A route with no facet contract and no schema still echoes its raw body. Give
   every route that takes a body a contract.
+- `:facet/claims [:shop/write]` on the route names claims the request facet
+  declares; the port checks each with the resolved `:http/identity` before the
+  handler runs (401 with no actor, 403 naming the claim's doc). A sink marked
+  `^{:facet/requires [:shop/write]}` reached from a route that does not declare
+  the claim is red at `done`.
 - Not covered yet: a facet over a COLLECTION body (a list of orders), and a
   required contract on GET routes.
 
