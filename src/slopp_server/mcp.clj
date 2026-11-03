@@ -929,7 +929,12 @@
   it read the NEXT session's ask as its own; that session then opened no
   turn and every form it wrote belonged to no ask. Measured: a five-ask
   lifetime reached main with one turn-begin. The claimed id is the
-  intent-sid or, failing that, the pinned agent-id.
+  intent-sid or, failing that, the pinned agent-id — except the server's
+  own `mcp-` label, which names no harness session (slopp-oa7: with it
+  counted, a served Claude Code session never read one ask). Such a session
+  takes the first ask it finds and claims that id from then on; two
+  unclaimed sessions racing for the very first ask in one directory is the
+  remaining window.
 
   A claimed session prefers its OWN `pending-intent.<sid>` file, which is
   what a current hook writes alongside the legacy path; the unscoped file is
@@ -945,7 +950,14 @@
   [session]
   (when-let [dir (:dir @session)]
     (let [claimed (or (:intent-sid @session)
-                      (when (:pinned-agent? @session) (:agent-id @session)))
+                      (when (and (:pinned-agent? @session)
+                                 ;; the server's OWN label for an MCP session
+                                 ;; (`process/attach!`) names no harness
+                                 ;; session, so it claims nothing: counting
+                                 ;; it made every hook ask look like another
+                                 ;; session's, and the ask never arrived
+                                 (not (str/starts-with? (str (:agent-id @session)) "mcp-")))
+                        (:agent-id @session)))
           scoped  (when claimed
                     (io/file dir ".slopp" (str "pending-intent." claimed)))
           legacy  (io/file dir ".slopp" "pending-intent")

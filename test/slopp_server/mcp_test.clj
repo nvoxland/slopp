@@ -5106,3 +5106,28 @@
         (let [r (call! sess "change" {:prompt "f is the ls adapter" :impl [{:ns "pl.core" :name "f" :source "(defn ^{:adapter \"process — ls; a test passes a fake\"} f \"F.\" [] (sh/sh \"ls\"))"}]})]
           (is (re-find #":ok true" r) r)))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-server-labelled-session-takes-the-hooks-ask
+  ;; slopp-oa7: the server opens every MCP session pinned to its own label,
+  ;; mcp-<8 chars of the MCP session id>. That label counted as a CLAIM, the
+  ;; hook's mailbox names the Claude session id, so the session judged the
+  ;; human's ask to be somebody else's and never read it: an ask naming a
+  ;; protected test did not lift the guard until a manual turn_begin.
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-mcp-label-" (System/nanoTime))
+        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "mcp-7a86e916"})]
+    (try
+      (io/make-parents (io/file dir ".slopp" "pending-intent"))
+      (spit (io/file dir ".slopp" "pending-intent")
+            "{\"session-id\":\"claude-1\",\"prompt\":\"update f-t to expect 3\"}")
+      (call! sess "ns_create" {:ns "lb.core" :source "(ns lb.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n"})
+      (testing "the ask is the session's last intent"
+        (is (= "update f-t to expect 3" (:last-intent @sess))))
+      (testing "and the session now claims that Claude session, so another's ask is left alone"
+        (is (= "claude-1" (:intent-sid @sess)))
+        (spit (io/file dir ".slopp" "pending-intent")
+              "{\"session-id\":\"claude-2\",\"prompt\":\"someone else's ask\"}")
+        (call! sess "query_history" {:ns "lb.core" :name "f"})
+        (is (= "update f-t to expect 3" (:last-intent @sess)))
+        (is (.exists (io/file dir ".slopp" "pending-intent"))))
+      (finally (ops/close! sess)
+               (sh/sh "rm" "-rf" dir)))))
