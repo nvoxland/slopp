@@ -224,6 +224,12 @@ form an earlier ask shaped leads its answer with `;; you replaced form(s) an
 earlier ask shaped …`. That ask is often the only place the REASON for the
 code lives. Keep what it wanted, or tell the user your change no longer does.
 
+A recorded ask is a warning, not a guarantee: a later agent sees it, but may
+still do what its own user asks. So when an ask states a rule that must
+ALWAYS hold ("never reorder these columns", "tax the discounted amount"),
+write a test that fails when the rule breaks, in the same change. The test
+is what stops the next agent; the ask only explains why.
+
 A merge only catches two changes to the same TEXT. It does not catch two
 agents deciding different things about one form, where each lands green
 and the later one quietly reverses the earlier one's reason. So slopp
