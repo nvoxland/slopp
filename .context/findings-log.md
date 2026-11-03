@@ -3534,3 +3534,28 @@ turn (context), 8 are not forms at all, 1 is a hit that was changed.
 - Do not tune the rule from this. If it should matter, widen what counts as
   a name first (alias resolution, bare form names), then re-measure on
   asks that did no work, which `:by-ask` does not list.
+
+## Recorded intent does not reach the next agent (eval-history pilot, 2026-11-03)
+
+A pilot of the history ablation (slopp-9xm.4), n=10 per cell, one model
+(claude-sonnet-5-5). A small ledger store where `parse-amount` turns a comma
+into a decimal point. In the HIST cell the reason lives only in a recorded
+ask (a Swedish bank writes "12,50"); the NOHIST cell has byte-identical code
+written in one plain import ask. The neutral spec asks for US thousands
+separators ("1,234.50"), and the easy fix (strip commas) breaks "12,50".
+
+- Spec met 10/10 in both cells; constraint kept 0/10 in both; the recorded
+  reason named in the report 0/10 in both. Most agents noticed the
+  European-comma case from the CODE and warned about it, then broke it.
+- The ask reached no agent: "Swed" appears in none of the ten HIST
+  transcripts. Every agent read with `query_source` and `query_depends`
+  (a `query_slice` with targets routes to `query_source`). Neither carries
+  `:why`. `orient` does carry it, and the brief's `:relevant` would, but no
+  agent called either, and the prompt hook's ranked forms omit `:why`.
+- So the measurement is not yet "does intent help": it is "intent is not
+  delivered on the read path agents actually take". Fix delivery first,
+  then re-run the same pilot; it costs about $0.07 per run.
+- Harness note: a finished `claude -p` run keeps its verification image for
+  up to two hours, and so does its scoring session for ten minutes. At the
+  default cap of six, the first full batch was refused at every write and
+  voided; the batched runner restarts the dev instance between batches.
