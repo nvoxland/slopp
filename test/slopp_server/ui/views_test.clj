@@ -5471,3 +5471,21 @@
     (is (contains? (hrefs v) "/store/form/f1"))
     (is (re-find #"destructures it" (text v)))
     (is (re-find #"2 test namespaces" (text v)))))
+
+(deftest the-change-screen-says-what-it-did-not-see
+  (let [flat (fn [v] (str/join " " (filter string? (tree-seq coll? seq v))))
+        base {:from "c1" :to "c2" :count 3 :modules []}
+        seen (flat (views/change-main (assoc base :absence {:changed 3 :no-observed-test 1 :system-deltas 2})))
+        unk  (flat (views/change-main (assoc base :absence {:changed 3 :no-observed-test nil :system-deltas 0})))
+        none (flat (views/change-main (assoc base :absence {:changed 3 :no-observed-test 0 :system-deltas 0})))
+        bare (flat (views/change-main base))]
+    (testing "counts the changed forms no test was seen running"
+      (is (str/includes? seen "1 of 3 changed forms had no test observed running them")))
+    (testing "names the housekeeping changes"
+      (is (str/includes? seen "2 housekeeping (system) changes in this range")))
+    (testing "without a trace map, says coverage is unknown and not a count"
+      (is (str/includes? unk "no trace map: test coverage unknown"))
+      (is (not (str/includes? unk "housekeeping"))))
+    (testing "zero untested still says so, and an old answer without the key renders nothing"
+      (is (str/includes? none "0 of 3 changed forms had no test observed running them"))
+      (is (not (str/includes? bare "test observed"))))))

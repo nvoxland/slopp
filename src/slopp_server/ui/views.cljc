@@ -1523,7 +1523,7 @@
   Neither shows up in the readout, because the text renders either way — and
   this screen has no fixture, so nothing has ever driven it. That is the
   second instance of a live defect behind an undriven screen."
-  [{:keys [from to modules arc] total :count}]
+  [{:keys [from to modules arc absence] total :count}]
   [:div
    ;; on an empty answer this rendered `..` as a heading and ` forms` with no
    ;; number — the same false-sentence class as `0 forms` and
@@ -1535,6 +1535,17 @@
    (if total
      [:p (plural total "form")]
      [:p "nothing to show — this range came back empty."])
+   ;; what the deterministic view did NOT consult, said up front so the page
+   ;; does not read as more certain than it is.
+   (when absence
+     (let [{:keys [changed no-observed-test system-deltas]} absence]
+       [:div {:class "absence"}
+        [:p (if (nil? no-observed-test)
+              "no trace map: test coverage unknown"
+              (str no-observed-test " of " changed
+                   " changed forms had no test observed running them"))]
+        (when (and system-deltas (pos? system-deltas))
+          [:p (str system-deltas " housekeeping (system) changes in this range")])]))
    ;; THE ARC, which nothing rendered until 2026-08-15. It is one entry per
    ;; verification in the range, and its own contract argues for it better than
    ;; a docstring here could: zero failures throughout "for a range that ADDED
