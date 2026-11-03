@@ -353,3 +353,16 @@
     (is (> (:risk (row "risky")) (:risk (row "fetch")) ) (pr-str (:top r)))
     (is (> (:risk (row "fetch")) (:risk (row "plain"))) (pr-str (:top r)))
     (is (pos? (:escape (:totals r))) (pr-str (:totals r)))))
+
+(deftest a-weak-oracle-at-the-last-done-is-a-risk
+  (let [st   (store/ingest (store/empty-store) 'rv.core "(ns rv.core)\n\n(defn f \"F.\" [x] (inc x))\n\n(defn g \"G.\" [x] x)\n")
+        st   (assoc st :recent [{:id "d9" :op :done
+                                 :findings {:mutants-survived [{:form 'rv.core/f
+                                                                :survivors [{:mutation "inc -> dec"}]}]}}])
+        rows (into {} (map (juxt :form identity)) (:top (review/review-scan (atom {:store st}))))
+        base (into {} (map (juxt :form identity))
+                   (:top (review/review-scan (atom {:store (assoc st :recent [])}))))]
+    (is (some #{:weak-oracle} (:flags (rows 'rv.core/f))))
+    (is (not (some #{:weak-oracle} (:flags (rows 'rv.core/g)))))
+    (is (= (+ 2 (:risk (base 'rv.core/f))) (:risk (rows 'rv.core/f)))
+        "tests that run a form without constraining it are worth reading first")))

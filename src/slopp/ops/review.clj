@@ -124,6 +124,13 @@
                                                          :when (:name e)]
                                                      (:id e)))))))
         rendered (into {} (map (fn [n] [n (store.render/render-ns st n)])) nses)
+        ;; WEAK ORACLE, as of the last done: forms whose tests ran them and
+        ;; still passed with a mutant in place, so the tests watch the code
+        ;; without constraining it. Read off the latest :done in the window;
+        ;; a later done that changes the form asks again
+        weak    (into #{} (map :form)
+                      (some-> (last (filter #(= :done (:op %)) (:recent st)))
+                              :findings :mutants-survived))
         ns-lint (into (sorted-map)
                       (for [[nsx src] rendered
                             :let [c (count (for [f (index/lint src (store/kondo-lang st nsx))
@@ -302,7 +309,8 @@
                                     doc?           (conj :undocumented)
                                     bang?          (conj :effectful)
                                     (:never-red rs) (conj :never-red)
-                                    (seq escapes)  (conj :escape))
+                                    (seq escapes)  (conj :escape)
+                                    (weak q)       (conj :weak-oracle))
                          risk     (+ (if untested 4 0)
                                      ;; 1, not untested's 4: a standing fact about
                                      ;; the platform is worth SEEING and is not a
@@ -319,7 +327,11 @@
                                      ;; tests have never failed beside it — the
                                      ;; oracle may not constrain it
                                      (if (:never-red rs) 1 0)
-                                     (reduce + 0 (map #(get escape-weights % 1) escapes)))]
+                                     (reduce + 0 (map #(get escape-weights % 1) escapes))
+                                     ;; 2: green tests that cannot fail on a
+                                     ;; fault are the false comfort a reviewer
+                                     ;; most needs to see
+                                     (if (weak q) 2 0))]
                    :when (and (not skip?) (pos? risk))]
                (cond-> {:form q :risk risk :loc loc :callers callers
                         :covered traced :flags flags :evidence evidence}
