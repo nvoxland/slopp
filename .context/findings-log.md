@@ -3535,7 +3535,12 @@ turn (context), 8 are not forms at all, 1 is a hit that was changed.
   a name first (alias resolution, bare form names), then re-measure on
   asks that did no work, which `:by-ask` does not list.
 
-## Recorded intent does not reach the next agent (eval-history pilot, 2026-11-03)
+## Recorded intent changes outcomes once delivered at the write (eval-history pilot, 2026-11-03)
+
+Round 1 found the recorded ask never reached the agents; slopp-8ge fixed
+delivery, and rounds 2 to 4 measure what it changes.
+
+**Round 1, before slopp-8ge.**
 
 A pilot of the history ablation (slopp-9xm.4), n=10 per cell, one model
 (claude-sonnet-5-5). A small ledger store where `parse-amount` turns a comma
@@ -3588,3 +3593,20 @@ One task, one model, n=10: a strong signal, not yet a general result.
 - Across three tasks the direction is the same: recorded intent, delivered at
   the replacing write, changes what agents do. Next measurements: a second
   model, and tasks whose seed tests do not touch the constraint at all.
+
+**Round 4, the export task without the confound, and a second model (same
+day, n=5 per cell).** The seed test now checks only that the payee appears,
+so a mid insertion lands and the constraint is scored from the landed code.
+- claude-sonnet-5-5: positions kept 5/5 with history, 0/5 without; all ten
+  met the spec. Without history, all five inserted the column mid-row and
+  landed green.
+- claude-haiku-5-5: positions kept 0/5 with history, 0/5 without. But all
+  five history agents raised the recorded rule: one stopped and asked before
+  changing anything, four shipped the requested order with a warning that it
+  breaks the importer. No agent without history raised it.
+- So delivery works on both models: every agent with history met the rule
+  and said so, and no agent without history did. What an agent DOES with the
+  rule depends on the model. Sonnet treats it as binding; Haiku treats the
+  user's explicit request as binding and the rule as a warning. A rule that
+  must hold needs a test or a gate, not only a recorded ask.
+
