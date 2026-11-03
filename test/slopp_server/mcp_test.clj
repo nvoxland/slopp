@@ -5202,3 +5202,24 @@
     (is (not (contains? out :accept-unused)) (pr-str out))
     (is (= [t] (mapv :test (:accept-unproposable out))) (pr-str out))
     (is (re-find #"detail" (str (:why (first (:accept-unproposable out))))))))
+
+(deftest ^:external writes-on-one-session-take-turns
+  ;; ao6: two agents on ONE session (a parent and its subagent) wrote at once;
+  ;; a land by one replaced the store under the other's in-flight write, and a
+  ;; test reported {:landed 1} never reached the journal. Writes now hold the
+  ;; session's lock; reads do not.
+  (let [sess (external/open!)]
+    (try
+      (let [held (promise)
+            hold (future (locking sess (deliver held true) (Thread/sleep 600)))
+            _    @held
+            t0   (System/currentTimeMillis)
+            _    (call! sess "query_history" {})
+            read-ms (- (System/currentTimeMillis) t0)
+            t1   (System/currentTimeMillis)
+            _    (call! sess "ns_create" {:ns "lk.core" :source "(ns lk.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n"})
+            write-ms (- (System/currentTimeMillis) t1)]
+        @hold
+        (is (< read-ms 400) (str "a read does not wait for the lock: " read-ms "ms"))
+        (is (>= write-ms 300) (str "a write waits for the writer before it: " write-ms "ms")))
+      (finally (ops/close! sess)))))

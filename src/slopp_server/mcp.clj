@@ -2211,7 +2211,8 @@
   its symbols in that namespace: the RAW code is gated first, because the
   wrapped form quotes it and quoted data is inert to the observe gate. What
   was repaired rides the result as a leading `;; repaired …` line, so the
-  accepted shape is learned for free."
+  accepted shape is learned for free. A call whose op is not read-only runs
+  under the session's lock, so writes on one session never interleave."
   [session {:keys [name arguments] :as req}]
   (let [{n' :name a' :arguments repaired :repaired} (tools/remap-arguments name arguments)
         [a' repaired] (if (and (#{"query_eval" "check"} n') (:ns a') (string? (:code a'))
@@ -2224,7 +2225,16 @@
                          (assoc (or repaired {}) :ns-bound (str (:ns a')))]
                         [a' repaired])
         r (let [s' (view-session! session n' a')
-                r  (call-op-1! s' (assoc req :name n' :arguments a'))]
+                r  (if (contains? tools/read-only-tools n')
+                     (call-op-1! s' (assoc req :name n' :arguments a'))
+                     ;; WRITES take turns on a session: two agents sharing one
+                     ;; (a parent and its subagent) once interleaved, and a land
+                     ;; by one replaced the store under the other's in-flight
+                     ;; write — reported landed, never journaled. Reentrant, so
+                     ;; a write that calls back in (explore, a change's steps,
+                     ;; refresh-app!) does not deadlock on itself
+                     (locking session
+                       (call-op-1! s' (assoc req :name n' :arguments a'))))]
             ;; a stub or a trim spooled on the view must stay openable here
             (when-not (identical? s' session)
               (swap! session assoc ::spool (::spool @s')))
