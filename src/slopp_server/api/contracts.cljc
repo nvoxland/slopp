@@ -185,11 +185,15 @@
    [:count {:doc "how many forms changed across the whole range"} :int]
    [:spread {:doc (str "how WIDE the range is, over production forms only: agent success"
                        " falls once a change touches three or more modules. A report, not a gate")}
-    [:map [:forms :int] [:namespaces :int] [:modules :int]]]
+    [:map [:forms {:doc "production forms changed in the range"} :int]
+          [:namespaces {:doc "production namespaces they live in"} :int]
+          [:modules {:doc "modules they live in"} :int]]]
    [:absence {:doc (str "what this view did NOT see: changed forms no test was observed"
                         " running (nil when the server holds no trace map, so the count is"
                         " unknown rather than zero), and housekeeping deltas in the range")}
-    [:map [:changed :int] [:no-observed-test [:maybe :int]] [:system-deltas :int]]]
+    [:map [:changed {:doc "forms changed in the range"} :int]
+          [:no-observed-test {:doc "of those, how many no test was observed running; nil when the server holds no trace map"} [:maybe :int]]
+          [:system-deltas {:doc "housekeeping deltas in the range, written by slopp rather than an author"} :int]]]
    [:modules {:doc (str "the changes grouped module then namespace, with a count at"
                         " every rung so a consumer can render a collapsed tree"
                         " without summing anything itself")}

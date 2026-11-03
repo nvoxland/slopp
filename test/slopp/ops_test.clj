@@ -3000,30 +3000,3 @@
         "a version change of a dependency the store already has")
     (is (re-find #"deps-allow" (str (ops/deps-allow-refusal st lib "add org.example/left-padding")))
         "a look-alike name in the ask is not the library")))
-
-(deftest a-review-needs-a-real-commit-point-and-a-verdict
-  (let [st (assoc (store/empty-store)
-                  :deltas [{:id "d1" :op :add :ns 'demo.core :form-id "f1"}
-                           {:id "d2" :op :commit :target "d1" :status :green :at 1784900000000
-                            :description "first"}])
-        s  (atom {:store st})
-        ;; a committed marker leaves the value's :deltas and sits in :recent
-        n  (fn [] (count (filter #(= :review (:op %)) (:recent (:store @s)))))]
-    (testing "a target that is not a commit point is refused, with the way out"
-      (let [r (ops/review-commit! s "d1" :endorsed :by "nathan")]
-        (is (string? (:error r)))
-        (is (re-find #"commit point" (:error r)))
-        (is (= 0 (n)) "nothing was written")))
-    (testing "a verdict other than endorsed or flagged is refused"
-      (let [r (ops/review-commit! s "d2" :approved :by "nathan")]
-        (is (re-find #"endorsed" (:error r)))
-        (is (= 0 (n)))))
-    (testing "a review needs a reviewer"
-      (is (string? (:error (ops/review-commit! s "d2" :endorsed))))
-      (is (= 0 (n))))
-    (testing "a real commit point and a verdict record the marker"
-      (let [r (ops/review-commit! s "d2" :flagged :by "nathan" :note "too wide")]
-        (is (nil? (:error r)) (pr-str r))
-        (is (= 1 (n)))
-        (is (= {:op :review :target "d2" :verdict :flagged :by "nathan" :note "too wide"}
-               (select-keys (last (:recent (:store @s))) [:op :target :verdict :by :note])))))))

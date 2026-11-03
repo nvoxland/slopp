@@ -2350,7 +2350,11 @@
   whitespace-insensitive, so the two can differ and the source is what should
   survive. A template with no `$1` is refused rather than treated as a plain
   replace, because that would DELETE the matched form — a different operation
-  than the one asked for."
+  than the one asked for.
+
+  Matching is also comment-blind, so a match written without the comments
+  inside its span still SPANS them: a replacement that does not carry them is
+  refused, naming them, rather than deleting them while the write reports ok."
   ([store ns-sym form-name match-src new-src]
    (subform-replace-plan store ns-sym form-name match-src new-src false))
   ([store ns-sym form-name match-src new-src wrap?]
@@ -2373,20 +2377,17 @@
                    ;; differ and it is the source that should survive the wrap
                    src     (if wrap?
                              (fill-template new-src [(n/string (z/node m))])
-                             new-src)]
-               (let [old     (frequencies (comment-texts (span-text form-src [r c] [er ec])))
-                     kept    (frequencies (comment-texts src))
-                     dropped (sort (for [[t k] old :when (> k (get kept t 0))] t))]
-                 ;; matching skips comments, so a match written without
-                 ;; them still SPANS them, and a replacement without them
-                 ;; deleted them while the write reported ok
-                 (if (and (not wrap?) (seq dropped))
-                   {:error (str "this match spans comment(s) the replacement does not carry: "
-                                (clojure.string/join " | " dropped)
-                                ". Matching ignores comments, so they would be deleted."
-                                " Restate them in the replacement, or match a smaller form"
-                                " that does not contain them.")}
-                   {:new-form-src (replace-span form-src [r c] [er ec] src)})))))
+                             new-src)
+                   old     (frequencies (comment-texts (span-text form-src [r c] [er ec])))
+                   kept    (frequencies (comment-texts src))
+                   dropped (sort (for [[t k] old :when (> k (get kept t 0))] t))]
+               (if (and (not wrap?) (seq dropped))
+                 {:error (str "this match spans comment(s) the replacement does not carry: "
+                              (str/join " | " dropped)
+                              ". Matching ignores comments, so they would be deleted."
+                              " Restate them in the replacement, or match a smaller form"
+                              " that does not contain them.")}
+                 {:new-form-src (replace-span form-src [r c] [er ec] src)}))))
          {:error (str "no form named " form-name " in " ns-sym)}))
      (catch Exception ex
        {:error (str "subform edit failed: " (ex-message ex))}))))

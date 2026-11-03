@@ -247,6 +247,8 @@
 (deftest ^:external deps-ride-the-mcp-surface
   (let [sess (external/open!)]
     (try
+      (swap! sess assoc :last-intent "add org.clojure/data.json for the report")
+      ;; a NEW library needs the human's ask to name it (the deps_add allow-list)
       (let [call (fn [tool args]
                    (get-in (slopp-server.mcp/handle!
                             sess {:id 1 :method "tools/call"

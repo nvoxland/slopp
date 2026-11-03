@@ -919,15 +919,18 @@
 
   `dev` is here because it is the project's SHARED dev setup — what runs, on
   which port, while somebody works on it — and a fresh clone has to arrive
-  with it or its dev instance cannot come up. A developer's own override of
+  with it or its dev instance cannot come up.   A developer's own override of
   that setup is `dev.local`, declared in [[local-config-paths]] instead.
+
+  `deps-allow` is the team's list of libraries a human approved for this
+  store, so it travels with the repo like `rules` does.
 
   DECLARED rather than derived: the store that needs the answer is often the
   one missing the entry (a fresh clone holds no config at all), and the
   symptom of a missing declaration is silent — the path blobs and the
   importer reports \"file updated\"."
   #{"capabilities" "gates" "modules" "META-INF/MANIFEST.MF" "rules" "client"
-    "vocabulary" "dev"})
+    "vocabulary" "dev" "deps-allow"})
 
 (defn ^:export name-lost?
   "True when `node` renders to source that NAMES something while the node
