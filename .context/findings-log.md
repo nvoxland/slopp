@@ -3310,3 +3310,100 @@ that GAINED assertions, 14 of 27 (52%) were seen failing before their
 episode's `done`; of new deftests, 89 of 105 (85%). The earlier lifetime,
 write-grain figure (22 of 104 additions watched red) is not the same
 measure — different window and grain — and is not a "before".
+
+## 2026-11-02 — facets step 1: undeclared key travel and rule-1 reach on slopp's own store
+
+Measured with `query_store` over `slopp.index.refs/keyword-refs`, production
+namespaces only (test namespaces removed with `render/test-ns?`), namespaced
+keywords only. A keyword "crosses" a module when forms in that many distinct
+modules (`modules/module-of`, first two segments) reference it.
+
+**Measurement 1: undeclared travel**
+
+| | with markers | without markers |
+|---|---|---|
+| distinct namespaced keywords | 273 | 205 |
+| cross >= 2 modules | 92 | 50 |
+| cross >= 3 modules | 42 | 17 |
+
+Excluded as marker/metadata vocabulary: `http` (48 kws, 30 of the >=2 set),
+`rest` (15, 8), `rule` (4, 3), `malli`. Caveat: `:http/*` is half marker
+(`:http/effect`, `:http/read`) and half request data (`:http/method`,
+`:http/sub`), so the "without" column over-removes data keys.
+Also in the inventory: 37 keywords in a `?_current-ns_?` namespace (an
+unresolved `::kw` artifact of the reader, not real travel).
+
+Top 15 by module count (all keywords): `:http/method` 9 modules / 50 forms,
+`:rest/response` 9/47, `:rest/request` 8/32, `:http/path` 6/45,
+`:webapp/base` 6/23, `:slopp.ops/dir` 6/14, `:http/url` 6/11,
+`:webapp/routes` 6/10, `:webapp/path` 6/6, `:http/raw` 5/19,
+`:cli/command` 5/11, `:rest/path` 5/11, `:http/auth` 5/9,
+`:http/status` 5/9, `:mvn/version` 5/7.
+
+Keyword namespace of the >=2 set (top 10):
+
+| all | n | without markers | n |
+|---|---|---|---|
+| http | 30 | webapp | 20 |
+| webapp | 20 | slopp.ops | 5 |
+| rest | 8 | cli | 4 |
+| slopp.ops | 5 | elements | 4 |
+| cli | 4 | slopp.image.repl | 3 |
+| elements | 4 | slopp.mcp.http | 3 |
+| rule | 3 | slopp.git | 2 |
+| slopp.image.repl | 3 | slopp.read.telemetry | 2 |
+| slopp.mcp.http | 3 | git_map, current-ns artifact | 1 each |
+| slopp.git | 2 | | |
+
+**Measurement 2: rule-1 reach**
+
+| family | namespaced? | forms rule 1 would fire on |
+|---|---|---|
+| (a) delta map (`:id :op :form-id :parent :thread :prompt :intent`) | NO, un-namespaced | not measurable: un-namespaced (bare `:id` 241 refs, `:prompt` 202, `:op` 124 mix every map in the store) |
+| (a') DB column keys `:deltas/*` | yes, but only `slopp.store.db` | 0 outside the owner |
+| (b) HTTP request data keys (`:http/method path params raw headers body url status sub groups provider auth deps context`) | yes | 97 forms in 36 namespaces total; **46 forms in 22 external namespaces** outside `slopp.http*` (the pure `wire.api`/`wire.contracts` hold 29 more and are exempt) |
+| (b') identity subset (`:http/sub :groups :provider :auth`) | yes | 7 forms in 4 namespaces outside `slopp.http*`; 10 outside `slopp.http.auth` |
+| (c) session map | NO: only `:webapp/session-loads` (1 form, 1 ns) | not measurable: un-namespaced |
+
+Two of the three domain records are un-namespaced, so a facet (which owns
+namespaced keys only) could not own them at all. That is a finding in itself.
+
+Query code (trimmed):
+
+```clojure
+(fn [st]
+  (let [refs (slopp.index.refs/keyword-refs st)
+        prod (remove #(slopp.store.render/test-ns? (:from-ns %)) refs)
+        nsk  (filter #(namespace (:kw %)) prod)
+        by   (group-by :kw nsk)
+        stats (map (fn [[k rs]]
+                     {:kw k
+                      :mods  (count (set (map #(slopp.edit.modules/module-of (:from-ns %)) rs)))
+                      :forms (count (set (map :from-form rs)))}) by)
+        marker #{"malli" "rest" "http" "rule"}]
+    {:ge2 (count (filter #(>= (:mods %) 2) stats))
+     :ge3 (count (filter #(>= (:mods %) 3) stats))
+     :excl (remove #(marker (first (clojure.string/split (namespace (:kw %)) #"[./]"))) stats)}))
+;; rule 1 reach
+(fn [st]
+  (let [prod (remove #(slopp.store.render/test-ns? (:from-ns %)) (slopp.index.refs/keyword-refs st))
+        req #{:http/method :http/path :http/params :http/raw :http/headers :http/body
+              :http/url :http/status :http/sub :http/groups :http/provider :http/auth
+              :http/deps :http/context}
+        own? (fn [ns] (let [s (str ns)] (or (= s "slopp.http") (clojure.string/starts-with? s "slopp.http."))))
+        rs (filter #(and (req (:kw %)) (not (own? (:from-ns %)))
+                         (not (#{'slopp-server.ui.wire.api 'slopp-server.ui.wire.contracts} (:from-ns %)))) prod)]
+    {:forms (count (set (map :from-form rs))) :nss (count (set (map :from-ns rs)))}))
+```
+
+**What this decides.** Rule 7 (undeclared travel) starts as an advisory and
+is useful, not noisy, once markers are filtered: 50 keywords cross two
+modules and 17 cross three, a list a person can read in one sitting, and its
+head (`:webapp/*`, `:slopp.ops/dir`, `:cli/*`) is real record data with no
+owner. Unfiltered (92 / 42) it is dominated by `:http` and `:rest`, so rule 7
+needs the marker-vocabulary exclusion from day one. Rule 1 starts as an
+advisory, never a refusal: on the one measurable domain family it would fire
+on 46 forms in 22 external namespaces with no `parse` anywhere, and the other
+two families are un-namespaced so it cannot fire on them at all. Refusing now
+would block ordinary edits to most of the HTTP layer; revisit once a facet
+owns the `:http/*` request keys and `parse` exists to satisfy it.

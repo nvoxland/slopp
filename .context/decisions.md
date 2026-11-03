@@ -8021,36 +8021,109 @@ comprehend: 86%) as a record with visible absence, not a gate. The claim
 answers the parallel-work finding: decision conflict, not merge conflict, is
 what breaks parallel agents (16 agents overwriting one fix).
 
-## D-parse-edge (2026-11-02, user-directed) — external input arrives unverified, and only a parser may read it
+## D-facets (2026-11-02, user-directed; supersedes the first D-parse-edge text) — logic about a value lives in one declared place, and the edge parses into it
 
-**Decision.** A port returns external input under the `:unverified/*` key
-namespace (`:unverified/body`, `:unverified/params`), never under its domain
-keys. A form that reads or destructures an `:unverified/*` key must carry
-`^{:parser "what it yields"}` (one `marker-registry` entry); a form in a
-`:pure` or `:reads` module may not read one at all. At runtime the value
-under an `:unverified/*` key throws on ordinary map access, so a sink that
-skips the parser fails on first use. The port's contract suite asserts both
-the fake and the real adapter emit `:unverified/*`. Opt-in per store first,
-on the purity-tier pattern (gates new writes only; no retro-break).
+**Decision.** A facet is a `def` with the `:facet` marker whose value is a
+declaration map: `:facet/fields` (malli field schemas), `:facet/checks`
+(pure check vars), `:facet/claims`, `:facet/views`, and `:secret` fields. A
+value is data + facts + an access policy. The facts are a seal: an HMAC over
+the content hash, the facet id and the facet version, with a key random per
+image. The version folds in the check fns' form versions, so editing a check
+body stales live seals.
 
-**Why.** The parse edge must exist by default (an RLS-off default left 10% of
-1,645 generated apps exposed); "validate at the boundary" as advice is the
-thing models do not follow. Precedents read: `galdre/recognitum-prototype`
-(authorization concerns as data on the proven value) and
+Two holders ship. **Raw** (only `parse` opens it) is what a port delivers.
+**Secret** is self-redacting (`#secret ns/key`); only a `:reveals` form opens
+it. Open values stay plain data with the seal in metadata. Policies are
+static and effect-free: no time-dependent policy, no audit on read.
+
+Verbs: `raw`; `parse` (by `#'var`; shape first, then pure checks in written
+order, first failure stops; returns failure data, never throws; discards
+incoming metadata); `parsed?`; `project` (re-parse shape + pure checks, then
+the view filter, at exits; failure data passes through it too); `reveal`.
+Ports parse at entry and project at exit; the handler never sees raw input.
+The region where owned keys are plain data is every non-`:external`
+namespace (the purity tier is the declaration). Function schemas stay
+structural and never name a facet; the link is key ownership.
+
+**Enforcement.** Eight static rules, gated on at least one facet in the
+store. Rules 1 and 3 also run at done/land (one owner per key is a
+cross-form invariant that two threads can break on merge).
+1. Key ownership: an owned key is read, destructured or built as a literal
+   outside the region only in the owner's fns or beside `parse`/`project`
+   (advisory until measured on slopp's own store; `^:unsafe` does not
+   discharge it).
+2. `reveal` only in `:reveals` forms.
+3. Facet integrity: every `:fn` resolves, fields are valid, pure checks are
+   pure, views name declared fields, one owner per key, and `parse` takes a
+   `#'var` to a `:facet` def.
+4. Adapters emit Raw.
+5. Exits (advisory): a secret or PII field reaching a log or response
+   outside `project`/`:reveals`.
+6. Facet weakening (done, `:error`): a check removed, a view widened, a
+   policy loosened, an owner changed; `:endorsed` extends to facet defs.
+7. Undeclared travel (advisory): a namespaced key crossing two or more
+   modules with no owner.
+8. Handoff (advisory): a shell call into a region fn passes a local bound to
+   `parse`.
+
+**Static, runtime, and what rides through the core.** The source is checked
+at the write, where a refusal can teach. The data is checked once at the
+edge, by `parse`; that is the one runtime failure the design wants. Holders
+and seals are backstops for what syntax cannot see (computed keys, `get-in`,
+a secret reaching `str` or JSON, a value changed by the core). They fire in
+the image at done, because the oracle generates inputs through the facet.
+Nothing tracks a value across functions: only the seal and the Secret holder
+ride in the value. Claims are a reach question over the static call graph
+(routes declare, the port evaluates with the actor it resolved, sinks demand
+by `:facet/requires`), which over-approximates, the safe direction.
+
+**Why.** The parse edge must exist by default: an RLS-off default left 10%
+of 1,645 generated apps exposed, and "validate at the boundary" as advice is
+what models do not follow. Agents reached for `any` nine times, so the
+escape hatch is a parser, not a marker. Metadata taint is unsound (core fns
+drop or keep metadata without knowing), so nothing is tracked by flow.
+Precedents read: `galdre/recognitum-prototype` (a kind of value declared
+once, checks as data, claims on the proven value) and
 `escherize/parsed-types` (an unparsed value is unusable by construction;
-checks run in written order pure → fetch → external and stop at the first
-failure; every error carries the fix as code). Borrowed: unusable-by-
-construction, ordered checks, fix-carrying errors, claims as data on the
-parsed value (D-parse-edge's follow-on, verified at done like a `:=>`
-schema). NOT borrowed: hidden proofs on a `deftype` (values stay transparent —
-D2's program-to-data), and an inferred check graph (implicit machinery a
-slice cannot see).
+ordered checks that stop at the first failure; errors carry the fix).
+Borrowed: declare once, ordered checks, fix-carrying failures, unusable-by-
+construction for Raw, claims as checks over value and actor. NOT borrowed:
+a generated class per kind, macros, and hidden proofs on a `deftype` for
+open values (they stay plain data with the seal in metadata, D2's
+program-to-data). Holders ARE used, but only for restricted policies,
+because plain data cannot refuse a read.
 
-**Why keys, not taint.** slopp's analysis is vars and calls
-(`index.derive`); there is no value-flow tracking. A key namespace is visible
-statically in every form that reads it (the attribute inventory already
-enumerates keyword literals), so the rule is syntactic, cheap, and honest
-about what it sees.
+**Why not `:unverified/*` keys** (the first text of this decision).
+Verification is a property of the value, not of a key name. A key namespace
+cannot follow a value once it is parsed. It is HTTP-shaped, where input also
+comes from databases, files and queues.
+
+**Not protected.** Hostile in-process code (reflection past the denylist,
+reading the facet module's internals); value flow through computation (a
+value derived from PII is plain); a scalar outside its map; dynamic
+`(get m k)`; the semantics of check and claim fns (only tests and mutation
+cover them); what a `:reveals` form does after revealing; a human declaring
+a wrong policy; timing side channels; cross-process trust (a printed value
+reads back unparsed); inline validation inside the region.
+
+**Built so far** (beads under slopp-gxv.1).
+- *Measured first* (findings-log, 2026-11-02): rule 1 would fire on 46
+  forms in 22 of slopp's own namespaces with no `parse` anywhere, so it
+  ships advisory. Rule 7 is readable (50 keys across two or more modules,
+  17 across three or more) only when marker vocabulary (`:http/*`,
+  `:rest/*`, `:rule/*`, `:malli/*` as var metadata) is excluded from day
+  one. Slopp's delta and session maps use un-namespaced keys, which no facet
+  can own.
+- *`slopp.facet`* (commit point dd1f225aa9456): `raw`, `parse`, `parsed?`,
+  `project`, `reveal`; Raw and Secret as deftypes whose content sits in a
+  private mutable field opened only with the namespace's private token;
+  HMAC-SHA256 seal over a canonical text of the value (map and set order
+  normalised, secrets by content). Ships with every store (the `"_"`
+  family). Stated limits of this cut: the version is a hash of the
+  declaration until rendering stamps it; a nested facet contributes its
+  shape, not its checks; checks that declare `:sources` are not run by
+  `parse`; reloading `slopp.facet` itself makes a new key, so every live
+  seal goes stale.
 
 ## D-behaviour-axis amended (2026-11-02) — trust before overview
 
