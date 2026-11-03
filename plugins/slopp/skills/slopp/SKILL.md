@@ -218,6 +218,12 @@ calls on one session take turns (store-only reads do not), so a subagent on
 your session waits while you write; without its own thread its work and
 yours land together, unlabelled.
 
+Every form's last recorded ask rides with it: a `query_source` row and
+the [slopp] block carry it as `:why` / `asked:`, and a write that replaces a
+form an earlier ask shaped leads its answer with `;; you replaced form(s) an
+earlier ask shaped …`. That ask is often the only place the REASON for the
+code lives. Keep what it wanted, or tell the user your change no longer does.
+
 A merge only catches two changes to the same TEXT. It does not catch two
 agents deciding different things about one form, where each lands green
 and the later one quietly reverses the earlier one's reason. So slopp
