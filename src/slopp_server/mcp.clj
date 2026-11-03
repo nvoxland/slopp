@@ -2806,7 +2806,8 @@
                                             nm
                                             {:kind :form-history
                                              :versions (history/query-form-history session (sym :ns) (sym :name)
-                                                                              :format (:format a))}
+                                                                              :format (:format a)
+                                                                              :diff (:diff a))}
 
                                             (:at a)
                                             (assoc (history/query-status-at session :at (:at a))

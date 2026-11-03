@@ -9,7 +9,7 @@
   derivation, not the endpoint that happened to ask."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.read.history :as history]
-            [slopp.store :as store]))
+            [slopp.store :as store] [rewrite-clj.parser :as p]))
 
 (deftest commit-point-rows-is-the-pure-fold-behind-query-commits
   ;; query-commits is :external because it opens the db to join git shas
@@ -169,3 +169,14 @@
       (is (= {:asks ["sharpen"] :more-asks 0 :forms 1 :since "d8"} working)))
     (testing "a subject nothing touched has no rows and nothing in flight"
       (is (= {:rows [] :working nil} (history/story-rows ds #(= "demo.nope" (str %))))))))
+
+(deftest a-forms-history-can-be-told-as-its-changed-lines
+  ;; 5u7.3: a history the agent reaches for MID-TASK must be cheap to read;
+  ;; every version's whole source is the expensive way to say what changed
+  (let [s0 (store/ingest (store/empty-store) 'hd.core "(ns hd.core)\n\n(defn f [x]\n  (inc x))\n" :prompt "f adds one")
+        s1 (first (store/replace-node s0 'hd.core 'f (p/parse-string "(defn f [x]\n  (dec x))") :prompt "f subtracts one"))
+        vs (history/query-form-history (atom {:store s1}) 'hd.core 'f :diff true)]
+    (is (= ["f adds one" "f subtracts one"] (mapv :prompt vs)))
+    (is (not-any? :source vs) "no whole sources")
+    (is (= ["-  (inc x))" "+  (dec x))"] (:diff (second vs))) "only the lines that changed")
+    (is (some #{"+  (inc x))"} (:diff (first vs))) "the first version is all added")))

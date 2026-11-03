@@ -180,7 +180,7 @@
                                :contains {:type "string"}
                                :limit {:type "integer"}}}}
    {:name "query_history"
-    :description "EVERYTHING that happened, one tool: no args = change history (collapse=true for episode rows); {ns name} = one form's life; {ns name at} = TIME-TRAVEL to a past delta/commit-point; {ns name effort true} = what that form COST to get green (red→green cycles, distinct asks, recorded verification time + how much of its life that covers); {at} = was-green-at; {contains} = which asks/prompts touched X; {dead_ends true} = SCRAPPED explorations (reverts) with their why + the forms they dropped, {dead_ends \"some.ns\"} narrows to ones that touched it — check it before re-walking a path someone already abandoned. format=text for humans. For summaries/handoffs use report."
+    :description "EVERYTHING that happened, one tool: no args = change history (collapse=true for episode rows); {ns name} = one form's life ({ns name diff true}: each version's ask, verdict and CHANGED lines — reach for it mid-task before editing a form someone else shaped); {ns name at} = TIME-TRAVEL to a past delta/commit-point; {ns name effort true} = what that form COST to get green (red→green cycles, distinct asks, recorded verification time + how much of its life that covers); {at} = was-green-at; {contains} = which asks/prompts touched X; {dead_ends true} = SCRAPPED explorations (reverts) with their why + the forms they dropped, {dead_ends \"some.ns\"} narrows to ones that touched it — check it before re-walking a path someone already abandoned. format=text for humans. For summaries/handoffs use report."
     :inputSchema {:type "object"
                   :properties {:ns {:type "string"} :name {:type "string"}
                                :at {:type "string"} :contains {:type "string"}
@@ -188,6 +188,7 @@
                                :collapse {:type "boolean"}
                                :effort {:type "boolean"}
                                :dead_ends {:type ["boolean" "string"]}
+ :diff {:type "boolean" :description "with {ns name}: each version as its ask, verdict and CHANGED lines instead of its whole source — the cheap read mid-task"}
                                :format {:type "string" :enum ["edn" "text"]}}}}
    {:name "query_changes"
     :description "THE code-level change view — net per-form diffs (:was/:now) + red/green arc. Your open episode by default, or a span via :from/:to. :from takes NAMED ANCHORS as well as delta ids: \"start\" (the whole lifetime), \"last-commit\" (since the last commit-point), \"last-done\". This is what answers 'show me what changed, WITH the code' — reach for it instead of shelling out to git diff; format=text renders line diffs."

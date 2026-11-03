@@ -721,62 +721,6 @@
              (mapv #(cond-> (dissoc % :sources :changeset :result)
                       (ti (:id %)) (assoc :turn-intent (ti (:id %))))))))))
 
-(defn ^:export query-form-history
-  "Every content version of `nm`'s form, oldest first, with the intent that
-  produced it, when, the verification state it landed in, and what that
-  verification COST:
-  [{:delta :op :prompt :source :status :at :turn-intent :ms :origin}]. `:status`
-  (was-green-at, HM2) is the project's verification state governing each
-  version — semantic × history, per form.
-
-  `:origin` rides an `:ingest` version of a store that was IMPORTED from git
-  (`:git-origin` on the value, which `slopp.ops/with-history` reads from the
-  store's meta): `{:git-sha :remote}`, plus a `:note` when no ask was
-  recorded — the form arrived by import and the docstring is the only
-  recorded reasoning. Without it an agent asked \"why is it this way\" went
-  hunting through README and git log for a record that did not exist.
-
-  Three views over ONE derivation of the form's life, because a second walk is
-  how two surfaces come to disagree about the same version:
-  - default — the versions as data;
-  - `:format \"text\"` (HM4) — the form's LIFE as a per-version LINE-diff story;
-  - `:effort true` — what the form COST to get green (`history/form-effort`):
-    red→green cycles, distinct asks, recorded time, and how much of the life
-    that time actually covers."
-  [session ns-sym nm & {:keys [format effort]}]
-  (let [st (with-log session)
-        id (:id (store/form-named st ns-sym nm))]
-    (when id
-      (let [ti       (turn-intents (store/deltas st))
-            origin   (:git-origin st)
-            versions (vec (for [d     (store/deltas st)
-                                :let  [src (get-in d [:sources id])]
-                                :when src]
-                            (cond-> {:delta (:id d) :op (:op d)
-                                     :prompt (:prompt d) :source src
-                                     :status (status-after st (:id d))
-                                     :at (human-time (:at d))}
-                              (ti (:id d)) (assoc :turn-intent (ti (:id d)))
-                              (and origin (= :ingest (:op d)))
-                              (assoc :origin
-                                     (cond-> {:git-sha (:sha origin) :remote (:remote origin)}
-                                       (nil? (:prompt d))
-                                       (assoc :note (str "imported — no ask recorded before it;"
-                                                         " the docstring is the only recorded"
-                                                         " reasoning"))))
-                              ;; the cost the verification recorded, present
-                              ;; only for versions written after verification
-                              ;; started timing itself — form-effort reports
-                              ;; that coverage rather than summing past it
-                              (get-in (verify-after st (:id d)) [:result :ms])
-                              (assoc :ms (get-in (verify-after st (:id d))
-                                                 [:result :ms])))))]
-        (cond
-          effort (form-effort (symbol (str ns-sym) (str nm)) versions)
-          (= "text" (some-> format name))
-          (render-form-history-text (symbol (str ns-sym) (str nm)) versions)
-          :else versions)))))
-
 (defn ^:export query-search-history
   "Delta-log search — the 'which prompts touched X' query. Case-insensitive
   substring match of `pattern` against each delta's prompt, done label,
@@ -1089,3 +1033,76 @@
         {:rows    (vec rows)
          :working (when (not= acc fresh)
                     (cond-> (told acc) prev (assoc :since prev)))}))))
+
+(defn- compact-versions
+  "`versions` with each `:source` replaced by `:diff`, the lines that changed
+  against the version before it (`-` removed, `+` added; the first version is
+  all added). What a form's history costs to read mid-task is the point: the
+  ask, the verdict and what moved, not every whole source again."
+  [versions]
+  (vec (map (fn [prev v]
+              (-> v
+                  (dissoc :source)
+                  (assoc :diff (if prev
+                                 (vec (for [[k t] (diff-lines (:source prev) (:source v))
+                                            :when (not= :same k)]
+                                        (str (if (= :del k) "-" "+") t)))
+                                 (mapv #(str "+" %) (str/split-lines (str (:source v))))))))
+            (cons nil versions) versions)))
+
+(defn ^:export query-form-history
+  "Every content version of `nm`'s form, oldest first, with the intent that
+  produced it, when, the verification state it landed in, and what that
+  verification COST:
+  [{:delta :op :prompt :source :status :at :turn-intent :ms :origin}]. `:status`
+  (was-green-at, HM2) is the project's verification state governing each
+  version — semantic × history, per form.
+
+  `:origin` rides an `:ingest` version of a store that was IMPORTED from git
+  (`:git-origin` on the value, which `slopp.ops/with-history` reads from the
+  store's meta): `{:git-sha :remote}`, plus a `:note` when no ask was
+  recorded — the form arrived by import and the docstring is the only
+  recorded reasoning. Without it an agent asked \"why is it this way\" went
+  hunting through README and git log for a record that did not exist.
+
+  Three views over ONE derivation of the form's life, because a second walk is
+  how two surfaces come to disagree about the same version:
+  - default — the versions as data;
+  - `:format \"text\"` (HM4) — the form's LIFE as a per-version LINE-diff story;
+  - `:effort true` — what the form COST to get green (`history/form-effort`):
+    red→green cycles, distinct asks, recorded time, and how much of the life
+    that time actually covers."
+  [session ns-sym nm & {:keys [format effort diff]}]
+  (let [st (with-log session)
+        id (:id (store/form-named st ns-sym nm))]
+    (when id
+      (let [ti       (turn-intents (store/deltas st))
+            origin   (:git-origin st)
+            versions (vec (for [d     (store/deltas st)
+                                :let  [src (get-in d [:sources id])]
+                                :when src]
+                            (cond-> {:delta (:id d) :op (:op d)
+                                     :prompt (:prompt d) :source src
+                                     :status (status-after st (:id d))
+                                     :at (human-time (:at d))}
+                              (ti (:id d)) (assoc :turn-intent (ti (:id d)))
+                              (and origin (= :ingest (:op d)))
+                              (assoc :origin
+                                     (cond-> {:git-sha (:sha origin) :remote (:remote origin)}
+                                       (nil? (:prompt d))
+                                       (assoc :note (str "imported — no ask recorded before it;"
+                                                         " the docstring is the only recorded"
+                                                         " reasoning"))))
+                              ;; the cost the verification recorded, present
+                              ;; only for versions written after verification
+                              ;; started timing itself — form-effort reports
+                              ;; that coverage rather than summing past it
+                              (get-in (verify-after st (:id d)) [:result :ms])
+                              (assoc :ms (get-in (verify-after st (:id d))
+                                                 [:result :ms])))))]
+        (cond
+          effort (form-effort (symbol (str ns-sym) (str nm)) versions)
+          diff (compact-versions versions)
+          (= "text" (some-> format name))
+          (render-form-history-text (symbol (str ns-sym) (str nm)) versions)
+          :else versions)))))
