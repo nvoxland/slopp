@@ -47,6 +47,9 @@ conclusions, so the review reasons about findings, not source dumps.
    markers it carries (`:unsafe`, `:adapter`, `:reveals`, `:weakening-ok`, ...).
    Each adds to `:risk`; `:unsafe` and `:reveals` add the most. Read the marker's
    stated why first, and ask whether the rule it waives could simply be met.
+A row flagged `:weak-oracle` had a mutant survive at the last `done`: its tests
+run it and stay green with a fault in place. Read the code itself, not the test
+names, and add the assertion that would have failed.
 
    **Read `:evidence` on the row, not just the flags.** A quiet row is not one
    fact, it is four, and the row names which:
