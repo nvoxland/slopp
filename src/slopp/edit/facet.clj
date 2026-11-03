@@ -316,3 +316,17 @@
                 :let [added (remove (set ks) (get-in new [:facet/views v]))]
                 :when (seq added)]
             (str "view " v " now also shows " (vec added)))))))
+
+(defn ^:export facet-of-map
+  "The facet, as a qualified symbol, whose fields malli map schema `m` is: every
+  key `m` names is a field of that facet and every required field is named.
+  nil when `m` is not a map schema or matches no facet."
+  [store m]
+  (let [ks (when (and (vector? m) (= :map (first m)))
+             (set (keep #(when (vector? %) (first %)) (rest m))))]
+    (when (seq ks)
+      (first (for [[[n nm] decl] (facets store)
+                   :let [fields   (:facet/fields decl)
+                         required (set (for [[k v] fields :when (not (and (map? v) (:optional v)))] k))]
+                   :when (and (every? #(contains? fields %) ks) (every? ks required))]
+               (symbol (str n) (str nm)))))))

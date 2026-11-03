@@ -134,3 +134,31 @@
           (is (nil? (:form (first r))) (pr-str r))
           (is (str/includes? (str (:error (first r))) "malli.generator/check") (pr-str r))))
       (finally (repl/stop! h)))))
+
+(def fac-src
+  "A facet with an invariant, and two pure fns whose :=> output is that facet's
+  fields: one keeps the invariant and one breaks it while still matching the
+  schema's types. Inputs are bounded so the honest sum cannot overflow."
+  (str "(ns demo.fac (:require [slopp.facet :as facet]))\n"
+       "(defn sum? [{:o/keys [lines total]}] (= total (reduce + 0 lines)))\n"
+       "(def ^{:facet \"an order\"} Order {:facet/fields {:o/lines [:vector :int] :o/total :int}"
+       " :facet/checks {:sum {:doc \"the total is the sum of the lines\" :fn #'sum?}}})\n"
+       "(defn ^{:malli/schema [:=> [:cat [:vector [:int {:min 0 :max 100}]]] [:map [:o/lines [:vector :int]] [:o/total :int]]]}"
+       " honest \"D.\" [ls] {:o/lines ls :o/total (reduce + 0 ls)})\n"
+       "(defn ^{:malli/schema [:=> [:cat [:vector [:int {:min 0 :max 100}]]] [:map [:o/lines [:vector :int]] [:o/total :int]]]}"
+       " liar \"D.\" [ls] {:o/lines ls :o/total (count ls)})\n"))
+
+(deftest a-candidate-returning-a-facet-carries-it
+  (let [s (store/ingest (store/empty-store) 'demo.fac fac-src)]
+    (is (= '{demo.fac/honest demo.fac/Order demo.fac/liar demo.fac/Order}
+           (into {} (map (juxt :form :facet)) (schema/schema-candidates s '[demo.fac/honest demo.fac/liar]))))))
+
+(deftest ^:external the-oracle-parses-a-returned-value-through-its-facet
+  (let [s (store/ingest (store/empty-store) 'demo.fac fac-src)
+        h (repl/start!)]
+    (try
+      (repl/eval! h (slurp (clojure.java.io/resource "slopp/facet.clj")))
+      (repl/eval! h (str fac-src " (in-ns 'user)"))
+      (testing "both match their schema's types; only one keeps the facet's invariant"
+        (is (= '[demo.fac/liar] (mapv :form (schema/drift! h s '#{demo.fac/honest demo.fac/liar})))))
+      (finally (repl/stop! h)))))

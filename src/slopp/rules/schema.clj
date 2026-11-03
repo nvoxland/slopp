@@ -31,7 +31,7 @@
             [rewrite-clj.node :as n]
             [slopp.store :as store]
             [slopp.store.render :as store.render]
-            [slopp.image.repl :as repl] [slopp.index.derive :as derive] [slopp.index.analyze :as analyze]))
+            [slopp.image.repl :as repl] [slopp.index.derive :as derive] [slopp.index.analyze :as analyze] [slopp.edit.facet :as edit.facet]))
 
 (defn schema-of
   "The :=> :malli/schema declared on a stored form's defn name, or nil. Read
@@ -87,7 +87,16 @@
                     signals-failure? (and (map? props)
                                           (seq (:throws props)))]
              :when (and sch (not signals-failure?) (analyzer-pure? store q))]
-         {:form q :schema sch})))
+         (let [body   (if (map? props) (drop 2 sch) (rest sch))
+               inputs (let [in (first body)]
+                        (when (and (vector? in) (= :cat (first in))) (vec (rest in))))
+               fac    (edit.facet/facet-of-map store (last body))]
+           (cond-> {:form q :schema sch}
+             ;; its output IS a facet's fields: the oracle parses every
+             ;; output through that facet, when every facet-shaped input parsed
+             fac (assoc :facet fac
+                        :inputs (vec (keep-indexed (fn [i a] (when-let [f (edit.facet/facet-of-map store a)] [i f]))
+                                                   inputs))))))))
 
 (defn check-string
   "A self-contained eval-string (malli lives ONLY in the image — inherent dep,
@@ -95,6 +104,14 @@
    candidate against its LIVE var and returns a vector of drift findings
    [{:form <qsym> :counterexample <str>} …] — empty when every schema holds.
    Empty candidates short-circuit to `[]` (nothing to resolve).
+
+   **A candidate whose output is a facet's fields** (`:facet`, from
+   `schema-candidates`) is checked through a wrapper that parses each output
+   with that facet and throws when a check fails, so a core fn whose result
+   matches the schema's TYPES but breaks the facet's invariant is drift. The
+   wrapper asserts the invariant only when every facet-shaped input
+   (`:inputs`) itself parsed: a generated input that breaks its own facet is
+   outside the fn's contract, and blaming the fn for it would be a false red.
 
    **Two failures, and they are not the same fact.** A single check throwing
    is ABOUT that candidate, so it stays guarded per-form and names the form.
@@ -121,11 +138,20 @@
          " (vec (remove nil? ["
          (str/join
           " "
-          (for [{:keys [form schema]} candidates]
-            (format (str "(try (when-let [e (check %s (deref (resolve '%s)))]"
+          (for [{:keys [form schema facet inputs]} candidates
+                :let [subject (if facet
+                                (format (str "(let [f (deref (resolve '%s)) parse (requiring-resolve 'slopp.facet/parse)]"
+                                             " (fn [& args] (let [r (apply f args)]"
+                                             " (if (and (every? (fn [[i v]] (not (:facet/failed (parse (resolve v) (nth args i))))) '%s)"
+                                             " (:facet/failed (parse (resolve '%s) r)))"
+                                             " (throw (ex-info (str \"returns a value that fails %s: \" (pr-str (keys (:facet/failed (parse (resolve '%s) r))))) {}))"
+                                             " r))))")
+                                        form (pr-str (or inputs [])) facet facet facet)
+                                (format "(deref (resolve '%s))" form))]]
+            (format (str "(try (when-let [e (check %s %s)]"
                          " {:form '%s :counterexample (pr-str (-> e :errors first :check :smallest))})"
                          " (catch Throwable t {:form '%s :error (str \"check-threw: \" (.getMessage t))}))")
-                    (pr-str schema) form form form)))
+                    (pr-str schema) subject form form)))
          "]))"
          " [{:error \"schema oracle unavailable: malli.generator/check did not resolve in this image,"
          " so NO schema was checked\"}])")))
