@@ -146,6 +146,10 @@
    ;; a secret's real value leaves the program only through a form that says so
    {:marker :reveals :kind :escape :discharges :facet-reveal :on :name
     :asks "what does this form hand the secret to, and why must it see the real value?" :self-polices? false}
+   ;; a function no in-image test can watch (it drives a terminal, it only
+   ;; runs in a child process): the done that changed it is not held
+   {:marker :untested-ok :kind :escape :discharges :unproven-change :on :name
+    :asks "why can no in-image test watch this function?" :self-polices? false}
    {:marker :generated    :kind :internal :discharges nil     :on :name
     :asks nil :self-polices? false}
    {:marker :auto-declare :kind :internal :discharges nil     :on :form

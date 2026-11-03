@@ -676,6 +676,7 @@
   (let [sess (external/open!)]
     (try
       (ops/ingest! sess 'lg2.core "(ns lg2.core)\n(defn ^:unused-ok ok \"D.\" [x] x)\n")
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is about lint grading, not test proof")
       (testing "a warning-grade finding neither refuses nor counts"
         (let [r (ops/add-form! sess 'lg2.core
                                "(defn ^:unused-ok w \"D.\" [] (let [x 1] 2))"
@@ -733,6 +734,7 @@
                         "                            [clojure.test :refer [deftest is]]))\n\n"
                         "(deftest h-t (is (= 1 (b/h 1))))\n")
                    :agent "t")
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is about which tests run, not test proof")
       (external/done! sess :label "setup" :agent "t")
       ;; touch ONE form in ONE namespace
       (ops/edit-replace! sess 'wsa.core 'f "(defn f \"F.\" [x] (identity x))"
@@ -1251,6 +1253,7 @@
         sess (external/open! {:slopp.ops/dir dir})]
     (try
       (ops/ingest! sess 'tb.core "(ns tb.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n")
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is about turns, not test proof")
       (ops/turn-begin! sess :agent "alice" :intent "the first ask")
       (is (ops/turn-open? sess "alice"))
       (ops/add-form! sess 'tb.core "(defn ^:unused-ok g \"G.\" [] 2)" :prompt "work" :agent "alice")

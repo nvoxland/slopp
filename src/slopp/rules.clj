@@ -1252,6 +1252,63 @@
                             " Declare :facet/claims " (vec missing) " on the route, so its port"
                             " checks them with the actor it resolved before the handler runs.")}))))))
 
+(def ^:export fixed-rules
+  "Rules that are ALWAYS on at a fixed severity: the third registry beside the
+  write gates and the done advisories, so `query_rules` can list a rule that
+  no dial governs instead of leaving it out. The dialect is the founding
+  member: it subtracts the features (eval, reader eval, loaders, user
+  macros) whose presence makes every other guarantee unsound, so turning it
+  off is not a project's call. Its one escape is per FORM and human-reviewed:
+  `^:unsafe`."
+  [{:key :dialect :severity :refuse}])
+
+(defn red-proof-check!
+  "Done rule: every production function this episode changed must be SHOWN to
+  need the change. Its version from the last done is loaded into the image and
+  the in-image tests that ran it are run (`mutate/prove!`); a test that fails
+  against the old version is the proof. A new function needs a test that runs
+  it. A docstring-only edit or a rename is not a behaviour change and is not
+  checked.
+
+  Proof is checked, not trusted to the order the agent wrote things in: a test
+  written after the fix proves it as well as one written before. The strongest
+  single oracle measured for agent work is a test that fails without the fix;
+  a suite that was already green says little about a change.
+
+  Two exits, both visible in review: `^{:untested-ok \"why\"}` on a function no
+  in-image test can watch, and the session's `:untested-waivers`
+  (`{\"ns/name\" \"why\"}`, from the done call) for a change that keeps
+  behaviour, such as a refactor. A waiver is reported as an `:info` row. What
+  the image cannot judge (only `^:external` tests run it, the old version no
+  longer loads, the budget ran out) is `:info` too: never a hold."
+  [session st* changed]
+  (let [{:keys [image test-map untested-waivers]} @session
+        old    (:sources (first (:baselines st*)))
+        cands  (for [t (mutate/targets st* (or test-map {}) changed)
+                     :let [e (store/form-by-id st* (:fid t))
+                           o (get old (:fid t))]
+                     :when (and e (not (:untested-ok (store/form-name-meta e)))
+                                (or (nil? o) (mutate/behaviour-change? o (n/string (:node e)))))]
+                 (assoc t :old o))
+        waived (filterv #(contains? untested-waivers (str (:form %))) cands)
+        ts     (vec (remove #(contains? untested-waivers (str (:form %))) cands))]
+    (if (or (nil? image) (and (empty? ts) (empty? waived)))
+      []
+      (into (mutate/proof-findings
+             (let [outside? (fn [t] (and (empty? (:tests t))
+                                         (seq (slopp.index.refs/covered-by st* nil (:form t)))))
+                   [ext own] ((juxt filter remove) outside? ts)]
+               (concat (for [t ext]
+                         (assoc (select-keys t [:form :fid]) :status :unprovable
+                                :why "only tests outside the image reach it"))
+                       (when (seq own) (mutate/prove! image st* (vec own))))))
+            (when (seq waived)
+              [{:severity :info
+                :waived   (into {} (map (fn [t] [(:form t) (get untested-waivers (str (:form t)))])) waived)
+                :teach    (str "no test was asked to show these changes were needed: "
+                               (str/join "; " (for [t waived]
+                                                (str (:form t) " (" (get untested-waivers (str (:form t))) ")"))))}])))))
+
 (def done-advisories
   "The done-time advisory registry (D9 rule-registry — the done-grain sibling of
    `edit.modules/per-form-write-gates`): an ordered list of {:key :severity
@@ -1442,6 +1499,11 @@
     :selftest-note (str "needs a booted image with the fixture's tests loaded; covered"
                         " by rules.mutate-test/"
                         "mutants-the-tests-notice-die-and-the-rest-survive")}
+   {:key :unproven-change :severity :error :applies-to :production :check #'red-proof-check!
+    :sweep (str "loads each changed function's version from the last done into the"
+                " image; a function nobody changed has no old version to prove against")
+    :selftest-note (str "needs a booted image, a prior done and observed tests; covered by"
+                        " rules-test/done-holds-a-change-no-test-shows-was-needed")}
    {:key :key-not-returned :severity :advisory :applies-to :both :check #'key-not-returned-check
     :sweep true
     ;; explicitly BOTH: a vacuous assertion does its worst damage in a test,
@@ -1737,6 +1799,39 @@
   (merge (gates/write-gate-severities)
          (into {} (map (juxt :key :severity)) done-advisories)))
 
+(defn ^:export query-rules
+  "The D9 enforcement catalog for THIS store: every rule with its grain, its
+   EFFECTIVE per-store severity (the `rules` config override else the rule's
+   DECLARED default), how to discharge it, and what it means. The one place to
+   see what's enforced and at what grade — dial any rule with `config_file {path
+   \"rules\" key <rule> value <severity>}` (`:off`/`:advisory`/`:error`/`:refuse`).
+   The FIXED rules (`fixed-rules`, e.g. the dialect) close the list with
+   `:dialable false`: they are on for every store and no dial reaches them.
+
+   Lives HERE, beside the registries, rather than in `api.query`: the declared
+   default belongs to the code that ENFORCES each rule, and `api.query` is
+   `:pure` while this namespace is `:external` — a query that reports what a
+   shell owns cannot live in the core. `catalog/rule-rows` joins the prose to
+   `declared-severities`, so what this reports and what refuses a write cannot
+   disagree.
+
+   WRITE-gate (`:form`) severity is one of `:off` (skip), `:advisory` (warn-but-
+   proceed — the teaching rides the write result's `:advisories`), or `:refuse`
+   (block); `:error` has no write-gate meaning and reports as `:refuse`.
+   Done-grain rules keep the full `:off`/`:advisory`/`:error` range."
+  [session]
+  (let [st (:store @session)]
+    (into
+     (mapv (fn [{:keys [rule grain severity] :as r}]
+             (let [eff (gates/rule-severity st rule severity)]
+               (assoc r :severity
+                      (if (= grain :form)
+                        (case eff (:off :advisory) eff :refuse)
+                        eff))))
+           (catalog/rule-rows (declared-severities)))
+     (map (fn [r] (assoc r :severity (:severity (first (filter #(= (:rule r) (:key %)) fixed-rules))))))
+     catalog/fixed-catalog)))
+
 (defn ^:export sweep-plan
   "Which sweepable advisories will RUN over `st*`, and which will not with WHY:
   `{:swept [key …] :not-swept [{:rule :why :severity} …]}`.
@@ -1857,46 +1952,3 @@
     (assoc plan
            :forms    (count ids)
            :findings (run-checks session st* ids run))))
-
-(def ^:export fixed-rules
-  "Rules that are ALWAYS on at a fixed severity: the third registry beside the
-  write gates and the done advisories, so `query_rules` can list a rule that
-  no dial governs instead of leaving it out. The dialect is the founding
-  member: it subtracts the features (eval, reader eval, loaders, user
-  macros) whose presence makes every other guarantee unsound, so turning it
-  off is not a project's call. Its one escape is per FORM and human-reviewed:
-  `^:unsafe`."
-  [{:key :dialect :severity :refuse}])
-
-(defn ^:export query-rules
-  "The D9 enforcement catalog for THIS store: every rule with its grain, its
-   EFFECTIVE per-store severity (the `rules` config override else the rule's
-   DECLARED default), how to discharge it, and what it means. The one place to
-   see what's enforced and at what grade — dial any rule with `config_file {path
-   \"rules\" key <rule> value <severity>}` (`:off`/`:advisory`/`:error`/`:refuse`).
-   The FIXED rules (`fixed-rules`, e.g. the dialect) close the list with
-   `:dialable false`: they are on for every store and no dial reaches them.
-
-   Lives HERE, beside the registries, rather than in `api.query`: the declared
-   default belongs to the code that ENFORCES each rule, and `api.query` is
-   `:pure` while this namespace is `:external` — a query that reports what a
-   shell owns cannot live in the core. `catalog/rule-rows` joins the prose to
-   `declared-severities`, so what this reports and what refuses a write cannot
-   disagree.
-
-   WRITE-gate (`:form`) severity is one of `:off` (skip), `:advisory` (warn-but-
-   proceed — the teaching rides the write result's `:advisories`), or `:refuse`
-   (block); `:error` has no write-gate meaning and reports as `:refuse`.
-   Done-grain rules keep the full `:off`/`:advisory`/`:error` range."
-  [session]
-  (let [st (:store @session)]
-    (into
-     (mapv (fn [{:keys [rule grain severity] :as r}]
-             (let [eff (gates/rule-severity st rule severity)]
-               (assoc r :severity
-                      (if (= grain :form)
-                        (case eff (:off :advisory) eff :refuse)
-                        eff))))
-           (catalog/rule-rows (declared-severities)))
-     (map (fn [r] (assoc r :severity (:severity (first (filter #(= (:rule r) (:key %)) fixed-rules))))))
-     catalog/fixed-catalog)))

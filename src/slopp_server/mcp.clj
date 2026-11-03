@@ -3136,8 +3136,11 @@
                                                   :prompt (:prompt a))
                                     (select-keys tools/wire-keys)
                                     (summarize (:verbose a))))))
-      "done" (let [r (external/done! session :label (:label a)
-                                            :agent (:agent a))
+      "done" (let [r (let [w (not-empty (into {} (map (fn [[k v]] [(if (keyword? k) (subs (str k) 1) (str k)) (str v)]))
+                                                    (:untested a)))]
+                             (when w (swap! session assoc :untested-waivers w))
+                             (try (external/done! session :label (:label a) :agent (:agent a))
+                                  (finally (swap! session dissoc :untested-waivers))))
                    ;; the app server catches up to the store at DONE grain. A
                    ;; red done still refreshes: done REPORTS rather than
                    ;; refuses and a red one STANDS, so \"finished\" and \"green\"

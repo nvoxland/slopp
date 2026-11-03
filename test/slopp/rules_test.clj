@@ -1589,3 +1589,55 @@
     (is (false? (:dialable row))))
   (is (re-find #"not dialable" (str (catalog/config-refusal "dialect" "off"))))
   (is (nil? (catalog/config-refusal "bare-throw" "advisory")) "an ordinary rule still dials"))
+
+(deftest ^:external done-holds-a-change-no-test-shows-was-needed
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'rp.core "(ns rp.core)\n\n(defn price \"P.\" [x] (* x 2))\n\n(defn label \"L.\" [x] (str x))\n")
+      (ops/ingest! sess 'rp.core-test (str "(ns rp.core-test (:require [clojure.test :refer [deftest is]] [rp.core :as c]))\n\n"
+                                           "(deftest price-t (is (number? (c/price 2))))\n\n"
+                                           "(deftest label-t (is (= \"1\" (c/label 1))))\n"))
+      (is (:landed (:land (external/done! sess :label "baseline"))) "fixture: the baseline lands")
+      (testing "a change every test already passed before is held"
+        (ops/edit-replace! sess 'rp.core 'price "(defn price \"P.\" [x] (* x 3))" :prompt "triple it")
+        (let [r (external/done! sess :label "unproven")]
+          (is (= '[rp.core/price] (mapv :form (remove :severity (get-in r [:findings :unproven-change]))))
+              (pr-str (:findings r)))
+          (is (not (:landed (:land r))) (pr-str (:land r)))))
+      (testing "a test that fails against the old version proves it, and it lands"
+        (ops/edit-replace! sess 'rp.core-test 'price-t "(deftest price-t (is (= 6 (c/price 2))))" :prompt "pin triple")
+        (let [r (external/done! sess :label "proven")]
+          (is (empty? (remove :severity (get-in r [:findings :unproven-change]))) (pr-str (:findings r)))
+          (is (:landed (:land r)) (pr-str (:land r)))))
+      (testing "a docstring-only edit is not a behaviour change"
+        (ops/edit-replace! sess 'rp.core 'label "(defn label \"Label of x.\" [x] (str x))" :prompt "doc")
+        (is (:landed (:land (external/done! sess :label "doc")))))
+      (testing "a waiver for a behaviour-preserving change lets it land, and says so"
+        (ops/edit-replace! sess 'rp.core 'label "(defn label \"Label of x.\" [x] (pr-str x))" :prompt "same output for numbers")
+        (swap! sess assoc :untested-waivers {"rp.core/label" "pr-str and str agree on numbers"})
+        (let [r (external/done! sess :label "waived")]
+          (swap! sess dissoc :untested-waivers)
+          (is (:landed (:land r)) (pr-str (:findings r)))
+          (is (re-find #"pr-str and str agree" (pr-str (get-in r [:findings :unproven-change]))))))
+      (testing "a new function no test runs is held, and ^:untested-ok with a reason lets it land"
+        (ops/add-form! sess 'rp.core "(defn ^{:entry-point \"a demo tool\"} shout \"S.\" [x] (str x \"!\"))" :prompt "new and untested")
+        (let [r (external/done! sess :label "uncovered")]
+          (is (= '[rp.core/shout] (mapv :form (remove :severity (get-in r [:findings :unproven-change]))))
+              (pr-str (:findings r)))
+          (is (not (:landed (:land r)))))
+        (ops/edit-replace! sess 'rp.core 'shout "(defn ^{:entry-point \"a demo tool\" :untested-ok \"it only prints\"} shout \"S.\" [x] (str x \"!\"))" :prompt "say why")
+        (let [r (external/done! sess :label "untested-ok")]
+          (is (:landed (:land r)) (pr-str (dissoc r :suite :lint)))))
+      (testing "a function only an ^:external test reaches is reported, not held"
+        (ops/ingest! sess 'rp.ext "(ns rp.ext)\n\n(defn spawn \"S.\" [x] x)\n")
+        (ops/ingest! sess 'rp.ext-test (str "(ns rp.ext-test (:require [clojure.test :refer [deftest is]] [rp.ext :as e]))\n\n"
+                                            "(deftest ^:external spawn-t (is (= 1 (e/spawn 1))))\n"))
+        (is (:landed (:land (external/done! sess :label "ext baseline"))))
+        (ops/edit-replace! sess 'rp.ext 'spawn "(defn spawn \"S.\" [x] (identity x))" :prompt "external only")
+        (let [r (external/done! sess :label "ext")]
+          (is (empty? (remove :severity (get-in r [:findings :unproven-change]))) (pr-str (:findings r)))
+          (is (or (some #(some #{'rp.ext/spawn} (:unjudged %)) (get-in r [:findings :unproven-change]))
+                  (get-in r [:findings :carried-advisories :unproven-change]))
+              (pr-str (:findings r)))
+          (is (:landed (:land r)) (pr-str (dissoc r :suite :lint)))))
+      (finally (ops/close! sess)))))

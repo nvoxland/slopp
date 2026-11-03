@@ -1438,6 +1438,7 @@
   (let [sess (external/open!)]
     (try
       (ops/ingest! sess 'md.core "(ns md.core)\n(defn shared \"Public.\" [x] x)\n")
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is about module rules, not test proof")
       (ops/module-dep! sess "md.app" "md.core" :prompt "app uses core")
       (ops/ingest! sess 'md.app
                    (str "(ns md.app (:require [md.core :as core]))\n"

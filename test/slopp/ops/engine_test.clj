@@ -774,6 +774,7 @@
         a   (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "a"})]
     (try
       (ops/ingest! a 'go.core "(ns go.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n(defn ^:unused-ok g \"G.\" [] 3)\n")
+      (ops/config-file! a "rules" :key "unproven-change" :value "off" :prompt "this fixture is about form order, not test proof")
       (external/done! a :label "seed" :agent "a")
       (let [b (external/open! {:slopp.ops/dir dir :slopp.ops/read-only? true :slopp.ops/lazy-image? true})]
         (try

@@ -220,3 +220,70 @@
   (testing "every :at is one line"
     (let [ms (mutate/mutants "(defn f [x]\n  (+ x\n     1))" 50)]
       (is (= "(+ x 1)" (:at (first ms)))))))
+
+(deftest a-behaviour-change-is-more-than-a-docstring-or-a-name
+  (testing "a different body is a behaviour change"
+    (is (true? (mutate/behaviour-change? "(defn f \"D.\" [x] x)" "(defn f \"D.\" [x] (inc x))"))))
+  (testing "a docstring-only edit is not"
+    (is (false? (mutate/behaviour-change? "(defn f \"Old.\" [x] x)" "(defn f \"New words.\" [x] x)")))
+    (is (false? (mutate/behaviour-change? "(defn f [x] x)" "(defn f \"Now documented.\" [x] x)"))))
+  (testing "a rename is not: the old name is not this function"
+    (is (false? (mutate/behaviour-change? "(defn f [x] (inc x))" "(defn g [x] (dec x))"))))
+  (testing "source that does not parse counts as a change, so it is checked rather than skipped"
+    (is (true? (mutate/behaviour-change? "(defn f [x" "(defn f [x] x)")))))
+
+(deftest ^:external a-change-is-proven-by-a-test-that-fails-on-its-old-version
+  (let [src (str "(ns demo.prove)\n\n"
+                 "(defn fixed \"F.\" [x] (inc x))\n\n"
+                 "(defn same \"S.\" [x] (inc x))\n\n"
+                 "(defn fresh \"N.\" [x] x)\n\n"
+                 "(defn lonely \"L.\" [x] x)\n\n"
+                 "(defn extonly \"E.\" [x] x)\n")
+        s   (store/ingest (store/empty-store) 'demo.prove src)
+        fid #(:id (store/form-named s 'demo.prove %))
+        h   (repl/start!)]
+    (try
+      (repl/eval! h (str src
+                         "(ns demo.prove-test (:require [clojure.test :refer [deftest is]] [demo.prove :as p]))\n"
+                         "(deftest fixed-t (is (= 2 (p/fixed 1))))\n"
+                         "(deftest same-t (is (= 2 (p/same 1))))\n"
+                         "(deftest fresh-t (is (= 1 (p/fresh 1))))\n"
+                         "(deftest ^:external ext-t (is (= 1 (p/extonly 1))))\n"
+                         "(in-ns 'user)"))
+      (let [rs (mutate/prove! h s [{:fid (fid 'fixed) :form 'demo.prove/fixed :tests '[demo.prove-test/fixed-t]
+                                    :old "(defn fixed \"F.\" [x] x)"}
+                                   {:fid (fid 'same) :form 'demo.prove/same :tests '[demo.prove-test/same-t]
+                                    :old "(defn same \"S.\" [x] (+ x 1))"}
+                                   {:fid (fid 'fresh) :form 'demo.prove/fresh :tests '[demo.prove-test/fresh-t]
+                                    :old nil}
+                                   {:fid (fid 'lonely) :form 'demo.prove/lonely :tests []
+                                    :old "(defn lonely \"L.\" [x] 0)"}
+                                   {:fid (fid 'extonly) :form 'demo.prove/extonly :tests '[demo.prove-test/ext-t]
+                                    :old "(defn extonly \"E.\" [x] 0)"}]
+                           :budget-ms 30000)
+            by (into {} (map (juxt :form identity)) rs)]
+        (testing "a test that fails against the old version proves the change, and names itself"
+          (is (= :proven (:status (by 'demo.prove/fixed))))
+          (is (= 'demo.prove-test/fixed-t (:by (by 'demo.prove/fixed)))))
+        (testing "tests that pass against both versions prove nothing"
+          (is (= :unproven (:status (by 'demo.prove/same)))))
+        (testing "a new function needs only a test that runs it"
+          (is (= :new (:status (by 'demo.prove/fresh)))))
+        (testing "a changed function no test runs is uncovered"
+          (is (= :uncovered (:status (by 'demo.prove/lonely)))))
+        (testing "what only the external tier runs cannot be judged in the image"
+          (is (= :unprovable (:status (by 'demo.prove/extonly)))))
+        (testing "the current code is back in the image afterwards"
+          (is (= [2] (repl/eval! h "(demo.prove/fixed 1)")))
+          (is (= [1] (repl/eval! h "(demo.prove/extonly 1)")))))
+      (testing "an old version that no longer loads cannot be judged, and the real one comes back"
+        (let [[r] (mutate/prove! h s [{:fid (fid 'fixed) :form 'demo.prove/fixed :tests '[demo.prove-test/fixed-t]
+                                       :old "(defn fixed [x] (no-such-fn x))"}])]
+          (is (= :unprovable (:status r)) (pr-str r))
+          (is (= [2] (repl/eval! h "(demo.prove/fixed 1)")))))
+      (testing "a spent budget checks nothing and says so"
+        (is (= [:unchecked]
+               (mapv :status (mutate/prove! h s [{:fid (fid 'fixed) :form 'demo.prove/fixed
+                                                  :tests '[demo.prove-test/fixed-t] :old "(defn fixed [x] x)"}]
+                                            :budget-ms 0)))))
+      (finally (repl/stop! h)))))

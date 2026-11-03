@@ -330,3 +330,122 @@
                 (empty? left)  (assoc r :status :discharged :survivors [])
                 :else          (assoc r :survivors left)))))
         results))
+
+(defn- defn-key
+  "A defn's source as data with its docstring removed — what a call can
+  observe of it — and its name. nil when the source does not parse."
+  [src]
+  (when-let [x (try (n/sexpr (p/parse-string src)) (catch Exception _ nil))]
+    (when (seq? x)
+      (let [[head nm & more] x
+            body (if (and (string? (first more)) (next more)) (rest more) more)]
+        {:name nm :body (list* head body)}))))
+
+(defn ^:export behaviour-change?
+  "True when `new-src` changes what its function DOES compared with `old-src`.
+  A docstring-only edit is not a change, and neither is a rename: the old name
+  is a different function, so its version proves nothing about this one.
+  Source that does not parse counts as a change, so it is checked rather than
+  quietly skipped."
+  [old-src new-src]
+  (let [o (defn-key old-src) n' (defn-key new-src)]
+    (cond
+      (or (nil? o) (nil? n')) true
+      (not= (:name o) (:name n')) false
+      :else (not= (:body o) (:body n')))))
+
+(defn- prove-form!
+  "Judge one target `{:fid :form :tests :old}` (see [[prove!]]): load its old
+  version into `image`, run its tests, restore the real form from `store`."
+  [image store {:keys [fid tests old] :as target} per-run-ms left]
+  (let [base   (select-keys target [:form :fid :tests])
+        ns-sym (store/ns-of-form-id store fid)]
+    (cond
+      (empty? tests) (assoc base :status :uncovered)
+      (nil? old)     (assoc base :status :new)
+      :else
+      (let [st'  (try (first (store/replace-node store ns-sym fid (p/parse-string old)))
+                      (catch Throwable _ nil))
+            err  (if st' (hotload/hot-load-form! image st' fid) "it does not parse")
+            r    (when (nil? err)
+                   (try (first (repl/eval! image (run-string tests (max 1 (min per-run-ms (left))))))
+                        (catch Throwable t (str t))))
+            back (when st' (hotload/hot-load-form! image store fid))]
+        (cond
+          back           (assoc base :status :restore-failed :error back)
+          err            (assoc base :status :unprovable
+                                :why (str "its version from the last done no longer loads (" err ")"))
+          (not (map? r)) (assoc base :status :unprovable :why (str r))
+          (:killed-by r) (assoc base :status :proven :by (:killed-by r))
+          (:timeout r)   (assoc base :status :proven :by :timeout)
+          (zero? (:ran r 0)) (assoc base :status :unprovable :why "only tests outside the image run it")
+          :else          (assoc base :status :unproven))))))
+
+(defn ^:export prove!
+  "Check that each changed function's tests NEED the change. A target is
+  `{:fid :form :tests :old}`, where `:old` is the function's source at the
+  last done (nil when it is new). The old version is loaded into `image`, the
+  in-image tests that ran the function are run, and the real form is restored
+  from `store`. Statuses:
+
+  - `:proven` (with `:by`, the test) — a test fails against the old version,
+    so it shows the change was needed. A timeout counts: the old version
+    behaves differently enough to hang.
+  - `:unproven` — every test passes against both versions.
+  - `:new` — no old version, and a test runs it. A test of a new function
+    cannot pass without it, so running is enough.
+  - `:uncovered` — no in-image test runs it.
+  - `:unprovable` (with `:why`) — the image cannot judge: only `^:external`
+    tests run it, or the old version no longer loads.
+  - `:unchecked` — the `:budget-ms` (default 10s) ran out first.
+  - `:restore-failed` — the image may still hold the old version; stops the
+    run, since every later result would be about the wrong code.
+
+  This is mutation testing with one mutant chosen by history instead of by a
+  rule: the version the agent replaced."
+  [image store targets & {:keys [budget-ms per-run-ms] :or {budget-ms 10000 per-run-ms 5000}}]
+  (let [t0   (System/currentTimeMillis)
+        left #(- budget-ms (- (System/currentTimeMillis) t0))]
+    (loop [[t & more :as todo] (sort-by (comp count :tests) targets) out []]
+      (cond
+        (nil? t) out
+        (<= (left) 0)
+        (into out (map #(assoc (select-keys % [:form :fid :tests]) :status :unchecked)) todo)
+        :else
+        (let [r (prove-form! image store t per-run-ms left)]
+          (if (= :restore-failed (:status r))
+            (conj out r)
+            (recur more (conj out r))))))))
+
+(defn ^:export proof-findings
+  "Done findings from [[prove!]] `results`. An `:unproven` or `:uncovered`
+  function is a finding on its form, and it holds the landing. What the image
+  could not judge is one formless `:info` row, never a hold."
+  [results]
+  (let [by    (group-by :status results)
+        exits (str " If the change keeps behaviour (a refactor), waive it on the done call:"
+                   " done {untested {\"ns/name\" \"why\"}}. A function no in-image test can"
+                   " watch takes ^{:untested-ok \"why\"} on its name.")
+        names (fn [xs] (str/join ", " (map :form xs)))]
+    (vec (concat
+          (for [{:keys [form tests]} (:unproven by)]
+            {:form  form
+             :teach (str "every test that runs it (" (str/join ", " (take 3 tests))
+                         (when (> (count tests) 3) ", …")
+                         ") also passes against its version from the last done, so nothing"
+                         " shows this change was needed. Add an assertion that fails on the"
+                         " old behaviour." exits)})
+          (for [{:keys [form]} (:uncovered by)]
+            {:form  form
+             :teach (str "no in-image test runs this changed function, so nothing shows what"
+                         " it should do. Write a test that calls it." exits)})
+          (let [cant (concat (:unprovable by) (:unchecked by) (:restore-failed by))]
+            (when (seq cant)
+              [{:severity :info
+                :unjudged (mapv :form cant)
+                :teach    (str "the image could not show whether these changes were needed: "
+                               (str/join "; " (for [r cant]
+                                                (str (:form r) " (" (or (:why r)
+                                                                        (some-> (:status r) name)) ")")))
+                               (when (seq (:restore-failed by))
+                                 ". The image may still hold an old version; `build {op restart}` rebuilds it"))}]))))))

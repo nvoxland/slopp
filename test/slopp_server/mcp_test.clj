@@ -5313,3 +5313,20 @@
               "the session's own earlier ask is not news")
           (finally (ops/close! b))))
       (finally (sh/sh "rm" "-rf" dir)))))
+
+(deftest ^:external done-untested-waives-a-behaviour-preserving-change-for-that-done-only
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "wv.core" :source "(ns wv.core)\n(defn twice \"T.\" [x] (* 2 x))\n"})
+      (call! sess "ns_create" {:ns "wv.core-test" :source "(ns wv.core-test (:require [clojure.test :refer [deftest is]] [wv.core :as c]))\n(deftest twice-t (is (= 4 (c/twice 2))))\n"})
+      (call! sess "done" {:label "baseline"})
+      (call! sess "change" {:prompt "same result, written as addition"
+                            :impl [{:ns "wv.core" :name "twice" :source "(defn twice \"T.\" [x] (+ x x))"}]})
+      (let [r (call! sess "done" {:label "refactor" :untested {"wv.core/twice" "addition and doubling agree"}})]
+        (testing "the waived change lands"
+          (is (re-find #":landed \"main\"" r) r))
+        (testing "and the done says what was waived and why"
+          (is (re-find #"addition and doubling agree" r) r)))
+      (testing "the waiver was for that done only"
+        (is (nil? (:untested-waivers @sess))))
+      (finally (ops/close! sess)))))

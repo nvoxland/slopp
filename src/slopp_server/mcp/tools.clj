@@ -387,7 +387,9 @@
     :description "Close a unit of work: normalize touched forms, re-verify (the whole in-image suite plus the ^:external tests your changes impact; lint and dead surface over the namespaces you touched), record a labeled boundary, land. Carries :suite (the counts), :whole-store when the whole-store check is cheap, and with commit=true (or a label) the commit point too. A deferred impacted ^:external set is REPORTED (:external-pending). done reports, never refuses; a red one stands until new work supersedes it. The usual close is `done`/`commit` on the LAST change rather than this call."
     :inputSchema {:type "object" :properties {:label {:type "string"}
                                               :commit {:type ["boolean" "string"]
-                                                       :description "also take a commit point (true, or its label) in this same call"}}}}
+                                                       :description "also take a commit point (true, or its label) in this same call"}
+                                              :untested {:type "object"
+                                                         :description "{\"ns/name\" \"why\"} — changed functions whose change keeps behaviour (a refactor), so no test can fail on the old version; waived for this done only, and reported"}}}}
    {:name "commit_point"
     :description "Record a COMMIT-POINT: runs a full done and gates on its verdict (force=true records red honestly); it runs no whole-store check of its own. The git-projection grain; target=<delta id> marks an earlier spot. The usual form is `commit true` on the closing change or on done."
     :inputSchema {:type "object"

@@ -231,6 +231,14 @@
    {:rule :direct-http :grain :done
     :escape "call slopp.http.client/request, taking it as a PARAMETER so callers can pass client/fake-requester — or ^{:adapter \"http — why\"} on the name if this form IS the adapter (it polices itself; the value's first word names the port, so a \"postgres\" adapter is ignored rather than called stale)"
     :teach "a form reaches the network itself — a java.net.http.HttpClient, or a slurp of an http(s):// literal. Raw reaching belongs in a declared ADAPTER; everything else goes through the port and inherits its fake and its contract suite. TESTS ARE NOT EXEMPT: calling the port from a test still makes a REAL call, so an exemption would buy nothing and would carve out the one place this boilerplate breeds. Scoped to HTTP because a gate may only demand a port that EXISTS — slopp ships one for HTTP and none for files or subprocesses"}
+   {:rule :unproven-change :grain :done
+    :escape (str "add an assertion that fails on the old behaviour; for a change that keeps"
+                 " behaviour, done {untested {\"ns/name\" \"why\"}}; for a function no in-image"
+                 " test can watch, ^{:untested-ok \"why\"} on its name")
+    :teach (str "a function this episode changed has no test that fails against its version"
+                " from the last done, or a new one has no test at all, so nothing shows the"
+                " change was needed. A test that fails without the fix is the strongest"
+                " evidence a change is right; an already-green suite says little")}
    {:rule :http-generated-ns :grain :form
     :escape "regenerate via generate_client after changing the ENDPOINT (its :rest/request/:rest/response), strip the ^:generated marker to take manual ownership, or dial it down (config_file {path \"rules\" key \"http-generated-ns\" value \"advisory\"})"
     :teach "a ^:generated form is generate_client's output and must not be hand-edited — regeneration rewrites the whole client namespace, so a hand edit is lost on the next generate (D-web-contracts part 2)"}
