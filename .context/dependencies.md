@@ -23,6 +23,13 @@ it.
 
 ## The manifest (`slopp.api` `deps_*`, `slopp.store`, `slopp.store.db`)
 
+- **Allow-list (6u3.2, 2026-11-02).** The `deps_add` TOOL refuses a lib the
+  store does not have unless the human's ask names it (whole-name match, so a
+  look-alike does not pass) or `config deps-allow` lists it; writing
+  `deps-allow` itself needs the ask to name the key. Gated at the tool, not in
+  `ops/deps-add!`: git clone/import (`slopp.sync`) add the deps a human chose
+  to bring in, and call `deps-add!` directly. Boot does not re-check the
+  manifest: every entry arrived through a gated door or a human's import.
 - `deps_add {lib version|coord}` / `deps_remove` / `deps_list`. The manifest
   is `{lib coord}` (deps.edn coordinates), kept CLEAN (tools.deps-legal).
 - It is a **tracked delta stream** (`:deps-add`/`:deps-remove`, state-carrying

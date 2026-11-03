@@ -8021,6 +8021,29 @@ comprehend: 86%) as a record with visible absence, not a gate. The claim
 answers the parallel-work finding: decision conflict, not merge conflict, is
 what breaks parallel agents (16 agents overwriting one fix).
 
+## D-deps-allow (2026-11-02) — a new dependency needs the human's word
+
+**Decision.** The `deps_add` tool refuses a library the store does not already
+have unless the human's ask names it (whole-name match) or the store's
+`deps-allow` config lists it; writing `deps-allow` needs the ask to name the
+key. The refusal comes before `deps-add!` resolves anything, so nothing is
+downloaded. A version change of a held library passes.
+
+**Why.** Package hallucination is measured and stable: about one suggested
+package in five does not exist, and the same names recur across runs, which
+makes them squattable. An agent's own pick is therefore not enough; a human
+names the library. The human's ask is the existing human channel
+(D-test-immutability), which works under Claude Code since slopp-oa7 was
+fixed (d6b2c0d53515a): the server's `mcp-` session label no longer counts as
+a claim, so the prompt hook's ask reaches the session.
+
+**Where, and not where.** At the TOOL, not in `ops/deps-add!` and not at the
+manifest fold or boot, as the plan first proposed: a git clone or import
+(`slopp.sync`) brings in the dependencies a human chose to bring in and calls
+`deps-add!` directly; a merge lands entries that passed a gated door on their
+own thread; and boot refusing an existing manifest would brick stores that
+predate the rule. Built at deb7617cbae1d.
+
 ## D-facets (2026-11-02, user-directed; supersedes the first D-parse-edge text) — logic about a value lives in one declared place, and the edge parses into it
 
 **Decision.** A facet is a `def` with the `:facet` marker whose value is a

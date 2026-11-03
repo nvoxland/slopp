@@ -17,6 +17,21 @@ later image launch. `build` generates a complete `deps.edn` from it.
 
 **Never hand-edit `deps.edn`.** It is generated. Change the manifest.
 
+**A new library needs a human's word.** `deps_add` refuses a library the store
+does not already have, before anything is downloaded, unless your request names
+it by its full coordinate (`metosin/malli`) or the store's allow-list carries
+it:
+
+```clj
+config_file {path "deps-allow" key "metosin/malli" value "checked on clojars"}
+```
+
+Writing to that list also needs your request to name the library, so an agent
+cannot approve its own pick. The reason is measured: about one package in five
+that a model suggests does not exist, and the same names recur, which makes them
+easy to squat. A version change of a library the store already has passes, and
+a git clone or import brings in what its manifest lists.
+
 **A library slopp itself bundles keeps slopp's version in the server process.**
 `deps_add` reports that as `:host-override`, naming both what you declared and
 what is actually in force. Your declaration still governs the oracle image, the

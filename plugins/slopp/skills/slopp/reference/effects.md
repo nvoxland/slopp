@@ -4,6 +4,15 @@
 
 - `deps_add` a library, then require it normally (hot classpath add, no
   restart). `deps.edn` is GENERATED — never hand-edit it.
+- **A NEW library needs the human's word.** `deps_add` refuses a library the
+  store does not already have unless the human's ask names it by its full
+  coordinate (`org.clojure/data.json`) or the store's `deps-allow` config
+  lists it. Nothing is downloaded on a refusal. Do not pick a library
+  yourself: a package an agent proposes can be one that does not exist, or a
+  look-alike. Ask the human to name it. Adding to `deps-allow`
+  (`config_file {path "deps-allow" key "<lib>" value "who checked it"}`)
+  also needs their ask to name it. A version change of a library the store
+  already has passes.
 - **A library slopp itself bundles runs at slopp's version in the SERVER
   process**, and `deps_add` says so as `:host-override {lib {:declared
   :in-force}}`. Your declaration still governs the oracle image, the test

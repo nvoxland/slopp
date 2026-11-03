@@ -305,7 +305,7 @@ exist for the leftovers: work somebody started and nobody finished.
 
 | Tool | What it does |
 |---|---|
-| `deps_add {lib version}` | Add a library. Hot to the live classpath, no restart. Reports `:host-override` when slopp's own process bundles it at another version, and `:shadowed` when more than one classpath entry provides a namespace. |
+| `deps_add {lib version}` | Add a library. A library the store does not have yet needs your request to name it, or a `deps-allow` config entry; otherwise it is refused before any download. Hot to the live classpath, no restart. Reports `:host-override` when slopp's own process bundles it at another version, and `:shadowed` when more than one classpath entry provides a namespace. |
 | `deps_remove {lib}` | Drop a library. |
 | `deps_list` | The dependency manifest. |
 | `deps_pure {target}` | Assert a dependency target is pure, so callers are not `!`-flagged. |

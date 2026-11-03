@@ -177,7 +177,9 @@ ordinary git.
   instead of refusing, because `compile_client` builds on its way to
   regenerating the very artifact that may be missing.
 - `deps_add {lib, version}` — the store's dependency manifest (hot-loads
-  into the live image; no restart).
+  into the live image; no restart). A library the store does not have yet
+  needs the human's ask to name it, or an entry on the `deps-allow` config;
+  a team pre-approves its usual libraries there.
 
 ## The CLI (scripts, CI, no MCP session)
 
