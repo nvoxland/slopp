@@ -2486,6 +2486,7 @@ client-deps (merge (:client-deps st) (:client provided))
       summary             (assoc :test summary)
       (seq pruned-reqs)   (assoc :pruned-requires pruned-reqs)
       (:status iso)       (assoc :external iso)
+      (seq changed)       (merge (done/spread-report st changed))
       land                (assoc :land land)
       (seq gap)           (assoc :landed-gap
                                  {:forms (mapv (fn [[ns* nm]] (symbol (str ns*) nm)) gap)

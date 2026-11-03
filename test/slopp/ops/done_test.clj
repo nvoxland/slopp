@@ -139,3 +139,40 @@
       (is (= [{:from "app.web" :to "app.core"}]
              (done/declared-edge-gap [{:from "app.web" :to "app.core"}]
                                      {"other.thing" #{"app.core"}} {}))))))
+
+(deftest episode-spread-counts-production-forms-namespaces-and-modules
+  ;; Agent success falls under 10% once a task touches three or more units.
+  ;; The episode knows what it touched; done REPORTS the spread (never gates).
+  (let [st  (-> (store/empty-store)
+                (store/ingest 'sp.a.core "(ns sp.a.core)\n(defn f [] 1)\n(defn g [] 2)\n")
+                (store/ingest 'sp.a.util "(ns sp.a.util)\n(defn h [] 3)\n")
+                (store/ingest 'sp.b.core "(ns sp.b.core)\n(defn k [] 4)\n")
+                (store/ingest 'sp.c.core "(ns sp.c.core)\n(defn m [] 5)\n")
+                (store/ingest 'sp.a.core-test "(ns sp.a.core-test)\n(defn t [] 6)\n"))
+        fid (fn [n nm] (:id (store/form-named st n nm)))]
+    (testing "counts forms, distinct namespaces and distinct modules"
+      (is (= {:forms 4 :namespaces 3 :modules 2}
+             (done/episode-spread st [(fid 'sp.a.core 'f) (fid 'sp.a.core 'g)
+                                      (fid 'sp.a.util 'h) (fid 'sp.b.core 'k)]))))
+    (testing "a test namespace's forms are not production spread"
+      (is (= {:forms 1 :namespaces 1 :modules 1}
+             (done/episode-spread st [(fid 'sp.a.core 'f) (fid 'sp.a.core-test 't)]))))
+    (testing "three modules carry a note; fewer carry none"
+      (let [wide (done/spread-report st [(fid 'sp.a.core 'f) (fid 'sp.b.core 'k) (fid 'sp.c.core 'm)])]
+        (is (= 3 (get-in wide [:spread :modules])))
+        (is (re-find #"(?i)split" (str (:spread-note wide)))))
+      (let [narrow (done/spread-report st [(fid 'sp.a.core 'f) (fid 'sp.b.core 'k)])]
+        (is (= 2 (get-in narrow [:spread :modules])))
+        (is (nil? (:spread-note narrow)))))))
+
+(deftest ^:external done-carries-the-episodes-spread
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'spr.core "(ns spr.core)\n(defn f \"F.\" [] 1)\n")
+      (let [r (external/done! sess :label "spread")]
+        (is (= 1 (get-in r [:spread :modules])) (pr-str (:spread r)))
+        (is (= 1 (get-in r [:spread :namespaces])))
+        (is (pos? (get-in r [:spread :forms])))
+        (is (nil? (:spread-note r))))
+      (finally
+        (ops/close! sess)))))

@@ -173,6 +173,9 @@
    [:from {:doc "the delta id this range starts AFTER — exclusive"} :string]
    [:to {:doc "the delta id this range ends at — inclusive, and usually a commit-point"} :string]
    [:count {:doc "how many forms changed across the whole range"} :int]
+   [:spread {:doc (str "how WIDE the range is, over production forms only: agent success"
+                       " falls once a change touches three or more modules. A report, not a gate")}
+    [:map [:forms :int] [:namespaces :int] [:modules :int]]]
    [:modules {:doc (str "the changes grouped module then namespace, with a count at"
                         " every rung so a consumer can render a collapsed tree"
                         " without summing anything itself")}

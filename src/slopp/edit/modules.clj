@@ -722,3 +722,11 @@
                          " direction before renaming anything else. A crossing"
                          " only tests make is not a cycle; {test_only true} may"
                          " be the answer."))])))))))
+
+(defn ^:export spread
+  "How WIDE a change is, over `ns-syms` (one namespace symbol per changed form): `{:forms :namespaces :modules}` counting PRODUCTION forms only; a test namespace is skipped. Pure; a report, never a gate."
+  [ns-syms]
+  (let [prod (remove #(not= (str %) (str (fold-test-ns %))) ns-syms)]
+    {:forms      (count prod)
+     :namespaces (count (distinct prod))
+     :modules    (count (distinct (map module-of prod)))}))

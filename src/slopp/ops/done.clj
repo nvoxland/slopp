@@ -34,7 +34,7 @@
             [slopp.index :as index]
             [slopp.index.normalize :as normalize]
             [slopp.store.render :as store.render]
-            [slopp.store :as store] [rewrite-clj.node :as n] [slopp.read.history :as history]))
+            [slopp.store :as store] [rewrite-clj.node :as n] [slopp.read.history :as history] [slopp.edit.modules :as edit.modules]))
 
 (defn normalize-rewrites "Which of the episode's `changed` form ids the normalizer would actually
   rewrite, as `[{:form-id :form :node :applied}]` — pure, nothing committed.
@@ -258,3 +258,17 @@
                                    (contains? agents (:agent d))
                                    (symbol? (:ns d)))]
                     (:ns d)))))))
+
+(defn episode-spread
+  "`{:forms :namespaces :modules}` for the episode's changed form ids `form-ids`, over PRODUCTION namespaces only (test namespaces are skipped)."
+  [st form-ids]
+  (edit.modules/spread (keep #(store/ns-of-form-id st %) form-ids)))
+
+(defn spread-report
+  "The done result's spread keys: `:spread`, plus a one-line `:spread-note` when the change crosses three or more modules, where agents fail most. Nil when no production form changed."
+  [st form-ids]
+  (let [sp (episode-spread st form-ids)]
+    (when (pos? (:forms sp))
+      (cond-> {:spread sp}
+        (>= (:modules sp) 3)
+        (assoc :spread-note (str "This episode spans " (:modules sp) " modules: wide changes are where agents fail most. Consider splitting it, or review it more closely."))))))

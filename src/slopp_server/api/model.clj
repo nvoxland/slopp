@@ -67,6 +67,7 @@
         {:from    from
          :to      to
          :count   (count rows)
+         :spread  (edit.modules/spread (map #(symbol (:ns %)) rows))
          :modules (->> rows
                        (group-by :module)
                        (sort-by key)

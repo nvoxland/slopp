@@ -928,3 +928,21 @@
     (testing "and on the test that carries it"
       (is (= {"demo.e.core-test/hello-says-one" true "demo.e.core-test/hello-is-a-number" nil}
              (into {} (map (juxt :test :endorsed)) (:shown t)))))))
+
+(deftest change-view-reports-the-ranges-spread
+  (let [s0  (store/ingest (store/empty-store) 'sp.a.core "(ns sp.a.core)\n\n(defn f [x] (inc x))\n")
+        s1  (store/ingest s0 'sp.b.core "(ns sp.b.core)\n\n(defn g [] 1)\n")
+        fid (fn [n nm] (:id (store/form-named s1 n nm)))
+        f   (fid 'sp.a.core 'f)
+        g   (fid 'sp.b.core 'g)
+        st  (reduce store/record-delta
+                    (assoc s1 :deltas [] :head nil :line-pos 0 :prompts {} :last-write {})
+                    [{:id "c1" :op :commit :status :green :at 1784900000000 :description "base"}
+                     {:id "d1" :op :ingest :ns 'sp.a.core :form-ids [f]
+                      :sources {f "(defn f [x] (inc x))"}}
+                     {:id "d2" :op :ingest :ns 'sp.b.core :form-ids [g]
+                      :sources {g "(defn g [] 1)"}}
+                     {:id "c2" :op :commit :status :green :at 1784900060000 :description "work"}])
+        cv  (model/change-view (atom {:store st}) "c1" "c2")]
+    (is (= {:forms 2 :namespaces 2 :modules 2} (:spread cv)) (pr-str (:spread cv)))
+    (is (json-shaped? cv))))

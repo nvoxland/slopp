@@ -5148,3 +5148,13 @@
       (swap! sess assoc :last-intent "allow org.example/left-pad, I checked it")
       (is (nil? (:error (ops/config-file! sess "deps-allow" :key "org.example/left-pad" :value "the human checked it"))))
       (finally (ops/close! sess)))))
+
+(deftest a-wide-green-done-shows-its-spread-and-a-narrow-one-stays-terse
+  (let [green {:done "d1"
+               :findings {:episode-status :green :test-status :green :lint-errors 0}}
+        wide  (#'mcp/terse-done (assoc green :spread {:forms 5 :namespaces 4 :modules 3}
+                                       :spread-note "wide change"))
+        narrow (#'mcp/terse-done (assoc green :spread {:forms 5 :namespaces 4 :modules 2}))]
+    (is (= {:forms 5 :namespaces 4 :modules 3} (:spread wide)))
+    (is (= "wide change" (:spread-note wide)))
+    (is (not (contains? narrow :spread)))))
