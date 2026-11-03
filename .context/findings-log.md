@@ -3555,8 +3555,10 @@ separators ("1,234.50"), and the easy fix (strip commas) breaks "12,50".
 - So the measurement is not yet "does intent help": it is "intent is not
   delivered on the read path agents actually take". Fix delivery first,
   then re-run the same pilot; it costs about $0.07 per run.
-- Harness note: a finished `claude -p` run keeps its verification image for
-  up to two hours, and so does its scoring session for ten minutes. At the
+- Harness note (corrected after round 2): a finished `claude -p` agent's
+  sessions DO end at exit, through the SessionEnd hook. What held the images
+  was the one-shot CLI calls (seeding, scoring, a full_check): a CLI session
+  keeps its image for ten minutes by design. At the
   default cap of six, the first full batch was refused at every write and
   voided; the batched runner restarts the dev instance between batches.
 
