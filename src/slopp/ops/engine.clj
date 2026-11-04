@@ -160,11 +160,17 @@
   reload-signature failure; or an UNEXPLAINED FLIP — a failing test whose
   traced form-set doesn't intersect the just-edited forms and which wasn't
   itself edited (this also catches value-capture staleness, since captured
-  calls bypass the trace)."
+  calls bypass the trace).
+
+  `edited` is any collection of qsyms. It is made a set here, because
+  `set/intersection` swaps its arguments by size and then `disj`es the
+  larger: handed a vector wider than a test's trace set, it threw from
+  inside done on the wide, red episode that most needed the report."
   [session edited summary]
   (let [tmap       (:test-map @session)
         failures   (:failures summary)
-        truncated? (> (+ (:fail summary 0) (:error summary 0)) (count failures))]
+        truncated? (> (+ (:fail summary 0) (:error summary 0)) (count failures))
+        edited     (when edited (set edited))]
     (or (nil? edited)
         truncated?
         (boolean (some reload-signature? failures))
@@ -174,7 +180,7 @@
                        touched (get tmap t)]
                    (or (nil? touched)
                        (and (not (contains? edited t))
-                            (empty? (set/intersection touched edited))))))
+                            (empty? (set/intersection (set touched) edited))))))
                failures)))))
 
 (defn shape-episode-reds!

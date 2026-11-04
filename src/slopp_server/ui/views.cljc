@@ -1531,7 +1531,7 @@
   Neither shows up in the readout, because the text renders either way — and
   this screen has no fixture, so nothing has ever driven it. That is the
   second instance of a live defect behind an undriven screen."
-  [{:keys [from to modules arc absence] total :count}]
+  [{:keys [from to modules arc absence flags] total :count}]
   [:div
    ;; on an empty answer this rendered `..` as a heading and ` forms` with no
    ;; number — the same false-sentence class as `0 forms` and
@@ -1554,6 +1554,16 @@
                    " changed forms had no test observed running them"))]
         (when (and system-deltas (pos? system-deltas))
           [:p (str system-deltas " housekeeping (system) changes in this range")])]))
+   ;; the tests an agent flagged instead of editing: the one exit the
+   ;; immutability guard names leads HERE, so a flag nobody can see would
+   ;; be a refusal with no decision behind it
+   (when (seq flags)
+     (into [:div {:class "flagged"}
+            [:p (str (plural (count flags) "test")
+                     " flagged by an agent as wrong, for you to decide:")]]
+           (for [f flags]
+             [:p (str (:test f) ": " (:reason f)
+                      (when (:agent f) (str " (" (:agent f) ")")))])))
    ;; THE ARC, which nothing rendered until 2026-08-15. It is one entry per
    ;; verification in the range, and its own contract argues for it better than
    ;; a docstring here could: zero failures throughout "for a range that ADDED
@@ -1579,7 +1589,7 @@
              (when ms (str " in " ms "ms"))
              (if (seq red)
                (str ", " (count red) " red — "
-                    (clojure.string/join
+                    (str/join
                      ", "
                      (map (fn [e]
                             ;; the size it is a count OF, when the entry knows

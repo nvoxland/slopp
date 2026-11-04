@@ -3062,3 +3062,16 @@
     (testing "only a run test_run made counts: not a done's observation, not another op's result"
       (is (nil? (left {:op :observe :scope '[a-test b-test] :result '{:failed-tests [a-test/x]}})))
       (is (nil? (left {:op :verify :scope '[a-test b-test] :result '{:test-run true :failed-tests [a-test/x]}}))))))
+
+(deftest a-test-moved-this-episode-keeps-its-protection
+  ;; slopp-s8x.3: move-forms! writes a :delete and an :add with a fresh id. The
+  ;; exemption for tests the episode created covered that :add, so a move was
+  ;; a way out from under the oracle.
+  (let [[s tmap] (protected-fixture)
+        node (:node (edit/parse-form "(deftest f-is-identity (is (= 1 (c/f 1))))"))
+        s    (first (store/remove-form s 'a.core-test 'f-is-identity :agent "bot" :prompt "move"))
+        s    (first (store/append-form s 'a.core-test node :agent "bot" :prompt "move"))]
+    (is (re-find #"flag_test"
+                 (str (ops/protected-test-refusal
+                       s tmap "bot" "" [{:action :replace :ns 'a.core-test :name 'f-is-identity
+                                         :source "(deftest f-is-identity (is true))"}]))))))

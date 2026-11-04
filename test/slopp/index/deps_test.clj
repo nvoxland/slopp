@@ -261,7 +261,7 @@
                        (call "deps_add" {:lib "org.clojure/data.json"
                                          :version "2.5.0" :agent "a"}))))
         (testing "deps_list answers over MCP"
-          (is (re-find #"data\\.json" (call "deps_list" {})))))
+          (is (re-find #"data\.json" (call "deps_list" {})))))
       (finally (ops/close! sess)))))
 
 (deftest build-deps-edn-trace-alias

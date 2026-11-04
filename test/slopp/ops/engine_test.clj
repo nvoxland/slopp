@@ -909,3 +909,20 @@
         (if before
           (System/setProperty "slopp.managed-for" before)
           (System/clearProperty "slopp.managed-for"))))))
+
+(deftest a-suspicious-red-check-takes-the-edited-forms-as-any-collection
+  ;; done hands the episode's edited forms over as a vector. set/intersection
+  ;; swaps its arguments by size, so once the vector outgrew a failing test's
+  ;; trace set it was the one disj'ed — a ClassCastException from inside done,
+  ;; on exactly the wide episode with a red test that most needed the report.
+  (let [sess    (atom {:test-map {'t.core-test/x #{'a.core/f 'a.core/g}}})
+        summary {:fail 1 :error 0 :failures [{:test 't.core-test/x}]}
+        edited  ['a.core/h 'a.core/i 'a.core/j 'a.core/k]]
+    (testing "a vector wider than the trace set is still a collection of forms"
+      (is (true? (engine/suspicious-red? sess edited summary))
+          "the flip is unexplained: the test's trace misses every edited form"))
+    (testing "and the same answer as the set form"
+      (is (= (engine/suspicious-red? sess (set edited) summary)
+             (engine/suspicious-red? sess edited summary))))
+    (testing "a hit in the trace is not suspicious, vector or set"
+      (is (false? (engine/suspicious-red? sess ['a.core/f 'a.core/h 'a.core/i] summary))))))

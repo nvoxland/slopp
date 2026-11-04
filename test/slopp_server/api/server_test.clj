@@ -23,9 +23,17 @@
   ;; Derived from the IMAGE rather than a store: loaded vars carry their own
   ;; metadata, so this needs no store read — which matters, because nothing
   ;; in this tier can open slopp's own store.
+  ;;
+  ;; slopp-s8x.2: the prefix scan is exactly how the review door went
+  ;; unserved for a day. `slopp-server.review` lives OUTSIDE the api prefix on
+  ;; purpose (so the typed document's control list stays an api list), the
+  ;; scan could not see it, and nothing else asked. So the comparison is in
+  ;; two halves: the prefix half is exact, and every served namespace outside
+  ;; the prefix must declare something too.
   (let [declares? (fn [nsx] (some #(let [m (meta %)]
                                      (or (:rest/path m) (:http/path m) (:http/read m)))
                                   (vals (ns-publics nsx))))
+        api?       #(str/starts-with? (str %) "slopp-server.api.")
         candidates (->> (all-ns) (map ns-name)
                         ;; the prefix is DATA — a rename rewrites code and
                         ;; walks straight past a string, so this scan can come
@@ -35,7 +43,7 @@
                         ;; split (slopp.api.* → slopp-server.api.*) broke it
                         ;; again. A sibling guard without one shipped green
                         ;; against an empty search.
-                        (filter #(str/starts-with? (str %) "slopp-server.api."))
+                        (filter api?)
                         ;; endpoint-shaped forms in tests are fixtures and
                         ;; claim no route — query_surface scopes the same way
                         (remove #(str/ends-with? (str %) "-test")))
@@ -46,9 +54,14 @@
       ;; while a marker went unclassified for a week: a check whose population
       ;; can silently become zero reports success for the wrong reason
       (is (seq derived) (str "scanned " (count candidates) " namespaces")))
-    (testing "and the list is exactly what declares an endpoint or a read performer"
-      (is (= derived listed)
+    (testing "and the api half of the list is exactly what declares an endpoint or a read performer"
+      (is (= derived (set (filter api? listed)))
           (str "declares :http/path or :http/read but is not served: "
                (set/difference derived listed)
                " / served but declares neither: "
-               (set/difference listed derived))))))
+               (set/difference (set (filter api? listed)) derived))))
+    (testing "every served namespace outside the prefix declares an endpoint too"
+      (is (every? declares? (remove api? listed))
+          (pr-str (remove api? listed))))
+    (testing "the human's review door is served"
+      (is (contains? listed 'slopp-server.review)))))

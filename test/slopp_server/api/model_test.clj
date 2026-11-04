@@ -1070,3 +1070,29 @@
         (let [v (model/form-view (atom {:store st}) fid)]
           (is (not (contains? v :reds)))))
       (finally (.close conn)))))
+
+(deftest a-change-range-carries-the-tests-an-agent-flagged
+  ;; slopp-s8x.2: a flag_test marker in the range is an objection a human has
+  ;; not decided; the change screen is where the decision is made
+  (let [s0  (store/ingest (store/empty-store) 'fc.core "(ns fc.core)\n\n(defn f [x] (inc x))\n")
+        fid (:id (store/form-named s0 'fc.core 'f))
+        st  (reduce store/record-delta
+                    (assoc s0 :deltas [] :head nil :line-pos 0 :prompts {} :last-write {})
+                    [{:id "c1" :op :commit :status :green :at 1784900000000 :description "base"}
+                     {:id "d1" :op :replace :ns 'fc.core :form-id fid :prompt "f adds one"
+                      :sources {fid "(defn f [x] (+ x 1))"}}
+                     {:id "d2" :op :flag-test :ns '*session* :test 'fc.core-test/f-adds-one
+                      :reason "asserts the old behaviour" :agent "a"}
+                     {:id "c2" :op :commit :status :green :at 1784900060000 :description "work"}
+                     {:id "d3" :op :flag-test :ns '*session* :test 'fc.core-test/f-adds-one
+                      :reason "after the range" :agent "a"}
+                     {:id "c3" :op :commit :status :green :at 1784900120000 :description "later"}])
+        cv  (fn [from to] (model/change-view (atom {:store st :test-map nil}) from to))]
+    (is (= [{:test "fc.core-test/f-adds-one" :reason "asserts the old behaviour" :agent "a"}]
+           (:flags (cv "c1" "c2")))
+        "the flag inside the range, as the screen shows it")
+    (is (= {:changed 1 :no-observed-test nil :system-deltas 0} (:absence (cv "c1" "c2")))
+        "the absence block is unchanged by it")
+    (is (= [{:test "fc.core-test/f-adds-one" :reason "after the range" :agent "a"}]
+           (:flags (cv "c2" "c3")))
+        "a flag belongs to the range it was recorded in")))

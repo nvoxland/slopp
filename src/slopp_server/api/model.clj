@@ -1090,7 +1090,9 @@ gaps    (gaps-by-ns st (:test-map @session))
   can belong to a later change), the LINE diff (never whole sources — a
   reviewer reads changes), and how many distinct forms call it now. The
   caller count spans every `:via` the graph records, and the graph is a
-  syntactic reader, so it is a floor rather than a census."
+  syntactic reader, so it is a floor rather than a census. `:flags` carries
+  the tests an agent flagged in the range instead of editing (flag_test):
+  objections a human has not decided, shown where the decision is made."
   [session from to]
   (let [st  (:store @session)
         ids (into #{} (map :id) (store/deltas st))]
@@ -1101,6 +1103,7 @@ gaps    (gaps-by-ns st (:test-map @session))
       (let [ch        (history/query-changes session :from from :to to)
             by-target (refs/refs-by-target st)
             prompts   (range-prompts st from to)
+            rds       (range-deltas st from to)
             rows      (for [{:keys [form form-id status was now]} (:forms ch)
                             :let [ns-sym (symbol (namespace form))]]
                         (cond-> {:form    (str form)
@@ -1138,6 +1141,11 @@ gaps    (gaps-by-ns st (:test-map @session))
                                                           :forms (vec (sort-by :form
                                                                                (map #(dissoc % :ns :module) fs)))})))})))
          :arc     (vec (:verification-arc ch))
+         ;; the tests an agent flagged in this range instead of editing them
+         ;; (flag_test): an objection a human has not decided yet
+         :flags   (vec (for [d rds :when (= :flag-test (:op d))]
+                         (cond-> {:test (str (:test d)) :reason (str (:reason d))}
+                           (:agent d) (assoc :agent (str (:agent d))))))
          ;; what this screen did NOT see, said on the screen: a deterministic
          ;; view that hides its gaps reads as more certain than it is
          :absence {:changed          (count rows)
@@ -1147,7 +1155,7 @@ gaps    (gaps-by-ns st (:test-map @session))
                                                             (some #(contains? (:via %) :observed)
                                                                   (refs/covered-by st tmap (symbol form)))))
                                                       rows)))
-                   :system-deltas    (count (filter :system (range-deltas st from to)))}}))))
+                   :system-deltas    (count (filter :system rds))}}))))
 
 (defn- test-spec
   "`{:assertion :assertions}` for deftest `q`, read from its body in the store:

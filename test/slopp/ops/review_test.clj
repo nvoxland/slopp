@@ -366,3 +366,32 @@
     (is (not (some #{:weak-oracle} (:flags (rows 'rv.core/g)))))
     (is (= (+ 2 (:risk (base 'rv.core/f))) (:risk (rows 'rv.core/f)))
         "tests that run a form without constraining it are worth reading first")))
+
+(deftest a-flagged-test-is-a-review-row-and-a-standing-objection
+  ;; slopp-s8x.2: flag_test is the exit the immutability guard names, and its
+  ;; marker had no reader — the agent was told "recorded for the human" and
+  ;; no surface showed it. The rows the flagged test reaches carry the flag,
+  ;; the summary carries the objection, and a later write to the test (the
+  ;; human deciding) retires it.
+  (let [st0  (-> (store/empty-store)
+                 (store/ingest 'fl.core "(ns fl.core)\n(defn f \"F.\" [x] x)\n")
+                 (store/ingest 'fl.core-test "(ns fl.core-test (:require [clojure.test :refer [deftest is]]))\n(deftest f-t (is (= 1 (fl.core/f 1))))\n"))
+        tmap '{fl.core-test/f-t #{fl.core/f}}
+        scan (fn [st] (review/review-scan (atom {:store st :test-map tmap}) :limit 100))
+        row  (fn [r] (first (filter #(= 'fl.core/f (:form %)) (:top r))))
+        [st1 _] (store/record-flag-test st0 'fl.core-test/f-t "asserts the old behaviour" :agent "a")]
+    (testing "before the flag: no objection anywhere"
+      (is (nil? (:flagged-tests (scan st0))))
+      (is (not (some #{:flagged-test} (:flags (row (scan st0)))))))
+    (testing "the flag reaches the form's row and the summary"
+      (let [r (scan st1)]
+        (is (= [{:test "fl.core-test/f-t" :reason "asserts the old behaviour" :agent "a"}]
+               (mapv #(select-keys % [:test :reason :agent]) (:flagged-tests r))))
+        (is (some #{:flagged-test} (:flags (row r))) (pr-str (row r)))))
+    (testing "writing the test again after the flag retires it: that is the human deciding"
+      (let [fid (:id (store/form-named st1 'fl.core-test 'f-t))
+            st2 (store/record-delta st1 {:id "dz" :op :replace :ns 'fl.core-test :form-id fid
+                                         :prompt "f-t expects 1; the human read it"
+                                         :sources {fid "(deftest f-t (is (= 1 (fl.core/f 1))))"}})]
+        (is (nil? (:flagged-tests (scan st2))))
+        (is (not (some #{:flagged-test} (:flags (row (scan st2))))))))))

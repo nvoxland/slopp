@@ -5501,3 +5501,48 @@
           (is (not (re-find #"flag_test" r)) r)))
       (finally (ops/close! sess)
                (sh/sh "rm" "-rf" dir)))))
+
+(deftest ^:external a-protected-test-is-not-reached-by-revert-or-move
+  ;; slopp-s8x.3: the immutability guard ran on change and edit_group only.
+  ;; edit_revert replaced a red test with its older, weaker version as a
+  ;; recorded write, and edit_move_forms moved a deftest out from under its
+  ;; trace key, so the next change edited it freely.
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-protect-doors-" (System/nanoTime))
+        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "harness-d"})]
+    (try
+      (call! sess "ns_create" {:ns "pd.core" :source "(ns pd.core)\n(defn f \"F.\" [x] x)\n"
+                               :prompt "the seed"})
+      (call! sess "ns_create" {:ns "pd.core-test"
+                               :source (str "(ns pd.core-test (:require [clojure.test :refer [deftest is]] [pd.core :as c]))\n"
+                                            "(deftest f-is-identity (is (= 1 (c/f 1))))\n")
+                               :prompt "the seed's test"})
+      (call! sess "ns_create" {:ns "pd.other-test"
+                               :source (str "(ns pd.other-test (:require [clojure.test :refer [deftest is]] [pd.core :as c]))\n"
+                                            "(deftest placeholder (is (= 2 (c/f 2))))\n")
+                               :prompt "a second test namespace"})
+      (call! sess "done" {:label "seed"})
+      (testing "a move before any change carries the trace map with it"
+        (call! sess "edit_move_forms" {:ns "pd.core-test" :forms ["f-is-identity"] :to "pd.other-test"
+                                       :prompt "move the test"})
+        (is (contains? (:test-map @sess) 'pd.other-test/f-is-identity) (pr-str (keys (:test-map @sess))))
+        (is (not (contains? (:test-map @sess) 'pd.core-test/f-is-identity))))
+      (call! sess "change" {:prompt "make f add zero"
+                            :impl [{:ns "pd.core" :name "f" :source "(defn f \"F.\" [x] (+ x 0))"}]})
+      (testing "the moved test is the oracle grading f, so a change to it is refused"
+        (is (re-find #"flag_test"
+                     (call! sess "change" {:prompt "loosen"
+                                           :tests [{:ns "pd.other-test" :name "f-is-identity"
+                                                    :source "(deftest f-is-identity (is true))"}]}))))
+      (testing "edit_revert is refused the same way"
+        (is (re-find #"flag_test"
+                     (call! sess "edit_revert" {:ns "pd.other-test" :name "f-is-identity"
+                                                :prompt "back to the earlier version"}))))
+      (testing "and so is moving it again"
+        (is (re-find #"flag_test"
+                     (call! sess "edit_move_forms" {:ns "pd.other-test" :forms ["f-is-identity"] :to "pd.core-test"
+                                                    :prompt "move it back"}))))
+      (testing "the test is unchanged in the store"
+        (is (re-find #"\(= 1 \(c/f 1\)\)"
+                     (call! sess "query_source" {:targets ["pd.other-test/f-is-identity"]}))))
+      (finally (ops/close! sess)
+               (sh/sh "rm" "-rf" dir)))))

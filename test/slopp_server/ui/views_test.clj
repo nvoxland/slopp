@@ -5513,3 +5513,18 @@
         "a reviewed row names the verdict and who gave it")
     (is (re-find #"1 not reviewed" html)
         "the absence is said in words, once")))
+
+(deftest the-change-screen-names-a-flagged-test
+  ;; slopp-s8x.2: the one exit the immutability guard names is flag_test, and
+  ;; a flag nobody can see is a refusal with no decision behind it
+  (let [flat (fn [v] (str/join " " (filter string? (tree-seq coll? seq v))))
+        base {:from "c1" :to "c2" :count 3 :modules []}
+        one  (flat (views/change-main (assoc base :flags [{:test "ab.core-test/f-t" :reason "asserts the old behaviour" :agent "a"}])))
+        none (flat (views/change-main (assoc base :flags [])))
+        bare (flat (views/change-main base))]
+    (testing "names the test, the objection and who flagged it"
+      (is (str/includes? one "1 test flagged by an agent as wrong"))
+      (is (str/includes? one "ab.core-test/f-t: asserts the old behaviour (a)")))
+    (testing "says nothing when there is nothing to decide"
+      (is (not (str/includes? none "flagged")))
+      (is (not (str/includes? bare "flagged"))))))

@@ -194,6 +194,13 @@
     [:map [:changed {:doc "forms changed in the range"} :int]
           [:no-observed-test {:doc "of those, how many no test was observed running; nil when the server holds no trace map"} [:maybe :int]]
           [:system-deltas {:doc "housekeeping deltas in the range, written by slopp rather than an author"} :int]]]
+   [:flags {:optional true
+            :doc (str "tests an agent flagged in this range as wrong instead of editing them"
+                      " (flag_test): each objection stands until a human decides it")}
+    [:sequential [:map
+                  [:test {:doc "the deftest's qualified name"} :string]
+                  [:reason {:doc "the agent's objection, in its words"} :string]
+                  [:agent {:optional true :doc "who flagged it"} :string]]]]
    [:modules {:doc (str "the changes grouped module then namespace, with a count at"
                         " every rung so a consumer can render a collapsed tree"
                         " without summing anything itself")}

@@ -16,7 +16,7 @@
             [slopp.store :as store]
             [slopp-server.api.endpoints]
             [slopp-server.api.contracts :as contracts]
-            [slopp.http :as slopp.http] [slopp-server.api.server :as server] [slopp.ops.external :as external] [slopp.ops :as ops] [cheshire.core :as json] [clojure.string :as str] [clojure.edn :as edn] [slopp.webdev.cljs :as cljs] [slopp-server.api.model :as model] [slopp.read.orient :as orient] [slopp.rest :as slopp.rest] [slopp-server.api.reads :as api.reads] [slopp.rest.paths :as rest.paths] [malli.util :as mu]))
+            [slopp.http :as http] [slopp-server.api.server :as server] [slopp.ops.external :as external] [slopp.ops :as ops] [cheshire.core :as json] [clojure.string :as str] [clojure.edn :as edn] [slopp.webdev.cljs :as cljs] [slopp-server.api.model :as model] [slopp.read.orient :as orient] [slopp.rest :as slopp.rest] [slopp-server.api.reads :as api.reads] [slopp.rest.paths :as rest.paths] [malli.util :as mu]))
 
 (deftest the-api-answers-with-data-that-matches-its-contract
   ;; The whole argument for the REST shape, made testable: an endpoint is a
@@ -307,7 +307,9 @@
                "/api/projects/:slug/rest/paths" "/api/projects/:slug/http/paths"
                "/api/projects/:slug/webapp/paths" "/api/projects/:slug/config"
                "/api/projects/:slug/entries" "/api/projects/:slug/form/:id/sequence"
-               "/api/projects/:slug/flow" "/api/projects/:slug/overlay/:dial" "/api/projects/:slug/data" "/api/projects/:slug/story/:grain/:subject"}
+               "/api/projects/:slug/flow" "/api/projects/:slug/overlay/:dial" "/api/projects/:slug/data" "/api/projects/:slug/story/:grain/:subject"
+               ;; slopp-s8x.2: the human's review door, served at last
+               "/api/projects/:slug/review"}
              (set (keys by-path)))))
 
     (testing "every capability's publisher is IN the typed document, so a
@@ -1089,6 +1091,25 @@
                    "serialized — a 500 here IS the contract violation, and the "
                    "explain is on stderr: " (pr-str (:body r)))))))
 
+    (testing "the one POST, the review door, honours its contract too"
+      ;; slopp-s8x.2: served at last. It needs an identity (the reviewer) and
+      ;; a commit point (the target), so it is driven here with both rather
+      ;; than left off the list as 'needs fixture data'. The validators on the
+      ;; context check the answer against review-response.
+      (let [st2  (store/record-delta st {:id "c1" :op :commit :status :green
+                                         :at 1784900000000 :description "first"})
+            sess (atom {:store st2})
+            ctx2 (http/context {:http/namespaces server/served-namespaces
+                                :http/wrap-context slopp.rest/validating
+                                :http/perform-ctx {:open-reader (constantly sess)
+                                                   :open-writer (constantly sess)}})
+            r    (http/handle! ctx2 {:request-method :post
+                                     :uri "/api/projects/demo/review"
+                                     :body {:target "c1" :verdict "endorsed" :note "read it"}
+                                     :http/identity {:http/sub "nathan" :http/groups #{}}})]
+        (is (= 200 (:status r)) (pr-str r))
+        (is (= {:target "c1" :verdict "endorsed" :by "nathan"} (:body r)))))
+
     (testing "and the LIST above covers every endpoint that needs no fixture data"
       ;; The list is hand-kept and its own docstring calls it exhaustive. That
       ;; is a CLAIM, and it went stale the first time somebody added an
@@ -1113,7 +1134,9 @@
                              "/api/projects/:slug/form" "/api/projects/:slug/source"
                              "/api/projects/:slug/module"
                              "/api/projects/:slug/entries" "/api/projects/:slug/flow"
-                             "/api/projects/:slug/data"]))
+                             "/api/projects/:slug/data"
+                             ;; the POST above
+                             "/api/projects/:slug/review"]))
             plain  (for [row (:http/routes ctx)
                          :let [p (str (:path row))]
                          :when (and (str/starts-with? p prefix)

@@ -44,8 +44,16 @@
   It is a short list now and stays that way: a project serves JSON and the
   EDN contract, nothing else. The pages a human looks at are the server's
   own (`slopp-server.ui.*`), served beside its registry from the server's assembly
-  and reading this API through the mount — never from a project's context."
-  ['slopp-server.api.reads 'slopp-server.api.endpoints])
+  and reading this API through the mount — never from a project's context.
+
+  The ONE write a person makes through the served API is here too:
+  `slopp-server.review`, a commit point's review. It sits outside the
+  `slopp-server.api.` prefix on purpose, so the control lists that pin the
+  api namespaces stay true — and that is how it went unserved for a day,
+  answering 404 behind a decision that named auth as the only blocker: the
+  served-list test scanned the prefix and nothing else asked. The test now
+  checks every entry."
+  ['slopp-server.api.reads 'slopp-server.api.endpoints 'slopp-server.review])
 
 (defn ^:export context
   "The served API context over a SINGLE session, for tests and in-process

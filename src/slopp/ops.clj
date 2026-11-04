@@ -1874,293 +1874,6 @@
                                      :prompt prompt :group group :agent agent))
           st))))
 
-(defn move-forms!
-  "Move `form-names` from `from-ns` into `to-ns` — NEW or EXISTING — the
-  general relocation refactor (clj-surgeon's :extract!, slopp-grade, v2).
-  Callers EVERYWHERE (production + tests) are
-  rewritten to alias-qualified calls and gain the require — addressed by
-  FORM ID, because a defmethod body defines no var and a caller set keyed on
-  a name dropped those silently; `:callers-unrewritten` reports any the pass
-  did not change, so the count is readable against its population; the moved defs are publicized (module-grain
-  visibility replaces var privacy); the target gets only the requires the
-  moved code uses. Dependency direction is analyzed: stay→moved adds the
-  require back to from-ns, moved→stay qualifies stay refs instead, a
-  two-way split refuses (real cycle). Cross-module edges the move's own
-  rewires necessitate are AUTO-DECLARED (the move's prompt rides each
-  :module-edge delta — the move IS the declared intent), refusing only a
-  cycle-closer; `:export true` marks moved vars ^:export when the deep
-  target must stay callable from outside its subtree. One atomic group +
-  changeset, compile-gated, verified across every touched namespace.
-  The one thing that verification structurally cannot see is REPORTED
-  instead: `:shadowed` names each moved call dequalified onto a LOCAL of the
-  same name — valid Clojure that calls the local, so it compiles and stays
-  green while the behaviour changes."
-  [session from-ns form-names to-ns & {:keys [prompt agent export]}]
-  (let [st   (:store @session)
-        plan (refactor/move-plan st from-ns form-names to-ns {:export export})]
-    (if (:error plan)
-      (select-keys plan [:error])
-      (let [manifest (edit.modules/modules-manifest st)
-            rows     (map (fn [r]
-                            (assoc r :to-export
-                                   (if (= (symbol (str to-ns)) (:to r))
-                                     ;; PER VAR, and the option WIDENS rather
-                                     ;; than replaces. A var that is already
-                                     ;; ^:export keeps that level through the
-                                     ;; move — its node carries its own
-                                     ;; metadata — so claiming otherwise made
-                                     ;; the move refuse on visibility until the
-                                     ;; flag was re-passed for something
-                                     ;; already true, and passing it then
-                                     ;; exported every moved var alike. Read
-                                     ;; off FROM-NS, where the var still lives:
-                                     ;; to-ns does not hold it until this lands.
-                                     (or export
-                                         (edit.modules/export-level
-                                          st (symbol (str from-ns)) (:to-name r)))
-                                     (edit.modules/export-level
-                                      st (:to r) (:to-name r)))))
-                          (:module-rows plan))
-            ;; edges the move's rewires necessitate are part of its intent
-            tmanif   (edit.modules/module-test-manifest st)
-            ;; WHICH crossings still need declaring is asked of the canonical
-            ;; rule, not re-derived here. The re-derivation this replaces read
-            ;; the PRODUCTION manifest alone, so a crossing declared
-            ;; {test-only true} looked undeclared, was charged to the move, and
-            ;; refused as a cycle — module_dep's own docstring says a test-only
-            ;; edge "is NOT a production edge, so no cycle question applies to
-            ;; it". It fired hardest on the move that cannot possibly need an
-            ;; edge: a WITHIN-module one, where source and target share a module
-            ;; and every crossing is exactly what it was before.
-            edges    (->> (edit.modules/module-violations manifest tmanif rows)
-                          (filter #(= :undeclared-edge (:rule %)))
-                          (map (fn [v] [(edit.modules/module-of (:from-ns v))
-                                        (edit.modules/module-of (:target-ns v))]))
-                          distinct vec)
-            cyclic   (seq (filter (fn [[a b]] (store/module-path manifest b a))
-                                  edges))
-            manifest' (reduce (fn [m [a b]] (update m a (fnil conj #{}) b))
-                              manifest edges)
-            viols    (edit.modules/module-violations manifest' tmanif rows)
-            refusal  (cond
-                       cyclic
-                       (str "the move would close a module dependency cycle ("
-                            (str/join ", " (map (fn [[a b]] (str a " → " b))
-                                                cyclic))
-                            ") — move the shared piece the other way, or"
-                            " restructure the callers first")
-
-                       viols
-                       (str (str/join "; " (map :error viols))
-                            (when (and (not export)
-                                       (every? #(= :visibility (:rule %)) viols))
-                              " — or pass export: true to hoist the moved vars")))]
-        (if refusal
-          {:error refusal}
-          (let [[gid st-g] (store/alloc-id st "g")
-                ;; 0. the auto-declared edges, each carrying the move's why
-                st0 (reduce (fn [s [a b]]
-                              (first (store/record-module-edge
-                                      s a b :add
-                                      :prompt (or prompt (str "move-forms: " from-ns " → " to-ns))
-                                      :agent agent)))
-                            st-g edges)
-                ;; 0b. a namespace born from a move is born UNDECLARED, and
-                ;; undeclared is :external by absence of a claim — so forms
-                ;; that just left a :pure core arrive in the shell, and the
-                ;; split invents a core→shell dependency out of nothing. The
-                ;; honest default is what was true one delta ago: the source's
-                ;; governing tier. Recorded BEFORE the ingest, so the moved
-                ;; forms are verified against it on the way in.
-                ;;
-                ;; Only from a source that CARRIES a claim, and only when the
-                ;; target would otherwise be governed differently. An
-                ;; undeclared source mints nothing — stamping :external there
-                ;; would defeat a deliberate move INTO a pure subtree, where
-                ;; the right outcome is the gate refusing impure forms.
-                ;; `ns_rename` has no equivalent gap: it RELOCATES a
-                ;; declaration rather than copying it, and the asymmetry
-                ;; between the two relocation verbs was invisible until a
-                ;; whole-store check named the namespace that did NOT change.
-                st0 (let [src (symbol (str from-ns))]
-                      (if (and (:new-ns? plan)
-                               (tiers/tier-declared? st src)
-                               (not= (tiers/tier-for st src)
-                                     (tiers/tier-for st to-ns)))
-                        (first (store/record-module-tier
-                                st0 (str to-ns) (tiers/tier-for st src)
-                                :prompt (or prompt
-                                            (str "move-forms: " from-ns " → " to-ns))
-                                :agent agent))
-                        st0))
-                ;; 1. the target: ingest new, or append + requires to existing
-                st1 (if (:new-ns? plan)
-                      (store/ingest st0 to-ns (:new-src plan) :agent agent)
-                      (let [st* (reduce (fn [s node]
-                                          (or (first (store/append-form
-                                                      s to-ns node
-                                                      :prompt prompt :group gid
-                                                      :agent agent))
-                                              s))
-                                        st0 (:append plan))]
-                        (reduce (fn [s spec]
-                                  (add-require-node s to-ns spec
-                                                    :prompt prompt :group gid
-                                                    :agent agent))
-                                st* (:to-require-adds plan))))
-                ;; 2. callers gain [to-ns :as alias]
-                st2 (reduce (fn [s [nsx spec]]
-                              (add-require-node s nsx spec
-                                                :prompt prompt :group gid
-                                                :agent agent))
-                            st1 (:require-adds plan))
-                ;; 3. every rewritten caller, ONE changeset (multi-ns)
-                [st3 _] (if (seq (:rewrites plan))
-                          (store/apply-changeset
-                           st2 :move-forms from-ns
-                           (into {} (map (fn [[fid m]] [fid (:node m)]))
-                                 (:rewrites plan))
-                           :prompt prompt :agent agent)
-                          [st2 nil])
-                ;; 4. the moved forms leave home
-                st4 (reduce (fn [s nm]
-                              (or (first (store/remove-form s from-ns nm
-                                                            :prompt prompt
-                                                            :group gid :agent agent))
-                                  s))
-                            st3 (:removals plan))
-                ;; 4b. the requires the move just orphaned leave with them.
-                ;; A sequential move is what surfaced this: a caller rewritten
-                ;; to `external/author-identity` moved in the NEXT batch and
-                ;; took the reference with it, and the cold-load gate then
-                ;; REFUSED a state the move itself had created.
-                st4 (reduce (fn [s lib]
-                              (remove-require-node s from-ns lib
-                                                   :prompt prompt :group gid
-                                                   :agent agent))
-                            st4 (:from-require-drops plan))
-                ;; 4c. and the mirror: a rewritten caller left referencing
-                ;; nothing in from-ns drops that require. Left behind, a
-                ;; :pure caller keeps inheriting from-ns's TIER for a
-                ;; dependency it no longer has.
-                st4 (reduce (fn [s nsx]
-                              (remove-require-node s nsx from-ns
-                                                   :prompt prompt :group gid
-                                                   :agent agent))
-                            st4 (:caller-require-drops plan))
-                ;; the PIPELINE owns ordering. The planner no longer mints a
-                ;; declare for the moved set: a source ns may have ordered
-                ;; caller-before-callee behind a declare that STAYS BEHIND, so
-                ;; the target can land with a forward ref — resolve-cold-load
-                ;; reorders it (or inserts the pipeline's own MARKED declare
-                ;; 4d. the PROSE follows the move: a docstring naming
-                ;; from-ns/x must become to-ns/x. Qualified references only —
-                ;; a bare name may be a domain word. This is the d9077 class
-                ;; at its source: `analyze` moved namespaces and two guidance
-                ;; surfaces kept naming its pre-move address.
-                st4 (let [cs (refactor/qualified-mention-changeset
-                              st4
-                              (into {} (for [nm (:moved plan)]
-                                         [(symbol (str from-ns) (str nm))
-                                          (symbol (str to-ns) (str nm))]))
-                              {})]
-                      (if (seq cs)
-                        (first (store/apply-changeset st4 :move-forms from-ns cs
-                                                      :prompt prompt :agent agent))
-                        st4))
-                ;; for a genuine cycle). Same one call fix-declares! makes.
-                st4 (if-let [rz (edit/resolve-cold-load
-                                 st4 to-ns
-                                 :prompt (or prompt (str "move-forms: " from-ns
-                                                         " → " to-ns))
-                                 :agent agent)]
-                      (:store rz)
-                      st4)
-                touched (vec (distinct
-                              (into [from-ns to-ns]
-                                    (concat (map :ns (vals (:rewrites plan)))
-                                            (keys (:require-adds plan))))))
-                ;; defs before callers (X2): target forms, then decls, then rewrites
-                ordered (distinct
-                         (concat (map :id (store/forms st4 to-ns))
-                                 (keep #(:id (store/form-named st4 % %))
-                                       (keys (:require-adds plan)))
-                                 (keys (:rewrites plan))))
-                hl       (engine/hot-load-all! session st4 ordered)
-                ;; the COLD-load gate, which a move needs more than any other write:
-                ;; it is the one operation that reorders NAMESPACE dependencies,
-                ;; and hot-loading structurally cannot see a require cycle
-                ;; because the vars already exist in the image. A move once
-                ;; committed `[slopp/api] -> slopp/api/external -> [slopp/api]`
-                ;; and verified GREEN over it.
-                load-err (or (:err hl) (edit/cold-load-errors st4 touched))]
-            (if load-err
-              (do (engine/fresh-image! session)
-                  (edit/compile-error st4 load-err "move failed to compile: "))
-              (if-not (engine/try-commit! session st st4 touched)
-                (do (engine/fresh-image! session)
-                    {:conflict {:reason "store changed during move — retry"}})
-                (do (doseq [nm (:removals plan)]
-                      (repl/eval! (:image @session)
-                                  (format "(ns-unmap '%s '%s)" from-ns nm)))
-                    (let [moved-q (into (set (map #(symbol (str from-ns) (str %))
-                                                  (:moved plan)))
-                                        (map #(symbol (str to-ns) (str %)))
-                                        (:moved plan))
-                          summary (engine/run-verification!
-                                   session touched nil
-                                   :edited (into moved-q
-                                                 (map (fn [[_ m]]
-                                                        (symbol (str (:ns m)) (str (:name m)))))
-                                                 (:rewrites plan)))]
-                      (engine/commit-appended! session
-                                        #(store/record-verification
-                                          % touched summary)
-                                        [])
-                      (let [;; POSTCONDITION, read back from the store this move actually
-                            ;; COMMITTED rather than from its plan. The gate pre-check
-                            ;; consults the PLANNED export, so a marker pass that skips a
-                            ;; name — it once skipped every meta-wrapped one, leaving
-                            ;; `^:dynamic` vars unexported — passes the gate and surfaces
-                            ;; a session later, somewhere else.
-                            miss (read.modules/unlanded-exports (:store @session) rows)]
-                        (cond-> {:moved-to to-ns
-                                 :moved (:moved plan)
-                                 :rewrote (count (:rewrites plan))
-                                 :callers (vec (sort (distinct (map :ns (vals (:rewrites plan))))))
-                                 :group gid
-                                 :test summary}
-                          (seq edges) (assoc :edges-declared edges)
-                          ;; the population beside :rewrote. Every row is a
-                          ;; form the reference graph says calls a moved name
-                          ;; and this pass did not change — sometimes right (a
-                          ;; quoted target is left whole on purpose), never
-                          ;; something the count alone would have said.
-                          (seq (:callers-unrewritten plan))
-                          (assoc :callers-unrewritten (:callers-unrewritten plan))
-                          ;; the one thing this move did that NOTHING
-                          ;; downstream can catch: the compile gate is happy,
-                          ;; the suite is green, and the call reaches a
-                          ;; different thing than it did before.
-                          (seq (:shadowed plan))
-                          (assoc :shadowed (:shadowed plan)
-                                 :shadowed-note
-                                 (str "a dequalified call landed on a LOCAL of"
-                                      " the same name. This COMPILES and stays"
-                                      " green — the call now reaches the local"
-                                      " rather than the var, so the behaviour"
-                                      " changed and no test can see it. Rename"
-                                      " the local, or the moved var, in each"
-                                      " row above."))
-                          (seq miss)
-                          (assoc :export-not-landed miss
-                                 :export-note
-                                 (str "the move planned an export for "
-                                      (str/join ", " miss)
-                                      " and the committed store carries no marker —"
-                                      " mark the name(s) ^:export directly; callers"
-                                      " outside the subtree will not resolve them"))))))))))))))
-
 (defn delete-ns!
   "Remove namespace `ns-sym` from the store — the retirement half creation
   never had (a mistaken scaffold used to ride every projection and build
@@ -4120,17 +3833,30 @@
   no effect, so the guard is the write path's.
 
   Three things stay open, each for a reason. A test this episode CREATED is the
-  agent's own new spec (red-first has to be able to fix its own typo). A test
+  agent's own new spec (red-first has to be able to fix its own typo) — but a
+  form ADDED under a name the episode also DELETED is a relocation
+  (`move-forms!` re-adds the deftest with a fresh id), not a creation, and
+  keeps its protection; without that a move was a way out from under the
+  oracle (slopp-s8x.3). A test
   whose coverage the agent did not touch is not part of the arc being graded.
   And a turn intent that NAMES the test is the human deciding — the one actor
-  allowed to move an oracle."
+  allowed to move an oracle; `intent` is the human's verbatim ask
+  (`:human-intent`, from the prompt hook's mailbox), never the agent's own."
   [store tmap agent intent steps]
   (or
    (endorsement-refusal store intent steps)
    (when (and agent (seq tmap))
      (let [mine     (filter #(= agent (:agent %)) (history/episode-span store agent))
            fids     (fn [d] (if (:form-id d) [(:form-id d)] (:form-ids d)))
-           created  (into #{} (comp (filter #(#{:add :ingest} (:op %))) (mapcat fids)) mine)
+           ;; names this episode deleted: an :add under one of them is a move
+           deleted  (into #{} (comp (filter #(= :delete (:op %))) (keep :name) (map str)) mine)
+           created  (into #{}
+                          (comp (filter #(#{:add :ingest} (:op %)))
+                                (mapcat fids)
+                                (remove (fn [fid]
+                                          (when-let [e (store/form-by-id store fid)]
+                                            (contains? deleted (str (:name e)))))))
+                          mine)
            same-call (into #{}
                            (keep (fn [{:keys [ns name]}]
                                    (when (and ns name (not (str/ends-with? (str ns) "-test")))
@@ -4164,6 +3890,312 @@
               " flag_test {ns \"" (namespace q) "\" name \"" (name q) "\" reason \"…\"}"
               " and say so to the human; the human decides. (A test you CREATED this"
               " episode stays yours, and an ask that names this test lifts this.)"))))))
+
+(defn move-forms!
+  "Move `form-names` from `from-ns` into `to-ns` — NEW or EXISTING — the
+  general relocation refactor (clj-surgeon's :extract!, slopp-grade, v2).
+  Callers EVERYWHERE (production + tests) are
+  rewritten to alias-qualified calls and gain the require — addressed by
+  FORM ID, because a defmethod body defines no var and a caller set keyed on
+  a name dropped those silently; `:callers-unrewritten` reports any the pass
+  did not change, so the count is readable against its population; the moved defs are publicized (module-grain
+  visibility replaces var privacy); the target gets only the requires the
+  moved code uses. Dependency direction is analyzed: stay→moved adds the
+  require back to from-ns, moved→stay qualifies stay refs instead, a
+  two-way split refuses (real cycle). Cross-module edges the move's own
+  rewires necessitate are AUTO-DECLARED (the move's prompt rides each
+  :module-edge delta — the move IS the declared intent), refusing only a
+  cycle-closer; `:export true` marks moved vars ^:export when the deep
+  target must stay callable from outside its subtree. One atomic group +
+  changeset, compile-gated, verified across every touched namespace.
+  The one thing that verification structurally cannot see is REPORTED
+  instead: `:shadowed` names each moved call dequalified onto a LOCAL of the
+  same name — valid Clojure that calls the local, so it compiles and stays
+  green while the behaviour changes."
+  [session from-ns form-names to-ns & {:keys [prompt agent export]}]
+  (let [st   (:store @session)
+        ;; a move is a write to the moved forms: a test observed red this
+        ;; episode is not the episode's to move out from under its trace key
+        ;; (slopp-s8x.3)
+        guard (protected-test-refusal st (:test-map @session)
+                                      (or agent (:agent-id @session))
+                                      (:human-intent @session)
+                                      (mapv (fn [nm] {:ns from-ns :name nm}) form-names))
+        plan (if guard
+               {:error guard}
+               (refactor/move-plan st from-ns form-names to-ns {:export export}))]
+    (if (:error plan)
+      (select-keys plan [:error])
+      (let [manifest (edit.modules/modules-manifest st)
+            rows     (map (fn [r]
+                            (assoc r :to-export
+                                   (if (= (symbol (str to-ns)) (:to r))
+                                     ;; PER VAR, and the option WIDENS rather
+                                     ;; than replaces. A var that is already
+                                     ;; ^:export keeps that level through the
+                                     ;; move — its node carries its own
+                                     ;; metadata — so claiming otherwise made
+                                     ;; the move refuse on visibility until the
+                                     ;; flag was re-passed for something
+                                     ;; already true, and passing it then
+                                     ;; exported every moved var alike. Read
+                                     ;; off FROM-NS, where the var still lives:
+                                     ;; to-ns does not hold it until this lands.
+                                     (or export
+                                         (edit.modules/export-level
+                                          st (symbol (str from-ns)) (:to-name r)))
+                                     (edit.modules/export-level
+                                      st (:to r) (:to-name r)))))
+                          (:module-rows plan))
+            ;; edges the move's rewires necessitate are part of its intent
+            tmanif   (edit.modules/module-test-manifest st)
+            ;; WHICH crossings still need declaring is asked of the canonical
+            ;; rule, not re-derived here. The re-derivation this replaces read
+            ;; the PRODUCTION manifest alone, so a crossing declared
+            ;; {test-only true} looked undeclared, was charged to the move, and
+            ;; refused as a cycle — module_dep's own docstring says a test-only
+            ;; edge "is NOT a production edge, so no cycle question applies to
+            ;; it". It fired hardest on the move that cannot possibly need an
+            ;; edge: a WITHIN-module one, where source and target share a module
+            ;; and every crossing is exactly what it was before.
+            edges    (->> (edit.modules/module-violations manifest tmanif rows)
+                          (filter #(= :undeclared-edge (:rule %)))
+                          (map (fn [v] [(edit.modules/module-of (:from-ns v))
+                                        (edit.modules/module-of (:target-ns v))]))
+                          distinct vec)
+            cyclic   (seq (filter (fn [[a b]] (store/module-path manifest b a))
+                                  edges))
+            manifest' (reduce (fn [m [a b]] (update m a (fnil conj #{}) b))
+                              manifest edges)
+            viols    (edit.modules/module-violations manifest' tmanif rows)
+            refusal  (cond
+                       cyclic
+                       (str "the move would close a module dependency cycle ("
+                            (str/join ", " (map (fn [[a b]] (str a " → " b))
+                                                cyclic))
+                            ") — move the shared piece the other way, or"
+                            " restructure the callers first")
+
+                       viols
+                       (str (str/join "; " (map :error viols))
+                            (when (and (not export)
+                                       (every? #(= :visibility (:rule %)) viols))
+                              " — or pass export: true to hoist the moved vars")))]
+        (if refusal
+          {:error refusal}
+          (let [[gid st-g] (store/alloc-id st "g")
+                ;; 0. the auto-declared edges, each carrying the move's why
+                st0 (reduce (fn [s [a b]]
+                              (first (store/record-module-edge
+                                      s a b :add
+                                      :prompt (or prompt (str "move-forms: " from-ns " → " to-ns))
+                                      :agent agent)))
+                            st-g edges)
+                ;; 0b. a namespace born from a move is born UNDECLARED, and
+                ;; undeclared is :external by absence of a claim — so forms
+                ;; that just left a :pure core arrive in the shell, and the
+                ;; split invents a core→shell dependency out of nothing. The
+                ;; honest default is what was true one delta ago: the source's
+                ;; governing tier. Recorded BEFORE the ingest, so the moved
+                ;; forms are verified against it on the way in.
+                ;;
+                ;; Only from a source that CARRIES a claim, and only when the
+                ;; target would otherwise be governed differently. An
+                ;; undeclared source mints nothing — stamping :external there
+                ;; would defeat a deliberate move INTO a pure subtree, where
+                ;; the right outcome is the gate refusing impure forms.
+                ;; `ns_rename` has no equivalent gap: it RELOCATES a
+                ;; declaration rather than copying it, and the asymmetry
+                ;; between the two relocation verbs was invisible until a
+                ;; whole-store check named the namespace that did NOT change.
+                st0 (let [src (symbol (str from-ns))]
+                      (if (and (:new-ns? plan)
+                               (tiers/tier-declared? st src)
+                               (not= (tiers/tier-for st src)
+                                     (tiers/tier-for st to-ns)))
+                        (first (store/record-module-tier
+                                st0 (str to-ns) (tiers/tier-for st src)
+                                :prompt (or prompt
+                                            (str "move-forms: " from-ns " → " to-ns))
+                                :agent agent))
+                        st0))
+                ;; 1. the target: ingest new, or append + requires to existing
+                st1 (if (:new-ns? plan)
+                      (store/ingest st0 to-ns (:new-src plan) :agent agent)
+                      (let [st* (reduce (fn [s node]
+                                          (or (first (store/append-form
+                                                      s to-ns node
+                                                      :prompt prompt :group gid
+                                                      :agent agent))
+                                              s))
+                                        st0 (:append plan))]
+                        (reduce (fn [s spec]
+                                  (add-require-node s to-ns spec
+                                                    :prompt prompt :group gid
+                                                    :agent agent))
+                                st* (:to-require-adds plan))))
+                ;; 2. callers gain [to-ns :as alias]
+                st2 (reduce (fn [s [nsx spec]]
+                              (add-require-node s nsx spec
+                                                :prompt prompt :group gid
+                                                :agent agent))
+                            st1 (:require-adds plan))
+                ;; 3. every rewritten caller, ONE changeset (multi-ns)
+                [st3 _] (if (seq (:rewrites plan))
+                          (store/apply-changeset
+                           st2 :move-forms from-ns
+                           (into {} (map (fn [[fid m]] [fid (:node m)]))
+                                 (:rewrites plan))
+                           :prompt prompt :agent agent)
+                          [st2 nil])
+                ;; 4. the moved forms leave home
+                st4 (reduce (fn [s nm]
+                              (or (first (store/remove-form s from-ns nm
+                                                            :prompt prompt
+                                                            :group gid :agent agent))
+                                  s))
+                            st3 (:removals plan))
+                ;; 4b. the requires the move just orphaned leave with them.
+                ;; A sequential move is what surfaced this: a caller rewritten
+                ;; to `external/author-identity` moved in the NEXT batch and
+                ;; took the reference with it, and the cold-load gate then
+                ;; REFUSED a state the move itself had created.
+                st4 (reduce (fn [s lib]
+                              (remove-require-node s from-ns lib
+                                                   :prompt prompt :group gid
+                                                   :agent agent))
+                            st4 (:from-require-drops plan))
+                ;; 4c. and the mirror: a rewritten caller left referencing
+                ;; nothing in from-ns drops that require. Left behind, a
+                ;; :pure caller keeps inheriting from-ns's TIER for a
+                ;; dependency it no longer has.
+                st4 (reduce (fn [s nsx]
+                              (remove-require-node s nsx from-ns
+                                                   :prompt prompt :group gid
+                                                   :agent agent))
+                            st4 (:caller-require-drops plan))
+                ;; the PIPELINE owns ordering. The planner no longer mints a
+                ;; declare for the moved set: a source ns may have ordered
+                ;; caller-before-callee behind a declare that STAYS BEHIND, so
+                ;; the target can land with a forward ref — resolve-cold-load
+                ;; reorders it (or inserts the pipeline's own MARKED declare
+                ;; 4d. the PROSE follows the move: a docstring naming
+                ;; from-ns/x must become to-ns/x. Qualified references only —
+                ;; a bare name may be a domain word. This is the d9077 class
+                ;; at its source: `analyze` moved namespaces and two guidance
+                ;; surfaces kept naming its pre-move address.
+                st4 (let [cs (refactor/qualified-mention-changeset
+                              st4
+                              (into {} (for [nm (:moved plan)]
+                                         [(symbol (str from-ns) (str nm))
+                                          (symbol (str to-ns) (str nm))]))
+                              {})]
+                      (if (seq cs)
+                        (first (store/apply-changeset st4 :move-forms from-ns cs
+                                                      :prompt prompt :agent agent))
+                        st4))
+                ;; for a genuine cycle). Same one call fix-declares! makes.
+                st4 (if-let [rz (edit/resolve-cold-load
+                                 st4 to-ns
+                                 :prompt (or prompt (str "move-forms: " from-ns
+                                                         " → " to-ns))
+                                 :agent agent)]
+                      (:store rz)
+                      st4)
+                touched (vec (distinct
+                              (into [from-ns to-ns]
+                                    (concat (map :ns (vals (:rewrites plan)))
+                                            (keys (:require-adds plan))))))
+                ;; defs before callers (X2): target forms, then decls, then rewrites
+                ordered (distinct
+                         (concat (map :id (store/forms st4 to-ns))
+                                 (keep #(:id (store/form-named st4 % %))
+                                       (keys (:require-adds plan)))
+                                 (keys (:rewrites plan))))
+                hl       (engine/hot-load-all! session st4 ordered)
+                ;; the COLD-load gate, which a move needs more than any other write:
+                ;; it is the one operation that reorders NAMESPACE dependencies,
+                ;; and hot-loading structurally cannot see a require cycle
+                ;; because the vars already exist in the image. A move once
+                ;; committed `[slopp/api] -> slopp/api/external -> [slopp/api]`
+                ;; and verified GREEN over it.
+                load-err (or (:err hl) (edit/cold-load-errors st4 touched))]
+            (if load-err
+              (do (engine/fresh-image! session)
+                  (edit/compile-error st4 load-err "move failed to compile: "))
+              (if-not (engine/try-commit! session st st4 touched)
+                (do (engine/fresh-image! session)
+                    {:conflict {:reason "store changed during move — retry"}})
+                (do (doseq [nm (:removals plan)]
+                      (repl/eval! (:image @session)
+                                  (format "(ns-unmap '%s '%s)" from-ns nm)))
+                    ;; the trace map follows the move, as it follows a rename:
+                    ;; left keyed on the old address, a moved deftest's
+                    ;; coverage vanished and the immutability guard with it
+                    (swap! session update :test-map
+                           (fn [tmap]
+                             (reduce (fn [m nm]
+                                       (engine/rename-in-trace
+                                        m (symbol (str from-ns) (str nm))
+                                        (symbol (str to-ns) (str nm))))
+                                     tmap (:moved plan))))
+                    (let [moved-q (into (set (map #(symbol (str from-ns) (str %))
+                                                  (:moved plan)))
+                                        (map #(symbol (str to-ns) (str %)))
+                                        (:moved plan))
+                          summary (engine/run-verification!
+                                   session touched nil
+                                   :edited (into moved-q
+                                                 (map (fn [[_ m]]
+                                                        (symbol (str (:ns m)) (str (:name m)))))
+                                                 (:rewrites plan)))]
+                      (engine/commit-appended! session
+                                        #(store/record-verification
+                                          % touched summary)
+                                        [])
+                      (let [;; POSTCONDITION, read back from the store this move actually
+                            ;; COMMITTED rather than from its plan. The gate pre-check
+                            ;; consults the PLANNED export, so a marker pass that skips a
+                            ;; name — it once skipped every meta-wrapped one, leaving
+                            ;; `^:dynamic` vars unexported — passes the gate and surfaces
+                            ;; a session later, somewhere else.
+                            miss (read.modules/unlanded-exports (:store @session) rows)]
+                        (cond-> {:moved-to to-ns
+                                 :moved (:moved plan)
+                                 :rewrote (count (:rewrites plan))
+                                 :callers (vec (sort (distinct (map :ns (vals (:rewrites plan))))))
+                                 :group gid
+                                 :test summary}
+                          (seq edges) (assoc :edges-declared edges)
+                          ;; the population beside :rewrote. Every row is a
+                          ;; form the reference graph says calls a moved name
+                          ;; and this pass did not change — sometimes right (a
+                          ;; quoted target is left whole on purpose), never
+                          ;; something the count alone would have said.
+                          (seq (:callers-unrewritten plan))
+                          (assoc :callers-unrewritten (:callers-unrewritten plan))
+                          ;; the one thing this move did that NOTHING
+                          ;; downstream can catch: the compile gate is happy,
+                          ;; the suite is green, and the call reaches a
+                          ;; different thing than it did before.
+                          (seq (:shadowed plan))
+                          (assoc :shadowed (:shadowed plan)
+                                 :shadowed-note
+                                 (str "a dequalified call landed on a LOCAL of"
+                                      " the same name. This COMPILES and stays"
+                                      " green — the call now reaches the local"
+                                      " rather than the var, so the behaviour"
+                                      " changed and no test can see it. Rename"
+                                      " the local, or the moved var, in each"
+                                      " row above."))
+                          (seq miss)
+                          (assoc :export-not-landed miss
+                                 :export-note
+                                 (str "the move planned an export for "
+                                      (str/join ", " miss)
+                                      " and the committed store carries no marker —"
+                                      " mark the name(s) ^:export directly; callers"
+                                      " outside the subtree will not resolve them"))))))))))))))
 
 (defn- group-advisories
   "The ADVISORY write-gate findings for the forms a group wrote, read off the
@@ -6293,8 +6325,19 @@
   query-form-history). Rides the standard replace pipeline, so the revert is
   itself compile-gated, verified, and recorded provenance."
   [session ns-sym nm & {:keys [to prompt agent]}]
-  (let [hist (history/query-form-history (with-history session) ns-sym nm)]
+  (let [;; the guard first: a revert is the edit by another name, and the
+        ;; previous version of a test observed red is exactly the weaker
+        ;; oracle D-test-immutability refuses (slopp-s8x.3)
+        guard (protected-test-refusal (:store @session) (:test-map @session)
+                                      (or agent (:agent-id @session))
+                                      (:human-intent @session)
+                                      [{:ns ns-sym :name nm}])
+        hist  (when-not guard
+                (history/query-form-history (with-history session) ns-sym nm))]
     (cond
+      guard
+      {:error guard :protected-test true}
+
       (nil? hist)
       (edit/missing-form-error (:store @session) ns-sym nm)
 

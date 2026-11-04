@@ -31,7 +31,7 @@
             [slopp.index.refs :as refs]
             [slopp.index :as index]
             [slopp.store.render :as store.render]
-            [slopp.store :as store] [slopp.ops.done :as done] [slopp.store.db :as db] [slopp.rules.markers :as markers]))
+            [slopp.store :as store] [slopp.ops.done :as done] [slopp.store.db :as db] [slopp.rules.markers :as markers] [slopp.ops.engine :as engine]))
 
 (defn red-signal
   "What the red index says about one form, for a review row. `reds-by-fid` is
@@ -81,6 +81,33 @@
                                    marker))]
                marker))))
 
+(defn flagged-tests
+  "The standing flag_test objections on this line: [{:test qsym :reason :agent
+  :at}], oldest first. An objection stands until the test it names is written
+  again after it, or deleted: the human editing the test IS the decision, and
+  a flag that never retired would outlive the test it disputes. Read from the
+  journal when the session has one (`:db`), so a commit point does not hide a
+  flag; a bare fixture's value carries its own `:deltas`."
+  [session st]
+  (let [ds   (if-let [conn (:db @session)]
+               (db/line-deltas conn (engine/session-line session)
+                               :ops [:flag-test :add :ingest :replace :subform :patch :delete])
+               (:deltas st))
+        fids (fn [d] (if (:form-id d) [(:form-id d)] (:form-ids d)))
+        live (reduce (fn [live d]
+                       (if (= :flag-test (:op d))
+                         (let [t (:test d)
+                               e (when (and (symbol? t) (namespace t))
+                                   (store/form-named st (symbol (namespace t)) (symbol (name t))))]
+                           (if e
+                             (assoc live t {:test t :reason (:reason d) :agent (:agent d)
+                                            :at (:at d) :fid (:id e)})
+                             live))
+                         (let [touched (set (fids d))]
+                           (into {} (remove (fn [[_ f]] (contains? touched (:fid f)))) live))))
+                     {} ds)]
+    (vec (sort-by #(or (:at %) 0) (map #(dissoc % :fid) (vals live))))))
+
 ^:reads (defn ^:export review-scan
   "Whole-codebase (or one-ns) REVIEW TRIAGE — the fileless store's answer
   to 'where do I look first'. For every form it surfaces what the store
@@ -104,7 +131,10 @@
   tail in :omitted. Each row also carries `:escapes`, the sorted escape
   markers the form uses (every `:kind :escape` entry of the marker registry),
   and each adds to `:risk`: `:unsafe` +3 (waives the dialect), `:reveals` +3
-  (hands a secret to the world), any other +1 (waives one named rule). Clean forms drop out."
+  (hands a secret to the world), any other +1 (waives one named rule). Clean forms drop out.
+  `:flagged-tests` carries the standing flag_test objections (see
+  [[flagged-tests]]), and a row the flagged test reaches is flagged
+  `:flagged-test`: its oracle is disputed, and a reviewer decides which is wrong."
   [session & {:keys [ns limit] :or {limit 25}}]
   (let [st    (:store @session)
         nses  (if ns [(symbol (str ns))] (sort (keys (:namespaces st))))
@@ -131,6 +161,14 @@
         weak    (into #{} (map :form)
                       (some-> (last (filter #(= :done (:op %)) (:recent st)))
                               :findings :mutants-survived))
+        ;; FLAGGED TESTS: an agent was refused an edit to a test grading its
+        ;; own change and recorded an objection instead (flag_test). The
+        ;; human decides, and the objection stands until the test is written
+        ;; again after it. Read off the line's journal, so a commit point does
+        ;; not hide it. The rows the flagged test reaches through the trace
+        ;; map carry the flag: the deftest itself is skipped below.
+        flagged (flagged-tests session st)
+        flagged-forms (into #{} (mapcat #(get tmap (:test %))) flagged)
         ns-lint (into (sorted-map)
                       (for [[nsx src] rendered
                             :let [c (count (for [f (index/lint src (store/kondo-lang st nsx))
@@ -310,7 +348,8 @@
                                     bang?          (conj :effectful)
                                     (:never-red rs) (conj :never-red)
                                     (seq escapes)  (conj :escape)
-                                    (weak q)       (conj :weak-oracle))
+                                    (weak q)       (conj :weak-oracle)
+                                    (flagged-forms q) (conj :flagged-test))
                          risk     (+ (if untested 4 0)
                                      ;; 1, not untested's 4: a standing fact about
                                      ;; the platform is worth SEEING and is not a
@@ -331,7 +370,11 @@
                                      ;; 2: green tests that cannot fail on a
                                      ;; fault are the false comfort a reviewer
                                      ;; most needs to see
-                                     (if (weak q) 2 0))]
+                                     (if (weak q) 2 0)
+                                     ;; 2: the oracle grading this form is
+                                     ;; disputed by the agent that wrote it;
+                                     ;; a reviewer decides which is wrong
+                                     (if (flagged-forms q) 2 0))]
                    :when (and (not skip?) (pos? risk))]
                (cond-> {:form q :risk risk :loc loc :callers callers
                         :covered traced :flags flags :evidence evidence}
@@ -376,4 +419,7 @@
                       (seq ws) (assoc :namespaces (vec (sort (map :ns ws)))
                                       :teach (:teach (first ws))))))
       (seq ns-lint)          (assoc :ns-lint ns-lint)
+      ;; the standing objections, whole: a flag names a test and a reason,
+      ;; and its rows above only say that one exists
+      (seq flagged)          (assoc :flagged-tests (mapv #(update % :test str) flagged))
       (> (count rows) limit) (assoc :omitted (- (count rows) limit)))))

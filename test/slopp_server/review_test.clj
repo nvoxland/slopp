@@ -2,13 +2,15 @@
   "zrs.4: the review endpoint lives in its OWN namespace (slopp-server.review) so the server-surface control lists that pin slopp-server.api.endpoints and the typed document stay true; the write session reaches it by late binding to a new process fn. server/context is restored to what it was; th…" (:require [clojure.test :refer [deftest is testing]] [slopp.store :as store] [slopp-server.api.server :as server] [slopp.http :as http] [slopp.rest :as slopp.rest] [slopp-server.review :as review]))
 
 (deftest a-review-is-written-only-by-an-authenticated-POST
+  ;; slopp-s8x.2: the served list itself carries the review door now, so the
+  ;; context is built from it as the server builds its own
   (let [st (assoc (store/empty-store)
                   :deltas [{:id "d1" :op :add :ns 'demo.core :form-id "f1"}
                            {:id "d2" :op :commit :target "d1" :status :green :at 1784900000000
                             :description "first"}])
         session (atom {:store st})
         ctx (http/context
-             {:http/namespaces (conj server/served-namespaces 'slopp-server.review)
+             {:http/namespaces server/served-namespaces
               :http/wrap-context slopp.rest/validating
               :http/perform-ctx {:open-reader (constantly session)
                                  :open-writer (constantly session)}})
