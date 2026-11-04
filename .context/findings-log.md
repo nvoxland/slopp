@@ -3643,3 +3643,8 @@ it took 691s, about 340s outside the external tier; with 4 shards that remainder
 about 60s (531s total, 471s external). One sample. Phase timings inside `full_check` would
 settle it.
 
+Phase timings now exist (`:phases`). First sample, 2026-11-04, 325s total: external 281s, rule
+sweep 19s, in-image 13s, lint 8s, the rest under 2s each. The 691s did not recur, and the external
+tier was faster than any earlier 6-shard run. One sample: this does not explain the 691s run, and
+the next slow run will say where its time went.
+
