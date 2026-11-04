@@ -7990,6 +7990,21 @@ is a substring on the bare test name, so a short name is named by many asks;
 and a process with a shell can write the mailbox file itself, which no tool
 gate can hold.
 
+**Amended 2026-11-04 (slopp-s8x.3): `edit_revert` and `edit_move_forms` are
+guarded, and a move carries the trace map.** The record above left undo,
+episode revert and sync unguarded "because they rewrite tests mechanically",
+and the review found two doors that are not mechanical rewrites: a revert
+with a target replaces a red test with its older, weaker version as a
+recorded write, and a move takes a deftest out from under its trace key, so
+the next `change` edited it freely. Both ask `protected-test-refusal` first
+now, and `move-forms!` rekeys the trace map as `rename!` does. A flag_test
+objection also has readers at last (slopp-s8x.2): `review_scan` lists the
+standing flags as `:flagged-tests`, marks the rows a flagged test reaches
+`:flagged-test`, and the change screen prints the flags in its range; a
+flag stands until the test is written again. Still open: the guard protects
+the deftest form only, so a helper or fixture in the test namespace that
+silences the assertion is an ordinary write.
+
 ## D-endorsed-examples (2026-11-02, user-directed) — a human-endorsed test is the readable spec, and no agent episode edits it
 
 **Decision.** `^{:endorsed "who/why"}` on a deftest (one `marker-registry`
@@ -8066,7 +8081,12 @@ the timeline rows carry `:review`, unreviewed first, and the model counts
 `:unreviewed`. **Not yet usable in a real server:** slopp's own server is
 started with no `:http/auth-config`, so no request resolves an identity and
 every POST is a 401. Choosing how a person signs in to the local UI is open
-(slopp-nnt).
+(slopp-nnt). Corrected 2026-11-04 (slopp-s8x.2): auth was not the only
+blocker. `slopp-server.review` was in no served list, so the endpoint
+answered 404 before any 401; the served-list test scanned the
+`slopp-server.api.` prefix and nothing else asked. It is on
+`served-namespaces` now and the test checks every entry. No page calls the
+endpoint yet either; that is slopp-nnt's to add with the sign-in.
 
 ## D-holds (2026-11-03, user-directed) — parallel work is WARNED first; a hold, when built, is a table row shared across threads
 

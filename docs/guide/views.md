@@ -25,6 +25,13 @@ Review starts at a milestone, not at a file.
       [History and provenance](history.md));
     - a **per-line diff**;
     - the **blast radius**: what calls the form, and which tests cover it.
+
+   Above the forms, the screen says what it did not see (changed forms no test
+   was observed running, housekeeping writes) and lists any test an agent
+   flagged in the range with `flag_test`: the agent was refused an edit to a
+   test grading its own change and recorded its objection instead. Each flag
+   names the test, the reason and the agent, and stands until a person edits
+   or deletes the test.
 3. **Form permalink** (`/store/form/<id>`). Each form on the change screen links
    here. The page is laid out for someone who arrives cold from a link: a
    breadcrumb, the callers above, the form itself, and the callees below with

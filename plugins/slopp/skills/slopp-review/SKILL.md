@@ -55,6 +55,13 @@ A row flagged `:weak-oracle` had a mutant survive at the last `done`: its tests
 run it and stay green with a fault in place. Read the code itself, not the test
 names, and add the assertion that would have failed.
 
+A row flagged `:flagged-test` has an oracle the agent disputes: it was refused
+an edit to a test grading its own change and recorded `flag_test` instead. The
+scan's `:flagged-tests` lists each objection (test, reason, who), and the change
+screen for the range shows the same. That is a decision waiting for a person:
+read the test and the code and decide which one is wrong. Editing the test (or
+deleting it) retires the flag; nothing else does.
+
    **Read `:evidence` on the row, not just the flags.** A quiet row is not one
    fact, it is four, and the row names which:
 
