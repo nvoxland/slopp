@@ -829,6 +829,8 @@
   (if (or verbose? (not= :green (:status r)))
     r
     (cond-> {:status :green :namespaces (:namespaces r) :checked (:checked r)}
+      (:ms r)              (assoc :ms (:ms r))
+      (:phases r)          (assoc :phases (:phases r))
       (:test r)            (assoc :test (select-keys (:test r) [:test :pass :fail :error]))
       (:external r)        (assoc :external (select-keys (:external r) [:ran :status]))
       (:modules r)         (assoc :modules (dissoc (:modules r) :edges))

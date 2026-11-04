@@ -5451,3 +5451,11 @@
     (let [out (#'mcp/terse-done {:done "d2" :land {:landed "main"} :findings {:episode-status :green :test-status :red}})]
       (is (= :red (:status out)))
       (is (true? (:landed out))))))
+
+(deftest a-green-full-check-keeps-its-cost
+  ;; The trim takes per-namespace timings as scaffolding. The whole cost and
+  ;; its split are a few numbers, and they are what a slow run is read from.
+  (let [t (#'mcp/terse-full-check {:status :green :namespaces 1 :ms 9
+                                   :phases {:lint 4 :rest 5}})]
+    (is (= 9 (:ms t)))
+    (is (= {:lint 4 :rest 5} (:phases t)))))

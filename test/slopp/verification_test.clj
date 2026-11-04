@@ -1042,3 +1042,28 @@
           (is (nil? (:error r)) (pr-str r))
           (is (nil? (:image-rebuilt r)) (pr-str r))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external full-check-says-where-its-time-went
+  ;; One run took 691s around a 354s external tier, and the result could not
+  ;; say where the other 340s went: :ms was the only number.
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'fcp.core
+                   (str "(ns fcp.core (:require [clojure.test :refer [deftest is]]))\n"
+                        "(defn f \"F.\" [] 1)\n"
+                        "(deftest f-t (is (= 1 (f))))\n"))
+      (let [r      (external/run-full-check! sess)
+            phases (:phases r)]
+        (is (= #{:lint :dead-surface :layering :rule-sweep :other-reads
+                 :in-image :external :rest}
+               (set (keys phases)))
+            (pr-str phases))
+        (is (every? nat-int? (vals phases)) (pr-str phases))
+        (is (= (:ms r) (reduce + (vals phases)))
+            "every millisecond is in one phase, so nothing can hide outside them")
+        (let [v (last (filter #(and (= :verify (:op %))
+                                    (= :full-check (:scope (:result %))))
+                              (ops/journal sess)))]
+          (is (= phases (get-in v [:result :phases]))
+              "the journal keeps them, so a past run can still be read")))
+      (finally (ops/close! sess)))))

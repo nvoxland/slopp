@@ -1094,7 +1094,14 @@ client-deps (merge (:client-deps st) (:client provided))
   Only the SHAPE of the verdict is recorded, never the finding lists: the
   journal is append-only and a red full_check's lint rows can be large."
   [res session nses t0]
-  (let [res (assoc res :ms (- (System/currentTimeMillis) t0))]
+  (let [res (let [ms (- (System/currentTimeMillis) t0)]
+                (cond-> (assoc res :ms ms)
+                  ;; :rest is what no phase measured, by subtraction, so the
+                  ;; split always adds up to :ms and a cost cannot hide in a
+                  ;; step nobody thought to time
+                  (:phases res)
+                  (update :phases #(assoc % :rest
+                                          (- ms (reduce + (vals (dissoc % :rest))))))))]
     ;; through [[record-or-keep!]], because the ANSWER is what was expensive.
     ;; This append is a CAS against the branch head; losing it used to throw
     ;; through the verdict and discard three to four minutes of whole-store
@@ -1110,7 +1117,7 @@ client-deps (merge (:client-deps st) (:client provided))
           ;; the populations and the counts, never the finding lists
           ;; (eval24 opus: a standing verdict without :checked or a
           ;; test count sent the model to test_run for the number)
-          (cond-> (assoc (select-keys res [:status :ms :namespaces :lint-errors
+          (cond-> (assoc (select-keys res [:status :ms :phases :namespaces :lint-errors
                                             :lint-warnings :checked])
                          :scope :full-check)
             (:test res)     (assoc :test (select-keys (:test res) [:test :pass :fail :error]))
@@ -1542,303 +1549,6 @@ client-deps (merge (:client-deps st) (:client provided))
                 ;; a full materialized project per run; nothing else ever deletes it
                 (delete-dir! (io/file dir))))))))))
 
-(defn ^:export run-full-check!
-  "The WHOLE-STORE check, on demand: kondo over every namespace, the
-  dead-public-surface report over every namespace, BOTH layering graphs —
-  purity tiers and the module architecture — the RULE CATALOG swept over every
-  form, and every test in every tier: the in-image suite, `^:integration`, and
-  the external `^:external` tier.
-
-  Deliberately NOT forced anywhere, not by `done` and not by `commit_point`.
-  `done` is episode-scoped: it answers whether the work you just did is good,
-  which is the question you can act on. This answers whether the STORE is
-  good, which is a different and much slower question — and one only the
-  agent can judge the right moment for. `done` names this tool in its result
-  so the choice is visible rather than forgotten.
-
-  It also retires any need for an integration-only or lint-only tool: one
-  call, everything, no tier flags to get wrong.
-
-  Returns {:lint [...] :lint-errors n :lint-warnings n :unused [...] :stale
-  [...] :tier-layering [...] :module-violations {...} :rules {...} :test {...}
-  :external {...} :status :green|:red}.
-
-  `:rules` is ALWAYS present and carries `:swept` / `:not-swept` beside its
-  `:findings`, because roughly a third of the advisory registry compares
-  against the episode's baseline and cannot answer a whole-store question at
-  all — naming them is what stops a green from claiming coverage it never had.
-
-  `:checked` is the same argument, applied to every OTHER whole-store read.
-  Each of those is folded in only when it has something to say, so a clean
-  store and a read that never ran produced identical output — the exact
-  failure this check exists to prevent, sitting inside the check. It maps each
-  read to the POPULATION it examined rather than merely naming it, because a
-  name only claims it ran: a read reporting 0 is visibly broken, where an
-  absent key was indistinguishable from clean. Found by slopp-ui, who could
-  verify one regrade from `:swept` and had to hand-build a control for the
-  other.
-
-  Plus, when this project has a managed app server up, `:app {:behind n
-  :url}` — how many code changes the SERVED image is behind the store it just
-  called green. `0` is reported rather than omitted: the question is \"is the
-  page I am about to look at built from what I just wrote?\", and staying
-  silent on yes leaves the reader curling the endpoint by hand.
-
-  And `:bundle {:sha :behind :note}` when the compiled browser bundle is behind
-  CLIENT code — the third artifact that can be stale, after the host and the
-  jar, and the only one that had no report. A store took a green `done`, a green
-  `commit_point`, a green check here AND `:app {:behind 0}` while the browser
-  served a bundle from before ten screens were rewritten; nothing was wrong,
-  because `:app` measures the IMAGE and its zero was honest about the image.
-  Reported only when BEHIND, unlike `:app`: a store with no client code has no
-  bundle and must not be told about one."
-  [session & {:keys [affected]}]
-  (let [t0    (System/currentTimeMillis)
-        st    (:store @session)
-        nses  (sort (keys (:namespaces st)))
-        ;; The whole-store gate must not inherit incremental kondo state. kondo
-        ;; reads cross-ns facts from a disk cache that each lint TEACHES, so a
-        ;; cache predating recent vars makes whatever is linted early get judged
-        ;; against yesterday's facts — once four phantom `invalid-arity` ERRORS
-        ;; and eleven unresolved vars, on a store whose every test passed. A
-        ;; STALE fact lies confidently; an ABSENT one is benign.
-        _     (index/reset-kondo-cache!)
-        ;; and teach it callees-first — the same "deps first" order every loader
-        ;; uses — so nothing is judged against a fact not yet refreshed
-        lint  (vec (for [n (store/ns-dependency-order st)
-                         :let [src (store.render/render-ns st n)]
-                         f (index/lint src (store/kondo-lang st n))]
-                     (-> f (dissoc :row :col) (assoc :ns n))))
-        rep   (read.modules/unused-report st nses)
-        ;; tier LAYERING — a whole-graph property, so it lives here rather
-        ;; than at a declaration: core must not depend on shell. This is the
-        ;; check effect-reachability cannot make, since that sees a cross-ns
-        ;; effect only when the callee is `!`-named.
-        layer (vec (for [n nses
-                         :when (not (str/ends-with? (str n) "-test"))
-                         :let [t (tiers/tier-for st n)]
-                         v (tiers/layering-violations st n t)]
-                     ;; :external by ABSENCE and :external by DECLARATION read identically
-                     ;; in the row, and only the first has a one-call fix. The
-                     ;; finding names the namespace whose CLAIM breaks, which is
-                     ;; the one that did not change; say which case this is so
-                     ;; the reader is not sent to restructure code when a
-                     ;; missing declaration is the whole story.
-                     (cond-> {:ns n :tier t
-                              :requires (:requires v) :requires-tier (:tier v)}
-                       (not (tiers/tier-declared? st (:requires v)))
-                       (assoc :requires-undeclared true))))
-        ;; MODULE layering — the architecture graph, and a DIFFERENT graph
-        ;; from the tiers above, so a green there says nothing about this.
-        ;; The module rules are WRITE gates: they see only code written
-        ;; THROUGH them, and a rename rewrites its own callers, which never
-        ;; pass a gate. This fold is the only thing that asks again — the
-        ;; operation most likely to drift the architecture being exactly the
-        ;; one the per-write check cannot see. Four real visibility
-        ;; violations stood on this store through a green check before it was
-        ;; wired in (friction #19); `module-debt` itself already existed and
-        ;; was asked only by the graph view and by `module_dep`.
-        mods  (read.modules/module-debt st)
-        ;; the edges the PIPELINE declared on writes' behalf and nobody
-        ;; retracted. Each was the refusal the agent would have obeyed; the
-        ;; refusal was also the one moment anybody asked whether the call
-        ;; should exist, and that moment is gone by design — so the
-        ;; accumulation is reported here, always, as a count a reader can
-        ;; branch on (the wire keeps the edges behind verbose)
-        autoedges (read.modules/auto-declared-edges (ops/journal session))
-        ;; the RULE CATALOG, and the identical argument one layer up. A
-        ;; `:grain :done` rule fires over forms an EPISODE changed, so a
-        ;; violation older than the rule is invisible to `done` — and stays
-        ;; invisible, because no later episode changes that form either.
-        ;; slopp-ui carried two `direct-http` violations through a green check
-        ;; here for exactly that reason (friction #27): two violations, three
-        ;; tools, no report. `sweep-store!` names what it could NOT ask as well
-        ;; as what it did, since a third of the registry compares against the
-        ;; episode's baseline and running one of those over every form reports
-        ;; nothing in the same shape as clean.
-        sweep (rules/sweep-store! session st)
-;; a namespace holding nothing but its own ns form. Reported HERE
-        ;; because it can be reported nowhere else: every advisory is
-        ;; addressed by changed FORM IDS and sweep-store! builds its
-        ;; whole-store population the same way, so a namespace with zero
-        ;; forms is in neither and no rule can reach it however it is
-        ;; written. slopp.http-rules-test survived two days and a green
-        ;; check here after the R6 rules move emptied it.
-        husks (read.modules/empty-namespaces st)
-        aliasdrift (read.modules/alias-drift st)
-        ;; WHAT RAN, always — the same argument `:rules` already makes with
-        ;; `:swept`, applied to the reads that had no equivalent. Every read
-        ;; below is folded into the result only when it has something to say,
-        ;; so a clean store and a read that never ran produced byte-identical
-        ;; output. That is the exact failure this check exists to prevent,
-        ;; sitting in the check itself.
-        ;;
-        ;; The POPULATION rather than the name, because a name only claims it
-        ;; ran. A read that examined 0 namespaces is visibly broken, where
-        ;; "alias-drift: absent" was indistinguishable from clean — which is
-        ;; how slopp-ui came to verify a regrade by hand-building a control.
-        checked {:lint             (count nses)
-                 :dead-surface     (count nses)
-                 :tier-layering    (count (remove #(str/ends-with? (str %) "-test") nses))
-                 :module-debt      (count nses)
-                 :empty-namespaces (count nses)
-                 :alias-drift      (count nses)
-                 :crossings        (count nses)
-                 :rule-sweep       (:forms sweep)}
-        errs  (filterv #(= :error (:level %)) lint)
-        warns (filterv #(= :warning (:level %)) lint)
-        tests (engine/run-verification! session (vec nses) nil
-                                         :include-integration? true
-                                         :boundary? true)
-        ;; ONLY this tier narrows. Measured: the external suite is ~187s of a
-        ;; ~190s full_check (299 image boots), while lint + dead surface +
-        ;; layering + the in-image suite together are ~5-7s. Narrowing the
-        ;; cheap half would buy nothing and cost exactly the coverage
-        ;; full_check exists for.
-        iso   (when (seq (engine/external-test-nses
-                          st (filter #(engine/test-ns? st %) nses)))
-                (external-test-run! session :affected affected))
-        red?  (or (seq errs) (seq (:unused rep)) (seq (:stale rep))
-                  (seq layer)                ; core→shell is a failure, not a note
-                  mods                       ; and so is a standing module
-                                             ; violation: the per-write gates
-                                             ; REFUSE these, so one still
-                                             ; standing got in by a path around
-                                             ; the gate. Same rule, one bar —
-                                             ; advisory here would make the
-                                             ; write gate the stricter of the
-                                             ; two, which is backwards for a
-                                             ; whole-store check
-                  ;; and the rule catalog grades through the SAME predicate
-                  ;; `done` uses, so a rule dialed :error is :error in both
-                  ;; places and an :advisory is reported in both without
-                  ;; flipping. One rule, one check, one bar; the sweep is a
-                  ;; different POPULATION, never a different standard.
-                  (rules/status-affecting-fired? st (:findings sweep))
-                  (pos? (+ (:fail tests 0) (:error tests 0)))
-                  (contains? #{:red :error} (:status iso)))]
-    (cond-> {:namespaces (count nses)
-             :lint-errors (count errs)
-             :lint-warnings (count warns)
-             :checked checked
-             :rules sweep
-             :modules {:auto-declared (count autoedges) :edges autoedges}
-             :test tests
-             :status (if red? :red :green)}
-      affected (assoc :scope (str "lint, dead surface, tier layering, module"
-                                  " layering, the rule sweep and the in-image"
-                                  " suite covered ALL "
-                                  (count nses) " namespaces;"
-                                  " the ^:external tier was narrowed to the tests"
-                                  " that changes since the last commit-point can"
-                                  " reach. Drop :affected for the whole tier"))
-      (seq errs)          (assoc :lint errs)
-      (seq warns)         (assoc :warnings warns)
-(seq husks)         (assoc :empty-namespaces husks
-                                 :empty-namespaces-note
-                                 (str (count husks) " namespace(s) holding nothing"
-                                      " but their own ns form. A move that carries"
-                                      " a namespace's whole contents elsewhere"
-                                      " leaves one, and nothing else reports it:"
-                                      " there is no form to be dead, undocumented"
-                                      " or uncovered, and namespace-purpose exempts"
-                                      " an empty namespace because a NEWBORN one has"
-                                      " nothing to describe yet. ns_delete retires a"
-                                      " husk; adding a form is the other honest"
-                                      " answer, and it is why this is reported"
-                                      " rather than refused"))
-      (image.currency/broken (:image @session))
-      (assoc :currency-broken (image.currency/broken (:image @session))
-             :currency-broken-note
-             (str "the verification image's currency record stopped being"
-                  " maintained, so every currency answer about it is now"
-                  " \"not measured\" rather than a claim. Bookkeeping is caught"
-                  " on the write path deliberately — a stamp that throws must"
-                  " not veto a load that succeeded — so this is the report that"
-                  " would otherwise be a silent gap. `restart` builds a fresh"
-                  " image and clears it; the message names what threw"))
-      (seq aliasdrift)    (assoc :alias-drift aliasdrift
-                                 :alias-drift-note
-                                 (str (count aliasdrift) " require(s) name a store"
-                                      " namespace by something other than its"
-                                      " canonical alias — the shortest trailing"
-                                      " segments naming exactly one namespace here."
-                                      " Harmless to the TOOLS, because the reference"
-                                      " graph is alias-blind and renames and"
-                                      " query_depends were never confused by it."
-                                      " Costly to a READER: when one alias names two"
-                                      " namespaces, x/f in a slice is two different"
-                                      " functions and the page does not say which."
-                                      " It is also the one way a hand sweep can be"
-                                      " wrong where the graph is right. ns_realias"
-                                      " is the remedy, one namespace at a time;"
-                                      " reported and never refused, because most of"
-                                      " it is residue from renames that moved a"
-                                      " namespace and left the :as behind"))
-      (seq layer)         (assoc :tier-layering layer
-                                 :tier-layering-note
-                                 (str (count layer) " core→shell dependency(ies):"
-                                      " a namespace depends on one at a LOOSER"
-                                      " tier. Either move what it needs into a"
-                                      " core namespace, or its own tier is a"
-                                      " claim it does not earn"
-                                      (when (some :requires-undeclared layer)
-                                        (str ". Rows marked :requires-undeclared"
-                                             " name a dependency that is"
-                                             " :external only because nothing"
-                                             " DECLARED it — usually a namespace"
-                                             " a move or split just created;"
-                                             " module_purity on that namespace"
-                                             " may be the whole fix"))))
-      mods                (assoc :module-violations mods
-                                 :module-violations-note
-                                 (str (:count mods) " module rule violation(s)"
-                                      " standing in the store. Each is what a"
-                                      " write gate would REFUSE, so each got"
-                                      " here by a path around the gate —"
-                                      " usually a rename, which rewrites its"
-                                      " own callers. Declare the edge"
-                                      " (module_dep), hoist the target"
-                                      " (^:export), or restructure the call"))
-      (seq (:findings sweep))
-      (assoc :rules-note
-             (str (count (:findings sweep)) " rule(s) with standing findings over "
-                  (:forms sweep) " form(s). `done` is EPISODE-scoped, so any of"
-                  " these older than the rule itself is invisible to every done"
-                  " there will ever be — this sweep is the only thing that asks"
-                  " again. :error-severity findings flipped this check red;"
-                  " :advisory ones are reported and did not. query_rules names"
-                  " each rule's escape"))
-      (seq (:unused rep)) (assoc :unused-public (:unused rep))
-      (seq (:stale rep))  (assoc :stale-unused-ok (:stale rep))
-      iso                 (assoc :external iso)
-      (:failed-tests iso) (assoc :failed-tests (:failed-tests iso))
-      ;; The three fields this check REPORTS rather than EARNS — the host's
-      ;; image (friction #10), the browser bundle, and the served app (slopp-ui
-      ;; friction #5). A whole-store green is exactly the verdict an agent
-      ;; commits on, so an artifact serving superseded code has to say so HERE.
-      ;; Shared with `full-check!` rather than written twice, and that sharing
-      ;; is the point: none of the three is a function of store content, so a
-      ;; verdict handed back because it still STANDS would otherwise describe
-      ;; the world as it was when the verdict was earned. Serving an app is not
-      ;; a write, and nothing else would ever refresh them.
-      true                  (merge (currency-now session st))
-      ;; an instrument, not a verdict: how often the tests this store's agents
-      ;; wrote were watched fail before their episode closed. It never turns the
-      ;; check red; it is reported here so the share becomes a series
-      (:db @session)        (assoc :red-first (rules/red-first-rate
-                                               (db/line-deltas (:db @session)
-                                                               (db/trunk-line-id! (:db @session)))))
-      ;; Verification stops at the boundary: everything above is an edge INSIDE
-      ;; the store. A green here
-      ;; says nothing about what LEAVES it, and reads as though it did — so
-      ;; name the exits nothing checks, right where the green is about to be
-      ;; believed. Advisory: these are standing documented holes, not
-      ;; regressions.
-      (crossings/finding st) (assoc :crossings (crossings/finding st))
-      ;; last, so the recorded verdict is the one actually returned
-      true                  (record-full-check! session nses t0))))
-
 (defn ^:export spot-run!
   "The tier-aware SPOT-CHECK behind test_run {ns ..}/{only ..}: each named
   target runs in ITS tier — in-image members through the traced, diagnosed
@@ -1890,121 +1600,6 @@ client-deps (merge (:client-deps st) (:client provided))
                            (not= :green (:status ex)))
                      :red
                      :green)}))))
-
-(defn ^:export full-check!
-  "The WHOLE-STORE check — `run-full-check!`, except that a verdict which
-  STILL STANDS is returned instead of re-earned, and a run already in
-  flight for the same CONTENT is joined instead of duplicated.
-
-  When nothing since the last whole-store check could have changed what it
-  says, this hands back that verdict with `:standing true` and the delta that
-  recorded it, in about a millisecond. `{force true}` runs it anyway.
-
-  **Why the courtesy is worth having here specifically.** This is the most
-  expensive operation slopp performs — ~236s on this store, almost entirely
-  fresh JVM boots in the external tier — and its own journal says it was
-  asked twice for one answer constantly: 325 runs, 117 of them REPEATS inside
-  a single ask, 7.6 hours. `commit_point` has always returned an unchanged
-  commit-point rather than re-minting one, and the argument is the same, only
-  the number is four hundred times larger.
-
-  **The QUEUE is the same courtesy across sessions.** A session carrying
-  `:check-queue` — an atom the server shares among every session on a
-  project — keys a run IN FLIGHT by its line's elements digest AND the
-  store's content signature: two threads holding identical content share it,
-  where their heads differ by markers, and two holding different edits of
-  one length (the digest alone cannot tell them apart) do not. The first
-  asker runs and delivers; a later asker at the same key waits on that
-  promise, records the verdict on ITS line (so it stands there, as
-  `standing-full-check` reads a line), re-derives the live overlays, and
-  answers with `:joined true`. Only a plain ask joins — `affected` narrows
-  the external tier and `force` means this session wants its own run. The
-  entry goes the moment it is delivered: only the STANDING check may hand
-  back a past verdict, because only it asks what has happened on the line
-  since. A realized promise left in the map answered a later asker with the
-  old verdict after a config write had retired it — the write moved no
-  elements row, so the key had not changed when the verdict it retired had.
-
-  It REPORTS rather than refuses, which is the same stance `done` takes. An
-  agent that asks again gets an answer, promptly, plus the fact that it did
-  not need to ask — so the habit corrects itself instead of being blocked.
-
-  **A standing verdict is not replayed wholesale.** It reuses what it EARNED
-  — lint, layering, the rule sweep, the test results, all functions of store
-  content — and RECOMPUTES what it merely reported about live artifacts, via
-  `currency-now`. `:app`, `:bundle` and `:host-stale` describe things outside
-  the store and go stale with no delta at all: serving an app is not a write,
-  so nothing retires the verdict and nothing else would refresh them. Shipped
-  without that overlay, this reported `:app nil` the first time an app server
-  appeared between two checks — the guard was right and the payload was stale.
-
-  What counts as a change is deliberately generous: see
-  `read.history/verdict-inert-ops`. A config write can arm a capability's
-  rules and a module edge changes the layering graph, neither of which
-  touches a form, so only provably inert bookkeeping is ignored and an
-  unclassified op means re-run. The failure mode is a check nobody needed
-  rather than a green nobody earned."
-  [session & {:keys [affected force]}]
-  (if-let [standing (and (not force)
-                         (let [conn (:db @session)
-                               line (engine/session-line session)
-                               chk  (db/last-full-check conn line)]
-                           (history/standing-full-check
-                            chk (when chk (db/ops-after conn line (:id chk))))))]
-    (assoc (merge (dissoc standing :app :bundle :host-stale)
-                  (currency-now session (:store @session)))
-           :standing true
-           :note (str "nothing since this verdict could have changed it, so it"
-                      " STANDS — no check was run. This is the whole-store"
-                      " answer, "
-                      (when-let [ms (:ms standing)] (str "earned in " ms "ms, "))
-                      "and it is current: a forced re-run cannot say more, so hand this"
-                      " verdict over as it stands. A write of any kind retires it on its own."))
-    (let [q    (:check-queue @session)
-          conn (:db @session)]
-      (if-not (and q conn (nil? affected) (not force))
-        (run-full-check! session :affected affected)
-        (let [digest [(db/elements-digest conn (engine/session-line session))
-                          ;; the digest is content-blind (counts, ranks, sizes), so
-                          ;; the signature says WHICH content — two threads holding
-                          ;; different edits of one length must not share a verdict
-                          (store/content-signature (:store @session))]
-              [p mine?] (locking q
-                          (if-let [p (get @q digest)]
-                            [p false]
-                            (let [p (promise)]
-                              ;; a few contents, not a history: an entry is a
-                              ;; whole verdict, and the one that matters is now
-                              (swap! q #(assoc (if (< 3 (count %)) {} %) digest p))
-                              [p true])))]
-          (if mine?
-            (try (let [r (run-full-check! session :affected nil)]
-                   (deliver p r)
-                   r)
-                 (catch Throwable t
-                   (deliver p t)
-                   (throw t))
-                 ;; delivered is DONE: the entry goes whether the run threw or
-                 ;; answered. Left in the map, a realized promise answered the
-                 ;; next asker at this key with the old verdict as :joined —
-                 ;; and a config write moves no elements row, so the key did
-                 ;; not change when the verdict it retired did
-                 (finally (locking q (swap! q dissoc digest))))
-            (let [r (deref p)]
-              (when (instance? Throwable r) (throw r))
-              (let [st   (:store @session)
-                    nses (sort (keys (:namespaces st)))
-                    ;; the verdict is a function of content and is theirs to
-                    ;; keep; the live overlays are this session's to re-derive
-                    r'   (merge (dissoc r :app :bundle :host-stale)
-                                (currency-now session st))]
-                (assoc (record-full-check! r' session nses
-                                           (- (System/currentTimeMillis) (:ms r 0)))
-                       :joined true
-                       :note (str "another session on this project was running the"
-                                  " whole-store check over this same content; this is"
-                                  " ITS verdict, recorded on your line so it stands here"
-                                  " too. Nothing was run twice."))))))))))
 
 (defn- app-boot-failure
   "The dev instance's last boot failure this session knows of, or nil: its
@@ -2740,3 +2335,437 @@ client-deps (merge (:client-deps st) (:client provided))
       (empty? t) {:status :green :ran 0
                   :note "nothing is failing: the last external run and everything since passed"}
       :else      (external-test-run! session :only t))))
+
+(defn- lap-phase!
+  "Credit the time since the clock's last lap to phase `k`. A phase that runs in
+  two parts adds up. `clock` is an atom of {:at millis :ms {phase millis}}."
+  [clock k]
+  (let [now (System/currentTimeMillis)]
+    (swap! clock #(-> %
+                      (assoc :at now)
+                      (update-in [:ms k] (fnil + 0) (- now (:at %)))))
+    nil))
+
+(defn ^:export run-full-check!
+  "The WHOLE-STORE check, on demand: kondo over every namespace, the
+  dead-public-surface report over every namespace, BOTH layering graphs —
+  purity tiers and the module architecture — the RULE CATALOG swept over every
+  form, and every test in every tier: the in-image suite, `^:integration`, and
+  the external `^:external` tier.
+
+  Deliberately NOT forced anywhere, not by `done` and not by `commit_point`.
+  `done` is episode-scoped: it answers whether the work you just did is good,
+  which is the question you can act on. This answers whether the STORE is
+  good, which is a different and much slower question — and one only the
+  agent can judge the right moment for. `done` names this tool in its result
+  so the choice is visible rather than forgotten.
+
+  It also retires any need for an integration-only or lint-only tool: one
+  call, everything, no tier flags to get wrong.
+
+  Returns {:lint [...] :lint-errors n :lint-warnings n :unused [...] :stale
+  [...] :tier-layering [...] :module-violations {...} :rules {...} :test {...}
+  :external {...} :phases {...} :status :green|:red}. `:phases` is the wall
+  milliseconds of each step, with `:rest` for whatever no step measured, so they
+  add up to `:ms`.
+
+  `:rules` is ALWAYS present and carries `:swept` / `:not-swept` beside its
+  `:findings`, because roughly a third of the advisory registry compares
+  against the episode's baseline and cannot answer a whole-store question at
+  all — naming them is what stops a green from claiming coverage it never had.
+
+  `:checked` is the same argument, applied to every OTHER whole-store read.
+  Each of those is folded in only when it has something to say, so a clean
+  store and a read that never ran produced identical output — the exact
+  failure this check exists to prevent, sitting inside the check. It maps each
+  read to the POPULATION it examined rather than merely naming it, because a
+  name only claims it ran: a read reporting 0 is visibly broken, where an
+  absent key was indistinguishable from clean. Found by slopp-ui, who could
+  verify one regrade from `:swept` and had to hand-build a control for the
+  other.
+
+  Plus, when this project has a managed app server up, `:app {:behind n
+  :url}` — how many code changes the SERVED image is behind the store it just
+  called green. `0` is reported rather than omitted: the question is \"is the
+  page I am about to look at built from what I just wrote?\", and staying
+  silent on yes leaves the reader curling the endpoint by hand.
+
+  And `:bundle {:sha :behind :note}` when the compiled browser bundle is behind
+  CLIENT code — the third artifact that can be stale, after the host and the
+  jar, and the only one that had no report. A store took a green `done`, a green
+  `commit_point`, a green check here AND `:app {:behind 0}` while the browser
+  served a bundle from before ten screens were rewritten; nothing was wrong,
+  because `:app` measures the IMAGE and its zero was honest about the image.
+  Reported only when BEHIND, unlike `:app`: a store with no client code has no
+  bundle and must not be told about one."
+  [session & {:keys [affected]}]
+  (let [t0    (System/currentTimeMillis)
+        clock (atom {:at t0 :ms {}})
+        st    (:store @session)
+        nses  (sort (keys (:namespaces st)))
+        ;; The whole-store gate must not inherit incremental kondo state. kondo
+        ;; reads cross-ns facts from a disk cache that each lint TEACHES, so a
+        ;; cache predating recent vars makes whatever is linted early get judged
+        ;; against yesterday's facts — once four phantom `invalid-arity` ERRORS
+        ;; and eleven unresolved vars, on a store whose every test passed. A
+        ;; STALE fact lies confidently; an ABSENT one is benign.
+        _     (index/reset-kondo-cache!)
+        ;; and teach it callees-first — the same "deps first" order every loader
+        ;; uses — so nothing is judged against a fact not yet refreshed
+        lint  (vec (for [n (store/ns-dependency-order st)
+                         :let [src (store.render/render-ns st n)]
+                         f (index/lint src (store/kondo-lang st n))]
+                     (-> f (dissoc :row :col) (assoc :ns n))))
+        _     (lap-phase! clock :lint)
+        rep   (read.modules/unused-report st nses)
+        _     (lap-phase! clock :dead-surface)
+        ;; tier LAYERING — a whole-graph property, so it lives here rather
+        ;; than at a declaration: core must not depend on shell. This is the
+        ;; check effect-reachability cannot make, since that sees a cross-ns
+        ;; effect only when the callee is `!`-named.
+        layer (vec (for [n nses
+                         :when (not (str/ends-with? (str n) "-test"))
+                         :let [t (tiers/tier-for st n)]
+                         v (tiers/layering-violations st n t)]
+                     ;; :external by ABSENCE and :external by DECLARATION read identically
+                     ;; in the row, and only the first has a one-call fix. The
+                     ;; finding names the namespace whose CLAIM breaks, which is
+                     ;; the one that did not change; say which case this is so
+                     ;; the reader is not sent to restructure code when a
+                     ;; missing declaration is the whole story.
+                     (cond-> {:ns n :tier t
+                              :requires (:requires v) :requires-tier (:tier v)}
+                       (not (tiers/tier-declared? st (:requires v)))
+                       (assoc :requires-undeclared true))))
+        ;; MODULE layering — the architecture graph, and a DIFFERENT graph
+        ;; from the tiers above, so a green there says nothing about this.
+        ;; The module rules are WRITE gates: they see only code written
+        ;; THROUGH them, and a rename rewrites its own callers, which never
+        ;; pass a gate. This fold is the only thing that asks again — the
+        ;; operation most likely to drift the architecture being exactly the
+        ;; one the per-write check cannot see. Four real visibility
+        ;; violations stood on this store through a green check before it was
+        ;; wired in (friction #19); `module-debt` itself already existed and
+        ;; was asked only by the graph view and by `module_dep`.
+        mods  (read.modules/module-debt st)
+        _     (lap-phase! clock :layering)
+        ;; the edges the PIPELINE declared on writes' behalf and nobody
+        ;; retracted. Each was the refusal the agent would have obeyed; the
+        ;; refusal was also the one moment anybody asked whether the call
+        ;; should exist, and that moment is gone by design — so the
+        ;; accumulation is reported here, always, as a count a reader can
+        ;; branch on (the wire keeps the edges behind verbose)
+        autoedges (read.modules/auto-declared-edges (ops/journal session))
+        _     (lap-phase! clock :other-reads)
+        ;; the RULE CATALOG, and the identical argument one layer up. A
+        ;; `:grain :done` rule fires over forms an EPISODE changed, so a
+        ;; violation older than the rule is invisible to `done` — and stays
+        ;; invisible, because no later episode changes that form either.
+        ;; slopp-ui carried two `direct-http` violations through a green check
+        ;; here for exactly that reason (friction #27): two violations, three
+        ;; tools, no report. `sweep-store!` names what it could NOT ask as well
+        ;; as what it did, since a third of the registry compares against the
+        ;; episode's baseline and running one of those over every form reports
+        ;; nothing in the same shape as clean.
+        sweep (rules/sweep-store! session st)
+        _     (lap-phase! clock :rule-sweep)
+;; a namespace holding nothing but its own ns form. Reported HERE
+        ;; because it can be reported nowhere else: every advisory is
+        ;; addressed by changed FORM IDS and sweep-store! builds its
+        ;; whole-store population the same way, so a namespace with zero
+        ;; forms is in neither and no rule can reach it however it is
+        ;; written. slopp.http-rules-test survived two days and a green
+        ;; check here after the R6 rules move emptied it.
+        husks (read.modules/empty-namespaces st)
+        aliasdrift (read.modules/alias-drift st)
+        _     (lap-phase! clock :other-reads)
+        ;; WHAT RAN, always — the same argument `:rules` already makes with
+        ;; `:swept`, applied to the reads that had no equivalent. Every read
+        ;; below is folded into the result only when it has something to say,
+        ;; so a clean store and a read that never ran produced byte-identical
+        ;; output. That is the exact failure this check exists to prevent,
+        ;; sitting in the check itself.
+        ;;
+        ;; The POPULATION rather than the name, because a name only claims it
+        ;; ran. A read that examined 0 namespaces is visibly broken, where
+        ;; "alias-drift: absent" was indistinguishable from clean — which is
+        ;; how slopp-ui came to verify a regrade by hand-building a control.
+        checked {:lint             (count nses)
+                 :dead-surface     (count nses)
+                 :tier-layering    (count (remove #(str/ends-with? (str %) "-test") nses))
+                 :module-debt      (count nses)
+                 :empty-namespaces (count nses)
+                 :alias-drift      (count nses)
+                 :crossings        (count nses)
+                 :rule-sweep       (:forms sweep)}
+        errs  (filterv #(= :error (:level %)) lint)
+        warns (filterv #(= :warning (:level %)) lint)
+        tests (engine/run-verification! session (vec nses) nil
+                                         :include-integration? true
+                                         :boundary? true)
+        ;; ONLY this tier narrows. Measured: the external suite is ~187s of a
+        ;; ~190s full_check (299 image boots), while lint + dead surface +
+        ;; layering + the in-image suite together are ~5-7s. Narrowing the
+        ;; cheap half would buy nothing and cost exactly the coverage
+        ;; full_check exists for.
+        _     (lap-phase! clock :in-image)
+        iso   (when (seq (engine/external-test-nses
+                          st (filter #(engine/test-ns? st %) nses)))
+                (external-test-run! session :affected affected))
+        _     (lap-phase! clock :external)
+        red?  (or (seq errs) (seq (:unused rep)) (seq (:stale rep))
+                  (seq layer)                ; core→shell is a failure, not a note
+                  mods                       ; and so is a standing module
+                                             ; violation: the per-write gates
+                                             ; REFUSE these, so one still
+                                             ; standing got in by a path around
+                                             ; the gate. Same rule, one bar —
+                                             ; advisory here would make the
+                                             ; write gate the stricter of the
+                                             ; two, which is backwards for a
+                                             ; whole-store check
+                  ;; and the rule catalog grades through the SAME predicate
+                  ;; `done` uses, so a rule dialed :error is :error in both
+                  ;; places and an :advisory is reported in both without
+                  ;; flipping. One rule, one check, one bar; the sweep is a
+                  ;; different POPULATION, never a different standard.
+                  (rules/status-affecting-fired? st (:findings sweep))
+                  (pos? (+ (:fail tests 0) (:error tests 0)))
+                  (contains? #{:red :error} (:status iso)))]
+    (cond-> {:namespaces (count nses)
+             :lint-errors (count errs)
+             :lint-warnings (count warns)
+             :checked checked
+             :rules sweep
+             :modules {:auto-declared (count autoedges) :edges autoedges}
+             :test tests
+             :phases (:ms @clock)
+             :status (if red? :red :green)}
+      affected (assoc :scope (str "lint, dead surface, tier layering, module"
+                                  " layering, the rule sweep and the in-image"
+                                  " suite covered ALL "
+                                  (count nses) " namespaces;"
+                                  " the ^:external tier was narrowed to the tests"
+                                  " that changes since the last commit-point can"
+                                  " reach. Drop :affected for the whole tier"))
+      (seq errs)          (assoc :lint errs)
+      (seq warns)         (assoc :warnings warns)
+(seq husks)         (assoc :empty-namespaces husks
+                                 :empty-namespaces-note
+                                 (str (count husks) " namespace(s) holding nothing"
+                                      " but their own ns form. A move that carries"
+                                      " a namespace's whole contents elsewhere"
+                                      " leaves one, and nothing else reports it:"
+                                      " there is no form to be dead, undocumented"
+                                      " or uncovered, and namespace-purpose exempts"
+                                      " an empty namespace because a NEWBORN one has"
+                                      " nothing to describe yet. ns_delete retires a"
+                                      " husk; adding a form is the other honest"
+                                      " answer, and it is why this is reported"
+                                      " rather than refused"))
+      (image.currency/broken (:image @session))
+      (assoc :currency-broken (image.currency/broken (:image @session))
+             :currency-broken-note
+             (str "the verification image's currency record stopped being"
+                  " maintained, so every currency answer about it is now"
+                  " \"not measured\" rather than a claim. Bookkeeping is caught"
+                  " on the write path deliberately — a stamp that throws must"
+                  " not veto a load that succeeded — so this is the report that"
+                  " would otherwise be a silent gap. `restart` builds a fresh"
+                  " image and clears it; the message names what threw"))
+      (seq aliasdrift)    (assoc :alias-drift aliasdrift
+                                 :alias-drift-note
+                                 (str (count aliasdrift) " require(s) name a store"
+                                      " namespace by something other than its"
+                                      " canonical alias — the shortest trailing"
+                                      " segments naming exactly one namespace here."
+                                      " Harmless to the TOOLS, because the reference"
+                                      " graph is alias-blind and renames and"
+                                      " query_depends were never confused by it."
+                                      " Costly to a READER: when one alias names two"
+                                      " namespaces, x/f in a slice is two different"
+                                      " functions and the page does not say which."
+                                      " It is also the one way a hand sweep can be"
+                                      " wrong where the graph is right. ns_realias"
+                                      " is the remedy, one namespace at a time;"
+                                      " reported and never refused, because most of"
+                                      " it is residue from renames that moved a"
+                                      " namespace and left the :as behind"))
+      (seq layer)         (assoc :tier-layering layer
+                                 :tier-layering-note
+                                 (str (count layer) " core→shell dependency(ies):"
+                                      " a namespace depends on one at a LOOSER"
+                                      " tier. Either move what it needs into a"
+                                      " core namespace, or its own tier is a"
+                                      " claim it does not earn"
+                                      (when (some :requires-undeclared layer)
+                                        (str ". Rows marked :requires-undeclared"
+                                             " name a dependency that is"
+                                             " :external only because nothing"
+                                             " DECLARED it — usually a namespace"
+                                             " a move or split just created;"
+                                             " module_purity on that namespace"
+                                             " may be the whole fix"))))
+      mods                (assoc :module-violations mods
+                                 :module-violations-note
+                                 (str (:count mods) " module rule violation(s)"
+                                      " standing in the store. Each is what a"
+                                      " write gate would REFUSE, so each got"
+                                      " here by a path around the gate —"
+                                      " usually a rename, which rewrites its"
+                                      " own callers. Declare the edge"
+                                      " (module_dep), hoist the target"
+                                      " (^:export), or restructure the call"))
+      (seq (:findings sweep))
+      (assoc :rules-note
+             (str (count (:findings sweep)) " rule(s) with standing findings over "
+                  (:forms sweep) " form(s). `done` is EPISODE-scoped, so any of"
+                  " these older than the rule itself is invisible to every done"
+                  " there will ever be — this sweep is the only thing that asks"
+                  " again. :error-severity findings flipped this check red;"
+                  " :advisory ones are reported and did not. query_rules names"
+                  " each rule's escape"))
+      (seq (:unused rep)) (assoc :unused-public (:unused rep))
+      (seq (:stale rep))  (assoc :stale-unused-ok (:stale rep))
+      iso                 (assoc :external iso)
+      (:failed-tests iso) (assoc :failed-tests (:failed-tests iso))
+      ;; The three fields this check REPORTS rather than EARNS — the host's
+      ;; image (friction #10), the browser bundle, and the served app (slopp-ui
+      ;; friction #5). A whole-store green is exactly the verdict an agent
+      ;; commits on, so an artifact serving superseded code has to say so HERE.
+      ;; Shared with `full-check!` rather than written twice, and that sharing
+      ;; is the point: none of the three is a function of store content, so a
+      ;; verdict handed back because it still STANDS would otherwise describe
+      ;; the world as it was when the verdict was earned. Serving an app is not
+      ;; a write, and nothing else would ever refresh them.
+      true                  (merge (currency-now session st))
+      ;; an instrument, not a verdict: how often the tests this store's agents
+      ;; wrote were watched fail before their episode closed. It never turns the
+      ;; check red; it is reported here so the share becomes a series
+      (:db @session)        (assoc :red-first (rules/red-first-rate
+                                               (db/line-deltas (:db @session)
+                                                               (db/trunk-line-id! (:db @session)))))
+      ;; Verification stops at the boundary: everything above is an edge INSIDE
+      ;; the store. A green here
+      ;; says nothing about what LEAVES it, and reads as though it did — so
+      ;; name the exits nothing checks, right where the green is about to be
+      ;; believed. Advisory: these are standing documented holes, not
+      ;; regressions.
+      (crossings/finding st) (assoc :crossings (crossings/finding st))
+      ;; last, so the recorded verdict is the one actually returned
+      true                  (record-full-check! session nses t0))))
+
+(defn ^:export full-check!
+  "The WHOLE-STORE check — `run-full-check!`, except that a verdict which
+  STILL STANDS is returned instead of re-earned, and a run already in
+  flight for the same CONTENT is joined instead of duplicated.
+
+  When nothing since the last whole-store check could have changed what it
+  says, this hands back that verdict with `:standing true` and the delta that
+  recorded it, in about a millisecond. `{force true}` runs it anyway.
+
+  **Why the courtesy is worth having here specifically.** This is the most
+  expensive operation slopp performs — ~236s on this store, almost entirely
+  fresh JVM boots in the external tier — and its own journal says it was
+  asked twice for one answer constantly: 325 runs, 117 of them REPEATS inside
+  a single ask, 7.6 hours. `commit_point` has always returned an unchanged
+  commit-point rather than re-minting one, and the argument is the same, only
+  the number is four hundred times larger.
+
+  **The QUEUE is the same courtesy across sessions.** A session carrying
+  `:check-queue` — an atom the server shares among every session on a
+  project — keys a run IN FLIGHT by its line's elements digest AND the
+  store's content signature: two threads holding identical content share it,
+  where their heads differ by markers, and two holding different edits of
+  one length (the digest alone cannot tell them apart) do not. The first
+  asker runs and delivers; a later asker at the same key waits on that
+  promise, records the verdict on ITS line (so it stands there, as
+  `standing-full-check` reads a line), re-derives the live overlays, and
+  answers with `:joined true`. Only a plain ask joins — `affected` narrows
+  the external tier and `force` means this session wants its own run. The
+  entry goes the moment it is delivered: only the STANDING check may hand
+  back a past verdict, because only it asks what has happened on the line
+  since. A realized promise left in the map answered a later asker with the
+  old verdict after a config write had retired it — the write moved no
+  elements row, so the key had not changed when the verdict it retired had.
+
+  It REPORTS rather than refuses, which is the same stance `done` takes. An
+  agent that asks again gets an answer, promptly, plus the fact that it did
+  not need to ask — so the habit corrects itself instead of being blocked.
+
+  **A standing verdict is not replayed wholesale.** It reuses what it EARNED
+  — lint, layering, the rule sweep, the test results, all functions of store
+  content — and RECOMPUTES what it merely reported about live artifacts, via
+  `currency-now`. `:app`, `:bundle` and `:host-stale` describe things outside
+  the store and go stale with no delta at all: serving an app is not a write,
+  so nothing retires the verdict and nothing else would refresh them. Shipped
+  without that overlay, this reported `:app nil` the first time an app server
+  appeared between two checks — the guard was right and the payload was stale.
+
+  What counts as a change is deliberately generous: see
+  `read.history/verdict-inert-ops`. A config write can arm a capability's
+  rules and a module edge changes the layering graph, neither of which
+  touches a form, so only provably inert bookkeeping is ignored and an
+  unclassified op means re-run. The failure mode is a check nobody needed
+  rather than a green nobody earned."
+  [session & {:keys [affected force]}]
+  (if-let [standing (and (not force)
+                         (let [conn (:db @session)
+                               line (engine/session-line session)
+                               chk  (db/last-full-check conn line)]
+                           (history/standing-full-check
+                            chk (when chk (db/ops-after conn line (:id chk))))))]
+    (assoc (merge (dissoc standing :app :bundle :host-stale)
+                  (currency-now session (:store @session)))
+           :standing true
+           :note (str "nothing since this verdict could have changed it, so it"
+                      " STANDS — no check was run. This is the whole-store"
+                      " answer, "
+                      (when-let [ms (:ms standing)] (str "earned in " ms "ms, "))
+                      "and it is current: a forced re-run cannot say more, so hand this"
+                      " verdict over as it stands. A write of any kind retires it on its own."))
+    (let [q    (:check-queue @session)
+          conn (:db @session)]
+      (if-not (and q conn (nil? affected) (not force))
+        (run-full-check! session :affected affected)
+        (let [digest [(db/elements-digest conn (engine/session-line session))
+                          ;; the digest is content-blind (counts, ranks, sizes), so
+                          ;; the signature says WHICH content — two threads holding
+                          ;; different edits of one length must not share a verdict
+                          (store/content-signature (:store @session))]
+              [p mine?] (locking q
+                          (if-let [p (get @q digest)]
+                            [p false]
+                            (let [p (promise)]
+                              ;; a few contents, not a history: an entry is a
+                              ;; whole verdict, and the one that matters is now
+                              (swap! q #(assoc (if (< 3 (count %)) {} %) digest p))
+                              [p true])))]
+          (if mine?
+            (try (let [r (run-full-check! session :affected nil)]
+                   (deliver p r)
+                   r)
+                 (catch Throwable t
+                   (deliver p t)
+                   (throw t))
+                 ;; delivered is DONE: the entry goes whether the run threw or
+                 ;; answered. Left in the map, a realized promise answered the
+                 ;; next asker at this key with the old verdict as :joined —
+                 ;; and a config write moves no elements row, so the key did
+                 ;; not change when the verdict it retired did
+                 (finally (locking q (swap! q dissoc digest))))
+            (let [r (deref p)]
+              (when (instance? Throwable r) (throw r))
+              (let [st   (:store @session)
+                    nses (sort (keys (:namespaces st)))
+                    ;; the verdict is a function of content and is theirs to
+                    ;; keep; the live overlays are this session's to re-derive
+                    r'   (merge (dissoc r :app :bundle :host-stale)
+                                (currency-now session st))]
+                (assoc (record-full-check! r' session nses
+                                           (- (System/currentTimeMillis) (:ms r 0)))
+                       :joined true
+                       :note (str "another session on this project was running the"
+                                  " whole-store check over this same content; this is"
+                                  " ITS verdict, recorded on your line so it stands here"
+                                  " too. Nothing was run twice."))))))))))
