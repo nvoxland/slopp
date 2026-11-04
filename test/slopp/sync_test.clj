@@ -822,6 +822,7 @@
                    "slopp-dirimport-out" (make-array java.nio.file.attribute.FileAttribute 0)))
         sess (external/open! {:slopp.ops/dir dir})]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'di.core "(ns di.core)\n\n(defn ^:unused-ok f [] 1)")
       (external/commit-point! sess "v1" :agent "alice")
 
@@ -1125,6 +1126,7 @@
         s   (external/open! {:slopp.ops/dir dir})]
     (try
       (with-open [conn (db/open! dir)] (db/set-meta! conn "git-remote" "."))
+      (ops/config-file! s "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! s 'gp.core "(ns gp.core)\n(defn ^:unused-ok f [x] x)\n")
       (external/commit-point! s "first" :agent "alice")
       (is (nil? (:error (sync/publish-local! dir "main"))) "fixture: the first commit point published")
@@ -1197,3 +1199,46 @@
           (is (= "OK" (:status r)) (pr-str r))
           (is (some? (ref-sha)))))
       (finally (ops/close! s)))))
+
+(deftest ^:external a-pull-trusts-proof-its-stamped-commits-already-earned
+  (let [dir-a (temp-dir)
+        dir-b (str (temp-dir) "/clone")
+        bare  (bare-repo! (str (temp-dir) "/remote.git"))
+        sa    (external/open! {:slopp.ops/dir dir-a})]
+    (try
+      (ops/ingest! sa 'pt.core "(ns pt.core \"P.\")\n(defn f \"F.\" [x] (+ x x))\n")
+      (ops/ingest! sa 'pt.core-test "(ns pt.core-test \"T.\" (:require [clojure.test :refer [deftest is]] [pt.core :as c]))\n(deftest f-t (is (= 4 (c/f 2))))\n")
+      (is (= :green (:status (external/commit-point! sa "v1" :agent "alice"))) "fixture: tested code proves itself")
+      (is (nil? (:error (sync/push! dir-a :url bare))))
+      (is (nil? (:error (sync/clone! bare dir-b :agent "bob"))))
+      (let [sb (external/open! {:slopp.ops/dir dir-b})]
+        (try
+          (testing "a green stamped commit carrying a waived refactor pulls without a second waiver"
+            ;; a fresh clone has run nothing, so it has no coverage to judge with; a
+            ;; first pull runs the suite and gives it some
+            (ops/ingest! sa 'pt.extra "(ns pt.extra \"E.\")\n(defn g \"G.\" [x] x)\n")
+            (ops/ingest! sa 'pt.extra-test "(ns pt.extra-test \"T.\" (:require [clojure.test :refer [deftest is]] [pt.extra :as e]))\n(deftest g-t (is (= 1 (e/g 1))))\n")
+            (is (= :green (:status (external/commit-point! sa "v1.5" :agent "alice"))))
+            (is (nil? (:error (sync/push! dir-a))))
+            (is (string? (:marker (sync/pull! sb :agent "bob"))))
+            (ops/edit-replace! sa 'pt.core 'f "(defn f \"F.\" [x] (* 2 x))" :prompt "refactor" :agent "alice")
+            (swap! sa assoc :untested-waivers {"pt.core/f" "doubling and addition agree"})
+            (is (= :green (:status (external/commit-point! sa "v2" :agent "alice"))))
+            (swap! sa dissoc :untested-waivers)
+            (is (nil? (:error (sync/push! dir-a))))
+            (let [r (sync/pull! sb :agent "bob")]
+              (is (nil? (:error r)) (pr-str r))
+              (is (string? (:marker r)) (pr-str r))))
+          (testing "a commit marked red earned nothing, so what it brought is judged"
+            (ops/edit-replace! sa 'pt.core 'f "(defn f \"F.\" [x] (* x 2))" :prompt "unproven" :agent "alice")
+            (is (= :red (:status (external/commit-point! sa "v3" :agent "alice" :force true))))
+            (is (nil? (:error (sync/push! dir-a))))
+            (let [r (sync/pull! sb :agent "bob")]
+              (is (= :red (:status r)) (pr-str r))
+              (is (some #(= 'pt.core/f (:form %)) (get-in r [:findings :unproven-change])) (pr-str r))))
+          (finally (ops/close! sb))))
+      (finally
+        (ops/close! sa)
+        (rm-rf! dir-a)
+        (rm-rf! (.getParentFile (io/file dir-b)))
+        (rm-rf! (.getParentFile (io/file bare)))))))

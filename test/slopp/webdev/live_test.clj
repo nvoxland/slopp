@@ -1278,6 +1278,7 @@
                     "slopp-adopt" (make-array java.nio.file.attribute.FileAttribute 0)))
         s     (external/open! {:slopp.ops/dir dir})]
     (try
+      (ops/config-file! s "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! s 'ad.core "(ns ad.core)\n\n(defn ^:unused-ok f [x] x)\n" :agent "a")
       (external/done! s :label "v1" :agent "a")
       (boot/adopt-host-record! dir (live/pushed-hashes (:db @s) '[ad.core]))

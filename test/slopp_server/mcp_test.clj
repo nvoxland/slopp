@@ -274,13 +274,14 @@
                     "commit" "--allow-empty" "-m" "root")
         sess (external/open! {:slopp.ops/dir dir})]
     (try
+      (call! sess "config_file" {:path "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof"})
       (call! sess "ns_create" {:ns "pub.core" :source "(ns pub.core)\n(defn ^:unused-ok f [x] x)\n"})
       (testing "a commit-point mirrors into LOCAL git as slopp/<store-branch> (user decision 2026-07-14)"
         (let [r (call! sess "commit_point" {:label "first"})]
           (is (re-find #":published" r) r)
           (is (re-find #"slopp/main" r) r))
         (let [head (:out (sh/sh "git" "-C" dir "rev-parse" "refs/heads/slopp/main"))]
-          (is (= 40 (count (clojure.string/trim head))) head)))
+          (is (= 40 (count (str/trim head))) head)))
       (testing "no REMOTE is touched or saved — remote publishing stays explicit"
         (is (nil? (db/get-meta (:db @sess) "git-remote"))))
       (finally (ops/close! sess)))))
@@ -293,6 +294,7 @@
                     "commit" "--allow-empty" "-m" "root")
         sess (external/open! {:slopp.ops/dir dir})]
     (try
+      (call! sess "config_file" {:path "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof"})
       (call! sess "ns_create" {:ns "al.core" :source "(ns al.core)\n(defn ^:unused-ok f [x] x)\n"})
       (call! sess "commit_point" {:label "first"})
       (testing "query_commits carries the alignment PROOF against the local mirror (Q12)"
@@ -445,6 +447,7 @@
         _    (sh/sh "git" "init" "--bare" bare)
         sess (external/open! {:slopp.ops/dir dir})]
     (try
+      (call! sess "config_file" {:path "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof"})
       (call! sess "ns_create" {:ns "mr.core" :source "(ns mr.core)\n(defn ^:unused-ok f [x] x)\n"})
       (call! sess "commit_point" {:label "first"})
       (testing "git_push mirrors local slopp/* to the remote (and saves the first url)"
@@ -475,6 +478,7 @@
             _    (sh/sh "git" "init" "--bare" bare2)
             s3   (external/open! {:slopp.ops/dir d2})]
         (try
+          (call! s3 "config_file" {:path "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof"})
           (call! s3 "ns_create" {:ns "ng.core" :source "(ns ng.core)\n(defn ^:unused-ok f [x] x)\n"})
           (let [r (call! s3 "commit_point" {:label "no git here"})]
             (is (re-find #":commit" r) r)
@@ -1200,8 +1204,9 @@
         _    (sh/sh "git" "-C" dir "-c" "user.name=t" "-c" "user.email=t@t"
                     "commit" "--allow-empty" "-m" "root")
         sess (external/open! {:slopp.ops/dir dir})
-        rev  (fn [ref] (clojure.string/trim (:out (sh/sh "git" "-C" dir "rev-parse" ref))))]
+        rev  (fn [ref] (str/trim (:out (sh/sh "git" "-C" dir "rev-parse" ref))))]
     (try
+      (call! sess "config_file" {:path "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof"})
       (call! sess "ns_create" {:ns "bp.core" :source "(ns bp.core)\n(defn ^:unused-ok f [x] x)\n"})
       (call! sess "commit_point" {:label "trunk commit-point"})
       (call! sess "branch_create" {:name "feature"})
@@ -2072,11 +2077,12 @@
                     "commit" "--allow-empty" "-m" "root")
         sess (external/open! {:slopp.ops/dir dir})]
     (try
+      (call! sess "config_file" {:path "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof"})
       (call! sess "ns_create" {:ns "pub.core" :source "(ns pub.core)\n(defn ^:unused-ok f [x] x)\n"})
       (call! sess "commit_point" {:label "first"})
       ;; someone else's history under the mirror ref: the checkout's own root
       ;; commit, which the projection never minted and does not build on
-      (let [root (clojure.string/trim
+      (let [root (str/trim
                   (:out (sh/sh "git" "-C" dir "rev-parse" "HEAD")))]
         (sh/sh "git" "-C" dir "branch" "-f" "slopp/main" root)
         (call! sess "ns_create" {:ns "pub.two" :source "(ns pub.two)\n(defn ^:unused-ok g [] 2)\n"})
@@ -2682,6 +2688,7 @@
                                           :params {:name tool :arguments args}})
                        [:result :content 0 :text]))]
     (try
+      (call "config_file" {:path "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof"})
       (call "ns_create" {:ns "bk.core" :source "(ns bk.core \"a fixture with nothing to advise about\")\n(defn ^{:unused-ok \"fixture\"} f [] 1)\n"})
       (call "turn_begin" {:intent "make f" :agent (:agent-id @sess)})
       (call "edit_replace_form" {:ns "bk.core" :name "f" :source "(defn ^{:unused-ok \"fixture\"} f [] 2)" :prompt "two"})
@@ -4808,6 +4815,7 @@
       (let [c (edn/read-string (call! sess "thread_open" {:thread "t-kid" :parent "t-parent"}))]
         (is (= "t-parent" (:parent c)) (pr-str c))
         (is (= "t-kid" (:thread c)) (pr-str c)))
+      (call! sess "config_file" {:path "rules" :key "unproven-change" :value "off" :thread "t-kid" :prompt "this fixture is not about test proof"})
       (call! sess "ns_create" {:ns "ch.kid" :thread "t-kid" :prompt "child work"
                                :source "(ns ch.kid)\n(defn ^:unused-ok f \"F.\" [] 1)\n"})
       (let [by (fn [] (into {} (map (juxt :thread identity))
@@ -4891,6 +4899,7 @@
   ;; reboot from the landed state to clear it.
   (let [sess (external/open!)]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'ab.core "(ns ab.core)\n")
       (let [w (ops/add-form! sess 'ab.core "(defn ^:unused-ok f \"F.\" [] 1)" :prompt "p" :agent "ab")]
         (is (nil? (:error w)) (pr-str w)))
@@ -4967,6 +4976,7 @@
                     "commit" "--allow-empty" "-m" "root")
         sess (external/open! {:slopp.ops/dir dir})]
     (try
+      (call! sess "config_file" {:path "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof"})
       (call! sess "ns_create" {:ns "pub.core" :source "(ns pub.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n" :prompt "p"})
       (let [r (call! sess "done" {:label "land it" :commit "the closing commit publishes"})]
         (is (re-find #":commit \{" r) r)
@@ -5003,6 +5013,7 @@
   ;; described by the ask the turn recorded, which is what the work was.
   (let [sess (external/open!)]
     (try
+      (call! sess "config_file" {:path "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof"})
       (call! sess "ns_create" {:ns "cl.core" :source "(ns cl.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n"})
       (swap! sess assoc :last-intent "make f the identity")
       (let [r (call! sess "done" {:commit "true"})]
@@ -5329,4 +5340,29 @@
           (is (re-find #"addition and doubling agree" r) r)))
       (testing "the waiver was for that done only"
         (is (nil? (:untested-waivers @sess))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-waiver-travels-with-the-version-it-covered
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "wk.core" :source "(ns wk.core \"W.\")\n(defn twice \"T.\" [x] (* 2 x))\n"})
+      (call! sess "ns_create" {:ns "wk.core-test" :source "(ns wk.core-test (:require [clojure.test :refer [deftest is]] [wk.core :as c]))\n(deftest twice-t (is (= 4 (c/twice 2))))\n"})
+      (is (re-find #":landed \"main\"" (call! sess "done" {:label "baseline"})))
+      (call! sess "thread_open" {:thread "t-parent"})
+      (call! sess "thread_open" {:thread "t-kid" :parent "t-parent"})
+      (call! sess "change" {:thread "t-kid" :prompt "same result, by addition"
+                            :impl [{:ns "wk.core" :name "twice" :source "(defn twice \"T.\" [x] (+ x x))"}]})
+      (testing "the child's waiver lands it into the parent"
+        (let [d (call! sess "done" {:thread "t-kid" :label "child" :untested {"wk.core/twice" "addition and doubling agree"}})]
+          (is (re-find #":landed \"thread t-parent\"" d) d)))
+      (testing "and the parent's done, judging that same version, needs no second waiver"
+        (let [d (call! sess "done" {:thread "t-parent" :label "parent"})]
+          (is (re-find #":landed \"main\"" d) d)))
+      (testing "a later change to the function is not covered by it"
+        (call! sess "thread_open" {:thread "t-next"})
+        (call! sess "change" {:thread "t-next" :prompt "a third spelling"
+                              :impl [{:ns "wk.core" :name "twice" :source "(defn twice \"T.\" [x] (+ x (* 1 x)))"}]})
+        (let [d (call! sess "done" {:thread "t-next" :label "unwaived"})]
+          (is (not (re-find #":landed \"main\"" d)) d)
+          (is (re-find #"unproven-change" d) d)))
       (finally (ops/close! sess)))))

@@ -812,3 +812,21 @@
           (set-branch-ref! repo nm sha))
         {:refs refs
          :via  (into {} (map (fn [[nm r]] [nm (:via r)])) results)}))))
+
+^:reads (defn proven-range?
+  "True when every commit after `base` up to `tip` in `repo` says slopp minted it
+  from a passing done: each carries the `Slopp-Commit:` stamp and none carries
+  `Slopp-Status: red`, which a forced commit point writes. A stamped commit's
+  production changes earned their proof where they were written, so a pull need
+  not earn it again. This is an honest statement about the producer, not a
+  signature: a remote that hand-writes the trailer can claim it, and the suite
+  a pull runs still judges what arrives."
+  [^Repository repo base tip]
+  (with-open [rw (RevWalk. repo)]
+    (.markStart rw (.parseCommit rw (ObjectId/fromString tip)))
+    (.markUninteresting rw (.parseCommit rw (ObjectId/fromString base)))
+    (every? (fn [c]
+              (let [m (.getFullMessage ^org.eclipse.jgit.revwalk.RevCommit c)]
+                (and (stamped-commit-point m)
+                     (not (re-find #"(?m)^Slopp-Status:[ \t]*red" m)))))
+            (iterator-seq (.iterator rw)))))

@@ -205,6 +205,7 @@
   ;; is one drill-down away via {commit "dN"}.
   (let [sess (external/open!)]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'qc.core "(ns qc.core)\n(defn ^:unused-ok f [x] x)\n")
       (external/done! sess :label "w")
       (external/commit-point! sess

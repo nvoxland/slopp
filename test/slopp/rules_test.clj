@@ -208,6 +208,7 @@
     (try
       (ops/ingest! sess 'sw.core
                    "(ns sw.core)\n(defn ^:unused-ok grab \"E.\" [p] (slurp p))\n")
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (external/done! sess :label "baseline")
       (testing "declaring a namespace :external raises the question at done"
         (ops/module-tier! sess "sw.core" :external :prompt "needs to read a file")
@@ -1640,4 +1641,34 @@
                   (get-in r [:findings :carried-advisories :unproven-change]))
               (pr-str (:findings r)))
           (is (:landed (:land r)) (pr-str (dissoc r :suite :lint)))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-held-done-does-not-let-the-next-one-through
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'hd.core "(ns hd.core \"H.\")\n\n(defn price \"P.\" [x] (* x 2))\n\n(defn label \"L.\" [x] (str x))\n")
+      (ops/ingest! sess 'hd.core-test (str "(ns hd.core-test \"T.\" (:require [clojure.test :refer [deftest is]] [hd.core :as c]))\n\n"
+                                           "(deftest price-t (is (number? (c/price 2))))\n\n"
+                                           "(deftest label-t (is (= \"1\" (c/label 1))))\n"))
+      (is (:landed (:land (external/done! sess :label "baseline"))) "fixture: the baseline lands")
+      (ops/edit-replace! sess 'hd.core 'price "(defn price \"P.\" [x] (* x 3))" :prompt "triple it, no proof")
+      (let [r (external/done! sess :label "held")]
+        (is (not (:landed (:land r))) "fixture: the unproven change is held"))
+      (testing "proven work on something else does not carry the unproven change along"
+        (ops/edit-replace! sess 'hd.core 'label "(defn label \"L.\" [x] (str \"#\" x))" :prompt "a real change")
+        (ops/edit-replace! sess 'hd.core-test 'label-t "(deftest label-t (is (= \"#1\" (c/label 1))))" :prompt "pin it")
+        (let [r (external/done! sess :label "next")]
+          (is (not (:landed (:land r))) (pr-str (:findings r)))
+          (is (some #(= 'hd.core/price (:form %)) (get-in r [:findings :unproven-change])) (pr-str (:findings r)))))
+      (testing "and a waiver on an earlier held done still covers that same version"
+        (ops/edit-replace! sess 'hd.core 'label "(defn label \"L.\" [x] (str \"##\" x))" :prompt "another real change")
+        (ops/edit-replace! sess 'hd.core-test 'label-t "(deftest label-t (is (= \"##1\" (c/label 1))))" :prompt "pin it")
+        (ops/add-form! sess 'hd.core "(defn ^{:entry-point \"a demo tool\"} shout \"S.\" [x] (str x \"!\"))" :prompt "untested, so this done holds")
+        (swap! sess assoc :untested-waivers {"hd.core/price" "the fixture says so"})
+        (let [r (external/done! sess :label "waived but held")]
+          (swap! sess dissoc :untested-waivers)
+          (is (not (:landed (:land r))) "fixture: shout still holds it"))
+        (ops/edit-replace! sess 'hd.core 'shout "(defn ^{:entry-point \"a demo tool\" :untested-ok \"it only prints\"} shout \"S.\" [x] (str x \"!\"))" :prompt "say why")
+        (let [r (external/done! sess :label "no second waiver")]
+          (is (:landed (:land r)) (pr-str (:findings r)))))
       (finally (ops/close! sess)))))

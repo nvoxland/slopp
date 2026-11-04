@@ -1278,6 +1278,7 @@
   ;; red still stood for the commit point (2026-09-06, on slopp itself).
   (let [sess (external/open!)]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'dl.core "(ns dl.core)\n")
       (ops/add-form! sess 'dl.core "(defn keep-me \"Kept.\" [] 1)" :prompt "fixture" :agent "del")
       (ops/add-form! sess 'dl.core "(defn ^:unused-ok caller \"Uses keep-me.\" [] (keep-me))" :prompt "fixture" :agent "del")

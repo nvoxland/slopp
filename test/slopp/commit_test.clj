@@ -18,6 +18,7 @@
 (deftest ^:external commit-point-marks-a-verified-commit-point
   (let [sess (external/open!)]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'cm.core seed)
       (ops/edit-replace! sess 'cm.core 'f-t "(deftest f-t (is (= 11 (f 1))))"
                          :prompt "red first" :agent "alice")
@@ -146,6 +147,7 @@
   ;; TOUCHED red one does — a-commit-point-catches-a-touched-red-external-test.
   (let [sess (external/open!)]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'mg.bad "(ns mg.bad)\n\n(defn f \"F.\" [x] x)\n")
       (ops/ingest! sess 'mg.bad-test
                    (str "(ns mg.bad-test (:require [mg.bad :as bad]\n"

@@ -1263,50 +1263,83 @@
   [{:key :dialect :severity :refuse}])
 
 (defn red-proof-check!
-  "Done rule: every production function this episode changed must be SHOWN to
-  need the change. Its version from the last done is loaded into the image and
-  the in-image tests that ran it are run (`mutate/prove!`); a test that fails
-  against the old version is the proof. A new function needs a test that runs
-  it. A docstring-only edit or a rename is not a behaviour change and is not
-  checked.
+  "Done rule: every production function changed since the last LANDED done must
+  be SHOWN to need the change. `mutate/prove!` builds the state before the change
+  and runs the tests that cover it; a test that fails there is the proof. A new
+  function is a stub that throws in that state, so its test goes truly red. A
+  docstring-only edit or a rename is not a behaviour change and is not checked.
 
   Proof is checked, not trusted to the order the agent wrote things in: a test
   written after the fix proves it as well as one written before. The strongest
   single oracle measured for agent work is a test that fails without the fix;
   a suite that was already green says little about a change.
 
-  Two exits, both visible in review: `^{:untested-ok \"why\"}` on a function no
+  Judged from the last LANDED done, not the last done: a held done is still a
+  done, and measuring from it made the held function look unchanged, so the next
+  done landed it unproven.
+
+  Exits, all visible in review: `^{:untested-ok \"why\"}` on a function no
   in-image test can watch, and the session's `:untested-waivers`
-  (`{\"ns/name\" \"why\"}`, from the done call) for a change that keeps
-  behaviour, such as a refactor. A waiver is reported as an `:info` row. What
-  the image cannot judge (only `^:external` tests run it, the old version no
-  longer loads, the budget ran out) is `:info` too: never a hold."
+  (`{\"ns/name\" \"why\"}`, from the done call) for a change that keeps behaviour,
+  such as a refactor. A waiver is an `:info` row carrying the version it covered,
+  so a later done on that same version needs no second one, and any further edit
+  ends it. A pull lends `:proof-trusted`, the text its stamped commits brought:
+  those forms earned their proof where they were written. What the image cannot
+  judge (only `^:external` tests run it, the old version no longer loads, the
+  budget ran out) is `:info` too, never a hold."
   [session st* changed]
-  (let [{:keys [image test-map untested-waivers]} @session
-        old    (:sources (first (:baselines st*)))
-        cands  (for [t (mutate/targets st* (or test-map {}) changed)
-                     :let [e (store/form-by-id st* (:fid t))
-                           o (get old (:fid t))]
-                     :when (and e (not (:untested-ok (store/form-name-meta e)))
-                                (or (nil? o) (mutate/behaviour-change? o (n/string (:node e)))))]
-                 (assoc t :old o))
-        waived (filterv #(contains? untested-waivers (str (:form %))) cands)
-        ts     (vec (remove #(contains? untested-waivers (str (:form %))) cands))]
-    (if (or (nil? image) (and (empty? ts) (empty? waived)))
+  (let [{:keys [image test-map untested-waivers proof-trusted db line]} @session
+        ds       (vec (:recent st*))
+        landed?  #(and (= :done (:op %)) (= :green (get-in % [:findings :episode-status])))
+        boundary (:id (last (filter landed? ds)))
+        since    (if boundary (rest (drop-while #(not= boundary (:id %)) ds)) ds)
+        fids     (vec (distinct (concat changed (keep :form-id since))))
+        old      (if (and db boundary)
+                   (db/sources-at db (or line (db/trunk-line-id! db)) boundary fids)
+                   (:sources (first (:baselines st*))))
+        earlier  (into {} (for [d since :when (= :done (:op d))
+                                row (get-in d [:findings :unproven-change])
+                                [f sig] (:sigs row)]
+                            [(str f) sig]))
+        waived?  (fn [t] (or (contains? untested-waivers (str (:form t)))
+                             (and (earlier (str (:form t)))
+                                  (= (earlier (str (:form t))) (mutate/form-sig st* (:fid t))))))
+        cands    (for [t (mutate/targets st* (or test-map {}) fids)
+                       :let [e (store/form-by-id st* (:fid t))
+                             o (get old (:fid t))
+                             s (when e (n/string (:node e)))]
+                       :when (and e (not (:untested-ok (store/form-name-meta e)))
+                                  (not (and proof-trusted (str/includes? proof-trusted s)))
+                                  (or (nil? o) (mutate/behaviour-change? o s)))]
+                   (assoc t :old o))
+        named    (filterv #(contains? untested-waivers (str (:form %))) cands)
+        ts       (vec (remove waived? cands))]
+    (if (or (nil? image) (and (empty? ts) (empty? named)))
       []
       (into (mutate/proof-findings
              (let [outside? (fn [t] (and (empty? (:tests t))
-                                         (seq (slopp.index.refs/covered-by st* nil (:form t)))))
+                                         (seq (refs/covered-by st* nil (:form t)))))
                    [ext own] ((juxt filter remove) outside? ts)]
                (concat (for [t ext]
                          (assoc (select-keys t [:form :fid]) :status :unprovable
                                 :why "only tests outside the image reach it"))
-                       (when (seq own) (mutate/prove! image st* (vec own))))))
-            (when (seq waived)
+                       (when (seq own)
+                         (let [target? (set (map :fid cands))
+                               defs    (into {}
+                                             (for [fid fids
+                                                   :let [src (get old fid) e (store/form-by-id st* fid)
+                                                         s   (when e (n/string (:node e)))]
+                                                   :when (and src s (not (target? fid)) (not= src s)
+                                                              (not (str/ends-with? (str (store/ns-of-form-id st* fid)) "-test"))
+                                                              (re-find #"^\(def " s))]
+                                               [fid src]))]
+                           (mutate/prove! image st* (vec own) :also-old defs))))))
+            (when (seq named)
               [{:severity :info
-                :waived   (into {} (map (fn [t] [(:form t) (get untested-waivers (str (:form t)))])) waived)
+                :waived   (into {} (map (fn [t] [(:form t) (get untested-waivers (str (:form t)))])) named)
+                :sigs     (into {} (map (fn [t] [(:form t) (mutate/form-sig st* (:fid t))])) named)
                 :teach    (str "no test was asked to show these changes were needed: "
-                               (str/join "; " (for [t waived]
+                               (str/join "; " (for [t named]
                                                 (str (:form t) " (" (get untested-waivers (str (:form t))) ")"))))}])))))
 
 (def done-advisories

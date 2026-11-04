@@ -24,6 +24,7 @@
         said   (atom [])
         entry  (fn [v] (str "(defn -main \"Runs.\" [& _] (println \"worker says hi\") (spit \"" marker "\" \"" v "\"))"))]
     (try
+      (ops/config-file! agent "rules" :key "unproven-change" :value "off" :prompt "this fixture is about re-serving, not test proof")
       (ops/ingest! agent 'worker.core (str "(ns worker.core)\n\n" (entry "v1") "\n") :agent "a")
       (ops/config-file! agent "capabilities" :key "app.main" :value "worker.core/-main" :prompt "the dev instance")
       (external/done! agent :label "v1" :agent "a")

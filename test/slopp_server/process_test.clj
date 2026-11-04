@@ -266,6 +266,7 @@
           (is (nil? (:image @sa)) "thread bookkeeping needs no image"))
 
         (testing "a write in one session boots its image, and its landed work reaches the other without one"
+          (call b "config_file" {:path "rules" :key "unproven-change" :value "off" :thread "t-b" :prompt "this fixture is not about test proof"})
           (call b "ns_create" {:ns "lz.core" :thread "t-b" :prompt "lazy fixture"
                                :source "(ns lz.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n"})
           (is (some? (:image @sb)) "the write booted the writer's image")
@@ -371,6 +372,7 @@
       (let [a (get-in (post nil init) [:headers "Mcp-Session-Id"])
             b (get-in (post nil init) [:headers "Mcp-Session-Id"])]
         (call a "query_search" {:pattern "defn"})
+        (call b "config_file" {:path "rules" :key "unproven-change" :value "off" :thread "t-b" :prompt "this fixture is not about test proof"})
         (call b "ns_create" {:ns "ev.core" :thread "t-b" :prompt "event fixture"
                              :source "(ns ev.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n"})
         (call b "done" {:thread "t-b" :label "land it"})
@@ -448,6 +450,7 @@
   (let [d (tmp-dir!)
         w (external/open! {:slopp.ops/dir d :slopp.ops/agent-id "w"})]
     (try
+      (ops/config-file! w "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! w 'sh.core "(ns sh.core)\n")
       (let [r (ops/add-form! w 'sh.core "(defn ^:unused-ok f \"F.\" [] 1)" :prompt "fixture" :agent "w")]
         (is (nil? (:error r)) (pr-str r)))

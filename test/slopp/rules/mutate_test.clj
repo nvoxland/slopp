@@ -234,14 +234,19 @@
 
 (deftest ^:external a-change-is-proven-by-a-test-that-fails-on-its-old-version
   (let [src (str "(ns demo.prove)\n\n"
+                 "(def k 2)\n\n"
                  "(defn fixed \"F.\" [x] (inc x))\n\n"
                  "(defn same \"S.\" [x] (inc x))\n\n"
                  "(defn fresh \"N.\" [x] x)\n\n"
                  "(defn lonely \"L.\" [x] x)\n\n"
-                 "(defn extonly \"E.\" [x] x)\n")
+                 "(defn extonly \"E.\" [x] x)\n\n"
+                 "(defn left \"half of a fix\" [x] (max x 5))\n\n"
+                 "(defn right \"half of a fix\" [x] (max x 5))\n\n"
+                 "(defn uses-k \"U.\" [x] (* k x))\n")
         s   (store/ingest (store/empty-store) 'demo.prove src)
         fid #(:id (store/form-named s 'demo.prove %))
-        h   (repl/start!)]
+        h   (repl/start!)
+        t   (fn [nm tests old] {:fid (fid nm) :form (symbol "demo.prove" (str nm)) :tests tests :old old})]
     (try
       (repl/eval! h (str src
                          "(ns demo.prove-test (:require [clojure.test :refer [deftest is]] [demo.prove :as p]))\n"
@@ -249,17 +254,18 @@
                          "(deftest same-t (is (= 2 (p/same 1))))\n"
                          "(deftest fresh-t (is (= 1 (p/fresh 1))))\n"
                          "(deftest ^:external ext-t (is (= 1 (p/extonly 1))))\n"
+                         "(deftest spread-t (is (= 5 (max (p/left 0) (p/right 0)))))\n"
+                         "(deftest k-t (is (= 4 (p/uses-k 2))))\n"
                          "(in-ns 'user)"))
-      (let [rs (mutate/prove! h s [{:fid (fid 'fixed) :form 'demo.prove/fixed :tests '[demo.prove-test/fixed-t]
-                                    :old "(defn fixed \"F.\" [x] x)"}
-                                   {:fid (fid 'same) :form 'demo.prove/same :tests '[demo.prove-test/same-t]
-                                    :old "(defn same \"S.\" [x] (+ x 1))"}
-                                   {:fid (fid 'fresh) :form 'demo.prove/fresh :tests '[demo.prove-test/fresh-t]
-                                    :old nil}
-                                   {:fid (fid 'lonely) :form 'demo.prove/lonely :tests []
-                                    :old "(defn lonely \"L.\" [x] 0)"}
-                                   {:fid (fid 'extonly) :form 'demo.prove/extonly :tests '[demo.prove-test/ext-t]
-                                    :old "(defn extonly \"E.\" [x] 0)"}]
+      (let [rs (mutate/prove! h s [(t 'fixed '[demo.prove-test/fixed-t] "(defn fixed \"F.\" [x] x)")
+                                   (t 'same '[demo.prove-test/same-t] "(defn same \"S.\" [x] (+ x 1))")
+                                   (t 'fresh '[demo.prove-test/fresh-t] nil)
+                                   (t 'lonely [] "(defn lonely \"L.\" [x] 0)")
+                                   (t 'extonly '[demo.prove-test/ext-t] "(defn extonly \"E.\" [x] 0)")
+                                   (t 'left '[demo.prove-test/spread-t] "(defn left \"half of a fix\" [x] x)")
+                                   (t 'right '[demo.prove-test/spread-t] "(defn right \"half of a fix\" [x] x)")
+                                   (t 'uses-k '[demo.prove-test/k-t] "(defn uses-k \"U.\" [x] (* x k))")]
+                           :also-old {(fid 'k) "(def k 1)"}
                            :budget-ms 30000)
             by (into {} (map (juxt :form identity)) rs)]
         (testing "a test that fails against the old version proves the change, and names itself"
@@ -267,23 +273,30 @@
           (is (= 'demo.prove-test/fixed-t (:by (by 'demo.prove/fixed)))))
         (testing "tests that pass against both versions prove nothing"
           (is (= :unproven (:status (by 'demo.prove/same)))))
-        (testing "a new function needs only a test that runs it"
-          (is (= :new (:status (by 'demo.prove/fresh)))))
+        (testing "a new function's test really goes red: in the red state it is a stub that throws"
+          (is (= :proven (:status (by 'demo.prove/fresh))))
+          (is (= 'demo.prove-test/fresh-t (:by (by 'demo.prove/fresh)))))
+        (testing "a fix spread over two functions is proven, though reverting either alone still passes"
+          (is (= :proven (:status (by 'demo.prove/left))))
+          (is (= :proven (:status (by 'demo.prove/right)))))
+        (testing "a changed def goes back with the rest"
+          (is (= :proven (:status (by 'demo.prove/uses-k)))))
         (testing "a changed function no test runs is uncovered"
           (is (= :uncovered (:status (by 'demo.prove/lonely)))))
         (testing "what only the external tier runs cannot be judged in the image"
           (is (= :unprovable (:status (by 'demo.prove/extonly)))))
-        (testing "the current code is back in the image afterwards"
+        (testing "the current code is back in the image afterwards, stubs and all"
           (is (= [2] (repl/eval! h "(demo.prove/fixed 1)")))
-          (is (= [1] (repl/eval! h "(demo.prove/extonly 1)")))))
+          (is (= [1] (repl/eval! h "(demo.prove/extonly 1)")))
+          (is (= [7] (repl/eval! h "(demo.prove/fresh 7)")))
+          (is (= [5] (repl/eval! h "(demo.prove/left 0)")))
+          (is (= [2] (repl/eval! h "demo.prove/k")))))
       (testing "an old version that no longer loads cannot be judged, and the real one comes back"
-        (let [[r] (mutate/prove! h s [{:fid (fid 'fixed) :form 'demo.prove/fixed :tests '[demo.prove-test/fixed-t]
-                                       :old "(defn fixed [x] (no-such-fn x))"}])]
+        (let [[r] (mutate/prove! h s [(t 'fixed '[demo.prove-test/fixed-t] "(defn fixed [x] (no-such-fn x))")])]
           (is (= :unprovable (:status r)) (pr-str r))
           (is (= [2] (repl/eval! h "(demo.prove/fixed 1)")))))
       (testing "a spent budget checks nothing and says so"
         (is (= [:unchecked]
-               (mapv :status (mutate/prove! h s [{:fid (fid 'fixed) :form 'demo.prove/fixed
-                                                  :tests '[demo.prove-test/fixed-t] :old "(defn fixed [x] x)"}]
+               (mapv :status (mutate/prove! h s [(t 'fixed '[demo.prove-test/fixed-t] "(defn fixed [x] x)")]
                                             :budget-ms 0)))))
       (finally (repl/stop! h)))))

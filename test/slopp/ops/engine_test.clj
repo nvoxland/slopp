@@ -737,6 +737,7 @@
         a   (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "a"})]
     (try
       (ops/ingest! a 'ro.core "(ns ro.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n")
+      (ops/config-file! a "rules" :key "unproven-change" :value "off" :prompt "this fixture is about render order, not test proof")
       (external/done! a :label "seed" :agent "a")
       (let [b (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "b"})]
         (try

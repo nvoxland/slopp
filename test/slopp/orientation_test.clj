@@ -189,6 +189,7 @@
 (deftest ^:external report-composes-the-handoff
   (let [sess (external/open!)]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'rp.core "(ns rp.core)\n(defn ^:unused-ok f [x] x)\n")
       (external/commit-point! sess "seed rp" :agent "t")
       (ops/edit-replace! sess 'rp.core 'f "(defn ^:unused-ok f [x] (inc x))"

@@ -114,6 +114,7 @@
   (let [dir  (temp-dir)
         sess (external/open! {:slopp.ops/dir dir})]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'gp.core seed)
       ;; G5: commit-points stamp a configured author; pin it so the assertions
       ;; below don't depend on this machine's global git config
@@ -165,6 +166,7 @@
   (let [dir  (temp-dir)
         sess (external/open! {:slopp.ops/dir dir})]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'gp.core seed)
       (external/commit-point! sess "v1: f ships" :agent "alice")
       (branch/branch! sess "feature")
@@ -443,6 +445,7 @@
   (let [dir  (temp-dir)
         sess (external/open! {:slopp.ops/dir dir})]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (is (pos? (:forms (ops/ingest! sess 'po.core "(ns po.core)\n(defn ^:unused-ok a [] 1)\n"))))
       (is (nil? (:error (ops/add-form! sess 'po.core "(defn ^:unused-ok c [] 2)" :prompt "c"))))
       ;; a now needs c, which was created AFTER it: the live write reorders
@@ -472,6 +475,7 @@
         has? (fn [ctx sha] (.has (.getObjectDatabase ^org.eclipse.jgit.lib.Repository (:slopp.git/repo ctx))
                                  (org.eclipse.jgit.lib.ObjectId/fromString sha)))]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'gp.core seed)
       (external/config! sess "user.name" "alice")
       (external/config! sess "user.email" "alice@slopp")
@@ -517,8 +521,8 @@
                           (finally (git/close-ctx! ctx)))))
         counting (fn [f]
                    ;; how many times the projection went to the journal
-                   (let [n (atom 0) orig slopp.store.db/deltas-after]
-                     (with-redefs [slopp.store.db/deltas-after (fn [& a] (swap! n inc) (apply orig a))]
+                   (let [n (atom 0) orig db/deltas-after]
+                     (with-redefs [db/deltas-after (fn [& a] (swap! n inc) (apply orig a))]
                        [(f) @n])))
         rebuild! (fn []
                    ;; the full walk, from nothing: no cache, no pins
@@ -529,6 +533,7 @@
                           (git/ensure-projected! ctx)
                           (finally (git/close-ctx! ctx)))))]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'gp.core seed)
       (external/config! sess "user.name" "alice")
       (external/config! sess "user.email" "alice@slopp")
@@ -568,6 +573,7 @@
   (let [dir  (temp-dir)
         sess (external/open! {:slopp.ops/dir dir})]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'gp.core seed)
       (external/config! sess "user.name" "alice")
       (external/config! sess "user.email" "alice@slopp")

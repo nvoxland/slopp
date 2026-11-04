@@ -734,20 +734,32 @@
   tip becomes a `:git-sha` chain node, so our next commit-point parents on it and
   pushes stay fast-forward.
 
+  When every incoming commit says slopp minted it from a passing done
+  (`git/proven-range?`), the session is lent that text as `:proof-trusted` for
+  this one pull: those functions proved their changes where they were written.
+  It is the text and not a yes/no so that a local edit made alongside the pull
+  is still judged.
+
   This is the git ADAPTER, and it is deliberately this thin: `tree-at` twice
   and a label. Everything import actually does is below it and touches no
   repository."
   [session ctx url mb tip agent]
-  (let [repo (:slopp.git/repo ctx)]
-    (assoc (apply-trees! session
-                         (git/tree-at repo mb)
-                         (git/tree-at repo tip)
-                         {:agent  agent
-                          :origin tip
-                          :label  (str "pull " (subs tip 0 8) " from " url)
-                          :extra  {:git-sha tip}
-                          :retry  "git_pull"})
-           :base tip)))
+  (let [repo   (:slopp.git/repo ctx)
+        theirs (git/tree-at repo tip)
+        text   (when (git/proven-range? repo mb tip)
+                 (apply str (filter string? (vals theirs))))]
+    (when text (swap! session assoc :proof-trusted text))
+    (try
+      (assoc (apply-trees! session
+                           (git/tree-at repo mb)
+                           theirs
+                           {:agent  agent
+                            :origin tip
+                            :label  (str "pull " (subs tip 0 8) " from " url)
+                            :extra  {:git-sha tip}
+                            :retry  "git_pull"})
+             :base tip)
+      (finally (swap! session dissoc :proof-trusted)))))
 
 (defn pull!
   "Absorb the remote's changes since the last common point into the LIVE

@@ -2241,14 +2241,21 @@ client-deps (merge (:client-deps st) (:client provided))
                         (keep (fn [[k rows]]
                                 (when (and (sequential? rows) (sequential? (get prev-adv k)))
                                   (let [old (into #{} (map carried-key) (get prev-adv k))
-                                        n   (count (filter #(old (carried-key %)) rows))]
+                                        ;; a row that holds the landing is never
+                                        ;; carried: repeating it must keep holding,
+                                        ;; and keep saying what is wrong
+                                        n   (count (filter #(and (old (carried-key %))
+                                                                 (not (rules/status-affecting-fired? st* {k [%]})))
+                                                       rows))]
                                     (when (pos? n) [k n])))))
                         advisories)
       advisories  (into {}
                         (keep (fn [[k rows]]
                                 (if (contains? carried k)
                                   (let [old  (into #{} (map carried-key) (get prev-adv k))
-                                        kept (vec (remove #(old (carried-key %)) rows))]
+                                        kept (vec (remove #(and (old (carried-key %))
+                                                                (not (rules/status-affecting-fired? st* {k [%]})))
+                                                          rows))]
                                     (when (seq kept) [k kept]))
                                   [k rows])))
                         advisories)

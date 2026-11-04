@@ -56,6 +56,7 @@
 (deftest ^:external done-surfaces-key-typos-as-advisory
   (let [sess (external/open!)]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'kt.core
                    (str "(ns kt.core)\n"
                         ;; ^:unused-ok throughout: done now scans the whole

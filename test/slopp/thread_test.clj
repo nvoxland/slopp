@@ -387,6 +387,7 @@
     (try
       (let [setup (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "setup"})]
         (try
+          (ops/config-file! setup "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
           (ops/ingest! setup 'fr.core
                        (str "(ns fr.core (:require [clojure.test :refer [deftest is]]))\n"
                             "(defn f \"F.\" [x] (inc x))\n"
@@ -589,6 +590,7 @@
   (let [dir (str (java.nio.file.Files/createTempDirectory "fb" (make-array java.nio.file.attribute.FileAttribute 0)))
         a   (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "alice"})]
     (try
+      (ops/config-file! a "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (is (nil? (:error (ops/ingest! a 'fb.core "(ns fb.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n"))))
       (is (nil? (:error (external/done! a :label "land" :agent "alice"))))
       ;; alice is on a rowless thread; bob moves the branch

@@ -354,69 +354,6 @@
       (not= (:name o) (:name n')) false
       :else (not= (:body o) (:body n')))))
 
-(defn- prove-form!
-  "Judge one target `{:fid :form :tests :old}` (see [[prove!]]): load its old
-  version into `image`, run its tests, restore the real form from `store`."
-  [image store {:keys [fid tests old] :as target} per-run-ms left]
-  (let [base   (select-keys target [:form :fid :tests])
-        ns-sym (store/ns-of-form-id store fid)]
-    (cond
-      (empty? tests) (assoc base :status :uncovered)
-      (nil? old)     (assoc base :status :new)
-      :else
-      (let [st'  (try (first (store/replace-node store ns-sym fid (p/parse-string old)))
-                      (catch Throwable _ nil))
-            err  (if st' (hotload/hot-load-form! image st' fid) "it does not parse")
-            r    (when (nil? err)
-                   (try (first (repl/eval! image (run-string tests (max 1 (min per-run-ms (left))))))
-                        (catch Throwable t (str t))))
-            back (when st' (hotload/hot-load-form! image store fid))]
-        (cond
-          back           (assoc base :status :restore-failed :error back)
-          err            (assoc base :status :unprovable
-                                :why (str "its version from the last done no longer loads (" err ")"))
-          (not (map? r)) (assoc base :status :unprovable :why (str r))
-          (:killed-by r) (assoc base :status :proven :by (:killed-by r))
-          (:timeout r)   (assoc base :status :proven :by :timeout)
-          (zero? (:ran r 0)) (assoc base :status :unprovable :why "only tests outside the image run it")
-          :else          (assoc base :status :unproven))))))
-
-(defn ^:export prove!
-  "Check that each changed function's tests NEED the change. A target is
-  `{:fid :form :tests :old}`, where `:old` is the function's source at the
-  last done (nil when it is new). The old version is loaded into `image`, the
-  in-image tests that ran the function are run, and the real form is restored
-  from `store`. Statuses:
-
-  - `:proven` (with `:by`, the test) — a test fails against the old version,
-    so it shows the change was needed. A timeout counts: the old version
-    behaves differently enough to hang.
-  - `:unproven` — every test passes against both versions.
-  - `:new` — no old version, and a test runs it. A test of a new function
-    cannot pass without it, so running is enough.
-  - `:uncovered` — no in-image test runs it.
-  - `:unprovable` (with `:why`) — the image cannot judge: only `^:external`
-    tests run it, or the old version no longer loads.
-  - `:unchecked` — the `:budget-ms` (default 10s) ran out first.
-  - `:restore-failed` — the image may still hold the old version; stops the
-    run, since every later result would be about the wrong code.
-
-  This is mutation testing with one mutant chosen by history instead of by a
-  rule: the version the agent replaced."
-  [image store targets & {:keys [budget-ms per-run-ms] :or {budget-ms 10000 per-run-ms 5000}}]
-  (let [t0   (System/currentTimeMillis)
-        left #(- budget-ms (- (System/currentTimeMillis) t0))]
-    (loop [[t & more :as todo] (sort-by (comp count :tests) targets) out []]
-      (cond
-        (nil? t) out
-        (<= (left) 0)
-        (into out (map #(assoc (select-keys % [:form :fid :tests]) :status :unchecked)) todo)
-        :else
-        (let [r (prove-form! image store t per-run-ms left)]
-          (if (= :restore-failed (:status r))
-            (conj out r)
-            (recur more (conj out r))))))))
-
 (defn ^:export proof-findings
   "Done findings from [[prove!]] `results`. An `:unproven` or `:uncovered`
   function is a finding on its form, and it holds the landing. What the image
@@ -449,3 +386,96 @@
                                                                         (some-> (:status r) name)) ")")))
                                (when (seq (:restore-failed by))
                                  ". The image may still hold an old version; `build {op restart}` rebuilds it"))}]))))))
+
+(defn run-all-string
+  "A self-contained eval string for the IMAGE: run every one of `tests`
+  (qualified deftest symbols) and answer `{:failed [t …] :passed [t …] :skipped
+  n}`, with `:timeout true` when `timeout-ms` passed first; what finished before
+  then still counts. The sibling of [[run-string]], which stops at the first
+  failure because one failure kills a mutant: a red state judges many functions
+  at once, so it needs every test's result. The same tests are skipped, for the
+  same reason: `^:external` and `^:integration` only behave in the external tier."
+  [tests timeout-ms]
+  (format
+   (str "(do (require 'clojure.test)"
+        " (let [res (atom {:failed [] :passed [] :skipped 0})"
+        "       run (fn [] (doseq [t '%s]"
+        "    (let [v (try (resolve t) (catch Exception _ nil)) m (meta v)]"
+        "     (if (or (nil? v) (not (:test m)) (:external m) (:integration m))"
+        "      (swap! res update :skipped inc)"
+        "      (let [c (binding [clojure.test/*report-counters* (ref clojure.test/*initial-report-counters*)"
+        "                        clojure.test/*test-out* (java.io.StringWriter.)]"
+        "                (clojure.test/test-vars [v]) @clojure.test/*report-counters*)]"
+        "       (swap! res update (if (pos? (+ (:fail c 0) (:error c 0))) :failed :passed) conj t))))) ::done)"
+        "       f (future (run))"
+        "       r (deref f %d ::timeout)]"
+        "   (when (= r ::timeout) (future-cancel f))"
+        "   (cond-> @res (= r ::timeout) (assoc :timeout true))))")
+   (pr-str (vec (distinct tests))) (long timeout-ms)))
+
+(defn- load-old!
+  "Put `fid`'s version from `old` (source text) into `image`; nil `old` means the
+  form is new, so `form` becomes a stub that throws. Returns nil, or why it could
+  not load."
+  [image store fid form old]
+  (if (nil? old)
+    (let [r (try (repl/eval! image (format "(do (intern '%s '%s (fn [& _] (throw (ex-info \"absent before this change\" {})))) :stubbed)"
+                                           (namespace form) (name form)))
+                 (catch Throwable t [(str t)]))]
+      (when (not= [:stubbed] r) (str r)))
+    (let [st' (try (first (store/replace-node store (store/ns-of-form-id store fid) fid (p/parse-string old)))
+                   (catch Throwable _ nil))]
+      (if st' (hotload/hot-load-form! image st' fid) "it does not parse"))))
+
+(defn ^:export prove!
+  "Check that each changed function's tests NEED the change, by building the
+  state before it. A target is `{:fid :form :tests :old}`, where `:old` is the
+  function's source at the last done (nil when it is new). Every target goes back
+  together: its old version loaded into `image`, or a stub that throws when it is
+  new; `:also-old` (`{fid source}`) sends other changed forms back too, such as a
+  `def`. The tests run once, then `store`'s versions are restored.
+
+  One state rather than one function at a time, because a change is usually more
+  than one function: a fix spread over two passes with either half alone, and a
+  new function can only go red if it is absent. Statuses:
+
+  - `:proven` (with `:by`, the test) — one of its tests failed in that state.
+  - `:unproven` — its tests all passed in that state.
+  - `:uncovered` — no in-image test runs it.
+  - `:unprovable` (with `:why`) — the image cannot judge: only `^:external`
+    tests run it, or its old version no longer loads.
+  - `:unchecked` — the `:budget-ms` (default 10s) ran out before its tests did.
+  - `:restore-failed` — the image may still hold an old version."
+  [image store targets & {:keys [budget-ms also-old] :or {budget-ms 10000}}]
+  (let [base   #(select-keys % [:form :fid :tests])
+        {none true some-tests false} (group-by (comp empty? :tests) targets)
+        nope   (mapv #(assoc (base %) :status :uncovered) none)]
+    (if (<= budget-ms 0)
+      (into nope (map #(assoc (base %) :status :unchecked)) some-tests)
+      (let [errs   (into {} (keep (fn [{:keys [fid form old]}]
+                                    (when-let [e (load-old! image store fid form old)] [fid e])))
+                         some-tests)
+            _      (doseq [[fid src] also-old]
+                     (load-old! image store fid nil src))
+            loaded (remove (comp errs :fid) some-tests)
+            r      (when (seq loaded)
+                     (try (first (repl/eval! image (run-all-string (mapcat :tests loaded) budget-ms)))
+                          (catch Throwable t (str t))))
+            back   (first (keep #(hotload/hot-load-form! image store %)
+                                (concat (map :fid some-tests) (keys also-old))))
+            failed (set (:failed r))
+            ran    (into failed (:passed r))]
+        (if back
+          (into nope (map #(assoc (base %) :status :restore-failed :error back)) some-tests)
+          (into nope
+                (for [{:keys [fid tests] :as t} some-tests]
+                  (let [b (base t) by (first (filter failed tests))]
+                    (cond
+                      (errs fid)     (assoc b :status :unprovable
+                                            :why (str "its version from the last done no longer loads (" (errs fid) ")"))
+                      (not (map? r)) (assoc b :status :unprovable :why (str r))
+                      by             (assoc b :status :proven :by by)
+                      
+                      (and (:timeout r) (not-every? ran tests)) (assoc b :status :unchecked)
+                      (not-any? ran tests) (assoc b :status :unprovable :why "only tests outside the image run it")
+                      :else          (assoc b :status :unproven))))))))))

@@ -34,6 +34,7 @@
 (deftest ^:external done-flags-arity-narrowing-on-a-boundary-fn
   (let [sess (external/open!)]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'bc.core
                    "(ns bc.core)\n(defn ^:unused-ok handle \"H.\" ([x] x) ([x y] (+ x y)))\n")
       (external/done! sess :label "baseline")

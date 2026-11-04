@@ -313,6 +313,7 @@
   ;; what is not. Reports the whole namespace, regardless of what was touched.
   (let [sess (external/open!)]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'adv.core
                    (str "(ns adv.core)\n\n"
                         "(def cache (atom {}))\n\n"

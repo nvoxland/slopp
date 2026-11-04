@@ -69,6 +69,7 @@
         entry (fn [v] (str "(ns worker.core)\n\n(defn -main \"Runs.\" [& _] (println " v "))\n"))
         agent (external/open! {:slopp.ops/dir dir})]
     (try
+      (ops/config-file! agent "rules" :key "unproven-change" :value "off" :prompt "this fixture is about building, not test proof")
       (ops/ingest! agent 'worker.core (entry ":v1") :agent "a")
       (ops/config-file! agent "capabilities" :key "app.main" :value "worker.core/-main" :prompt "the entry")
       (let [d (external/done! agent :label "v1" :agent "a")]

@@ -26,6 +26,7 @@
   (let [dir  (temp-dir "slopp-git-conc")
         sess (external/open! {:slopp.ops/dir dir})]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is about projection, not test proof")
       (ops/ingest! sess 'gc.core seed)
       (external/commit-point! sess "v1" :agent "alice")
       (ops/edit-replace! sess 'gc.core 'f "(defn f [x] (+ 10 x))"
@@ -76,6 +77,7 @@
         ctx   (git/open-ctx! dir)
         tip   (fn [c] (get-in (git/ensure-projected! c) [:refs "main"]))]
     (try
+      (ops/config-file! sess1 "rules" :key "unproven-change" :value "off" :prompt "this fixture is about projection, not test proof")
       (ops/ingest! sess1 'gc.core seed)
       (external/commit-point! sess1 "v1" :agent "alice")
       (let [tip1 (tip ctx)]
