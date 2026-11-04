@@ -18,7 +18,7 @@
             [slopp.ops :as ops]
             [slopp.kernel.boot :as boot]
             [slopp.store.db :as db]
-            [slopp.git :as git] [rewrite-clj.node :as n] [rewrite-clj.parser :as p] [slopp.store :as store] [slopp.git.client :as git.client] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store.render :as store.render] [slopp.edit.modules :as edit.modules] [slopp.store.merge :as merge] [slopp.ops.branch :as branch]))
+            [slopp.git :as git] [rewrite-clj.node :as n] [rewrite-clj.parser :as p] [slopp.store :as store] [slopp.git.client :as git.client] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store.render :as store.render] [slopp.edit.modules :as edit.modules] [slopp.store.merge :as merge] [slopp.ops.branch :as branch] [slopp.edit.security :as security]))
 
 (defn path-ns
   "`src/foo/bar_baz.clj` → `foo.bar-baz`; nil for anything that is not a
@@ -466,194 +466,6 @@
    {:platforms {} :roles {}}
    paths))
 
-(defn clone!
-  "Clone git remote `url` into `dir` as a fileless slopp store: fetch the
-  slopp-owned branch (`:branch`, else \"slopp\", else the legacy \"main\"),
-  restore the deps manifest from the remote deps.edn, ingest every namespace
-  through the verified write path (dependency order — reuses slopp.kernel.boot's
-  require-graph sort), and record `git-remote`/`git-base-sha`
-  so the projection grafts onto the remote's history and later syncs use the
-  same branch. Ingest is byte-exact, so a fresh clone's live tree equals the
-  remote tree (no phantom wip).
-  Returns {:dir :namespaces n :base sha :branch b} | {:error msg}."
-  [url dir & {:keys [token agent branch]}]
-  (if (and (.exists (io/file dir ".slopp" "store.db"))
-       (not (empty-store? dir)))
-    {:error (str dir " already has a store — clone into a fresh dir")}
-    (let [repo (git/open-repo! nil)]
-      (try
-        (let [want (or branch "slopp/main")
-              {:keys [tip]} (git.client/fetch-remote! repo url :token token :branch want)
-              used want]
-          (if-not tip
-            {:error (str "remote has no " want " branch to clone: " url)}
-            (let [tree    (git/tree-at repo tip)
-                  sources (into {}
-                                (keep (fn [[path text]]
-                                        (when-let [ns-sym (path-ns path)]
-                                          [ns-sym text])))
-                                tree)
-                  deps    (or (some-> (get tree "deps.edn")
-                                      edn/read-string :deps)
-                              {})]
-              (if (empty? sources)
-                {:error (str "nothing to ingest at " url
-                             " — no src/**.clj or test/**.clj on " used)}
-                (let [sess (external/open! {:slopp.ops/dir dir})]
-                  (try
-                    (doseq [[lib coord] (sort-by (comp str key) deps)]
-                      (let [r (ops/deps-add! sess lib coord :agent agent
-                                             :prompt (str "clone: dep from " url))]
-                        (when (:error r)
-                          (throw (ex-info (str "dep " lib ": " (:error r)) {})))))
-                    ;; The two declarations the tree's PATHS carry, replayed
-                    ;; through the ordinary verbs so they land as the deltas an
-                    ;; agent's own declaration would — and replayed BEFORE the
-                    ;; ingests, because each ingest asks `jvm-loadable?` of its
-                    ;; namespace: a `.cljs` one declared afterwards was handed
-                    ;; to the JVM oracle as Clojure, and the clone died inside
-                    ;; it on `goog.object` (CI's via-slopp lane, importing
-                    ;; slopp's own tree). `path-ns` captures the name and drops
-                    ;; the root and the extension, which is exactly where role
-                    ;; and platform live, so without this a cloned `.cljc`
-                    ;; renders as `.clj` and an instrument materializes into
-                    ;; `src/` and ships.
-                    (let [{:keys [platforms roles]} (path-declarations (keys tree))]
-                      (doseq [[n pf] (sort platforms)]
-                        (ops/module-platform! sess n pf :agent agent
-                                              :prompt (str "clone: " n " is ." (name pf)
-                                                           " in the imported tree")))
-                      (doseq [[m _] (sort roles)]
-                        (ops/module-role! sess m :instrument :agent agent
-                                          :prompt (str "clone: " m
-                                                       " materializes under instruments/"))))
-                    (swap! sess assoc :adopting? true)
-                    (doseq [ns-sym (boot/dependency-order sources)]
-                      (let [r (ops/ingest! sess ns-sym (get sources ns-sym)
-                                           :agent agent
-                                           ;; the ask that created it — the one
-                                           ;; write here that had none, so an
-                                           ;; imported form's first version answered
-                                           ;; \"why does this exist\" with silence
-                                           :prompt (str "imported from git "
-                                                        (subs tip 0 (min 12 (count tip)))
-                                                        " (" url ")"))]
-                        (when (:error r)
-                          (throw (ex-info (str ns-sym ": " (:error r)) {})))))
-                    (swap! sess dissoc :adopting?)
-                    (ops/adopt-modules! sess :agent agent)
-                    (let [conn (:db @sess)]
-                      (db/set-meta! conn "git-remote" (str url))
-                      (doseq [[path text] tree
-                              :when (and (nil? (path-ns path))
-                                         (not= "deps.edn" path)
-                                         ;; a RENDERING of store state is not a
-                                         ;; file: `:config` entries are restored
-                                         ;; below and the module manifest is
-                                         ;; derived by adoption. Blobbing one
-                                         ;; writes a second copy of a fact the
-                                         ;; store holds, in a field the
-                                         ;; projection reads beside the first —
-                                         ;; and left `:config` EMPTY, so a fresh
-                                         ;; clone of slopp's own repo declared no
-                                         ;; app and its dev instance never came
-                                         ;; up, silently.
-                                         (not (store/projected-config-paths path)))]
-                        (ops/file-put! sess path text :agent agent
-                                       :prompt (str "clone: file from " url)))
-                      (doseq [[path text] tree
-                              :when (and (store/projected-config-paths path)
-                                         (not= "modules" path))]
-                        (ops/config-restore! sess path (store/parse-config :manifest text)
-                                             :agent agent
-                                             :prompt (str "clone: config from " url)))
-                      (db/set-meta! conn "git-base-sha" tip)
-                      ;; what git had before the import — the records answer
-                      ;; an agent otherwise shells out for (eval27 opus)
-                      (db/set-meta! conn "git-log" (pr-str (git/recent-commits repo tip 20)))
-                      ;; A clone establishes the PROJECT, so it lands on the
-                      ;; branch. Everything above went through the ordinary
-                      ;; verified write path, which means it went to this
-                      ;; session's thread — and a store whose main is empty is
-                      ;; not a clone of anything: the next serve would decide
-                      ;; the store was still empty and import all over again.
-                      (branch/land-thread! sess))
-                    ;; ACCOUNT for what was left behind. `:namespaces` counts what the clone
-                    ;; decided to take, so on its own a lossy import announces success
-                    ;; with a smaller number and nothing downstream can tell — which is
-                    ;; how `path-ns` dropped every .cljc and every instrument for three
-                    ;; weeks. A file slopp did not write is ordinary (build.clj, a
-                    ;; README); saying which ones is what makes the ordinary case
-                    ;; checkable instead of indistinguishable from the bug.
-                    (let [ignored (vec (sort (remove path-ns (keys tree))))
-                          ;; and for the DECLARATIONS it restored — a config path
-                          ;; that blobbed is invisible in `:namespaces` and the
-                          ;; store looks complete while every capability reads nil
-                          restored (into (sorted-map)
-                                         (for [[path text] tree
-                                               :when (and (store/projected-config-paths path)
-                                                          (not= "modules" path))]
-                                           [path (count (:values (store/parse-config :manifest text)))]))
-                          ;; ACCOUNT for the shape of what came in, not just the
-                          ;; count. Adoption derives the manifest from the code
-                          ;; as it stands, and an imported codebase can arrive
-                          ;; tangled — a module cycle needs only a cross-module
-                          ;; call in each direction, which is a codebase Clojure
-                          ;; loads happily. Since declaring an edge that closes a
-                          ;; cycle is refused, a clone is the one moment a knot
-                          ;; can enter, and reporting `:namespaces n` alone lets
-                          ;; it enter silently.
-                          cycles (vec (:cycles (store/module-layers
-                                                (:modules (:store @sess)))))]
-                      (cond-> {:dir (str dir) :namespaces (count sources)
-                               :base tip :branch used}
-                                                (seq ignored) (assoc :ignored ignored)
-                        (seq restored) (assoc :config restored)
-                        (seq cycles) (assoc :cycles cycles)))
-                    (catch clojure.lang.ExceptionInfo e
-                      {:error (str "clone failed at " (ex-message e)
-                                   " — partial store left at " dir
-                                   "; delete it to retry")})
-                    (finally (ops/close! sess))))))))
-        (catch Exception e
-          {:error (str "clone failed: " (ex-message e))})
-        (finally (.close repo))))))
-
-(defn import!
-  "THE onboarding command: inside a git checkout (main checked out, the
-  human's files on disk), build `.slopp/store.db` from the repo's slopp
-  BRANCH — found on local heads or the checkout's remote-tracking refs — and
-  configure the store to sync against the LOCAL repo (`git-remote \".\"`,
-  resolved relative to the store dir). Only `.slopp/` is created; the
-  working dir stays the human's checkout, and origin interaction stays with
-  regular git. Returns {:dir :namespaces :base :branch :remote} | {:error}."
-  [dir & {:keys [token branch agent]}]
-  (if-not (.exists (io/file dir ".git"))
-    {:error (str dir " is not a git checkout — clone the repo first"
-                 " (or use clone <url> <dir> for a fresh fileless store)")}
-    (let [r (clone! (str dir) (str dir) :token token :branch branch :agent agent)]
-      (if (:error r)
-        r
-        (do (with-open [conn (db/open! dir)]
-              (db/set-meta! conn "git-remote" "."))
-            (assoc r :remote "."))))))
-
-(defn maybe-auto-import!
-  "Serve-time onboarding: when `dir` is a git checkout carrying a slopp
-  branch and its store is absent or EMPTY, import the branch into the
-  store — the zero-ceremony path for `git clone` then serve. Anything
-  else (plain repos, stores with content, import failures) is a nil
-  no-op; serving must never be blocked by this."
-  [dir]
-  (try
-    (when (and (.exists (io/file dir ".git"))
-               (or (not (.exists (io/file dir ".slopp" "store.db")))
-                   (empty-store? dir))
-               (slopp-branch? dir))
-      (let [r (import! dir)]
-        (when-not (:error r) r)))
-    (catch Exception _ nil)))
-
 (defn- apply-trees!
   "Absorb the difference between two trees into the live session: diff
   `treeM`→`treeT` (both plain {path content}), deps first, then namespaces in
@@ -1006,33 +818,6 @@
                         {:shards shards})))
       n)))
 
-(defn -main
-  "clojure -M -m slopp.sync clone <url> <dir> | import <dir> | import-dir <store-dir> <from-dir> | push <dir> [url] | pull <dir> | test <dir>"
-  [& [cmd a b]]
-  (let [usage (str "usage: clone <url> <dir> | import <dir>"
-                   " | import-dir <store-dir> <from-dir> | push <dir> [url]"
-                   " | pull <dir> | test <dir> [shards]")
-        r (case cmd
-            "clone"  (clone! a b)
-            "import" (import! (or a "."))
-            ;; the git-free doorway, from a shell: the tool that PRODUCED the
-            ;; directory is often a script, and it should not have to make a
-            ;; repo to hand its work back
-            "import-dir" (let [sess (external/open! {:slopp.ops/dir a})]
-                           (try (import-dir! sess b)
-                                (finally (ops/close! sess))))
-            "push"   (push! a :url b)
-            "pull"   (let [sess (external/open! {:slopp.ops/dir a})]
-                       (try (pull! sess)
-                            (finally (ops/close! sess))))
-            "test"   (let [sess (external/open! {:slopp.ops/dir a})]
-                       (try (external/external-test-run! sess :parallel (test-args a b))
-                            (finally (ops/close! sess))))
-            {:error usage})]
-    (println (pr-str r))
-    (shutdown-agents)
-    (when (or (:error r) (false? (:ok r)) (= :red (:status r))) (System/exit 1))))
-
 (defn- this-checkout?
   "Is `target` (a resolved remote) the working repo at `dir` itself — the
   \".\" an import saves? Then there is nothing to mirror TO: the checkout's own
@@ -1205,3 +990,226 @@
                  " live in .slopp/store.db); to ALSO mirror history into git,"
                  " run `git init` there and the next commit_point creates"
                  " slopp/<branch> automatically")}))
+
+(defn security-hazards
+  "What a clone brought in that the security write gates would have refused: one
+  string per namespace. A clone lands reality first and skips those gates, so
+  this is how the person who ran it finds out."
+  [st]
+  (vec (keep #(security/security-scan st %) (sort (keys (:namespaces st))))))
+
+(defn clone!
+  "Clone git remote `url` into `dir` as a fileless slopp store: fetch the
+  slopp-owned branch (`:branch`, else \"slopp\", else the legacy \"main\"),
+  restore the deps manifest from the remote deps.edn, ingest every namespace
+  through the verified write path (dependency order — reuses slopp.kernel.boot's
+  require-graph sort), and record `git-remote`/`git-base-sha`
+  so the projection grafts onto the remote's history and later syncs use the
+  same branch. Ingest is byte-exact, so a fresh clone's live tree equals the
+  remote tree (no phantom wip).
+  Returns {:dir :namespaces n :base sha :branch b} | {:error msg}."
+  [url dir & {:keys [token agent branch]}]
+  (if (and (.exists (io/file dir ".slopp" "store.db"))
+       (not (empty-store? dir)))
+    {:error (str dir " already has a store — clone into a fresh dir")}
+    (let [repo (git/open-repo! nil)]
+      (try
+        (let [want (or branch "slopp/main")
+              {:keys [tip]} (git.client/fetch-remote! repo url :token token :branch want)
+              used want]
+          (if-not tip
+            {:error (str "remote has no " want " branch to clone: " url)}
+            (let [tree    (git/tree-at repo tip)
+                  sources (into {}
+                                (keep (fn [[path text]]
+                                        (when-let [ns-sym (path-ns path)]
+                                          [ns-sym text])))
+                                tree)
+                  deps    (or (some-> (get tree "deps.edn")
+                                      edn/read-string :deps)
+                              {})]
+              (if (empty? sources)
+                {:error (str "nothing to ingest at " url
+                             " — no src/**.clj or test/**.clj on " used)}
+                (let [sess (external/open! {:slopp.ops/dir dir})]
+                  (try
+                    (doseq [[lib coord] (sort-by (comp str key) deps)]
+                      (let [r (ops/deps-add! sess lib coord :agent agent
+                                             :prompt (str "clone: dep from " url))]
+                        (when (:error r)
+                          (throw (ex-info (str "dep " lib ": " (:error r)) {})))))
+                    ;; The two declarations the tree's PATHS carry, replayed
+                    ;; through the ordinary verbs so they land as the deltas an
+                    ;; agent's own declaration would — and replayed BEFORE the
+                    ;; ingests, because each ingest asks `jvm-loadable?` of its
+                    ;; namespace: a `.cljs` one declared afterwards was handed
+                    ;; to the JVM oracle as Clojure, and the clone died inside
+                    ;; it on `goog.object` (CI's via-slopp lane, importing
+                    ;; slopp's own tree). `path-ns` captures the name and drops
+                    ;; the root and the extension, which is exactly where role
+                    ;; and platform live, so without this a cloned `.cljc`
+                    ;; renders as `.clj` and an instrument materializes into
+                    ;; `src/` and ships.
+                    (let [{:keys [platforms roles]} (path-declarations (keys tree))]
+                      (doseq [[n pf] (sort platforms)]
+                        (ops/module-platform! sess n pf :agent agent
+                                              :prompt (str "clone: " n " is ." (name pf)
+                                                           " in the imported tree")))
+                      (doseq [[m _] (sort roles)]
+                        (ops/module-role! sess m :instrument :agent agent
+                                          :prompt (str "clone: " m
+                                                       " materializes under instruments/"))))
+                    (swap! sess assoc :adopting? true)
+                    (doseq [ns-sym (boot/dependency-order sources)]
+                      (let [r (ops/ingest! sess ns-sym (get sources ns-sym)
+                                           :agent agent
+                                           ;; the ask that created it — the one
+                                           ;; write here that had none, so an
+                                           ;; imported form's first version answered
+                                           ;; \"why does this exist\" with silence
+                                           :prompt (str "imported from git "
+                                                        (subs tip 0 (min 12 (count tip)))
+                                                        " (" url ")"))]
+                        (when (:error r)
+                          (throw (ex-info (str ns-sym ": " (:error r)) {})))))
+                    (swap! sess dissoc :adopting?)
+                    (ops/adopt-modules! sess :agent agent)
+                    (let [conn (:db @sess)]
+                      (db/set-meta! conn "git-remote" (str url))
+                      (doseq [[path text] tree
+                              :when (and (nil? (path-ns path))
+                                         (not= "deps.edn" path)
+                                         ;; a RENDERING of store state is not a
+                                         ;; file: `:config` entries are restored
+                                         ;; below and the module manifest is
+                                         ;; derived by adoption. Blobbing one
+                                         ;; writes a second copy of a fact the
+                                         ;; store holds, in a field the
+                                         ;; projection reads beside the first —
+                                         ;; and left `:config` EMPTY, so a fresh
+                                         ;; clone of slopp's own repo declared no
+                                         ;; app and its dev instance never came
+                                         ;; up, silently.
+                                         (not (store/projected-config-paths path)))]
+                        (ops/file-put! sess path text :agent agent
+                                       :prompt (str "clone: file from " url)))
+                      (doseq [[path text] tree
+                              :when (and (store/projected-config-paths path)
+                                         (not= "modules" path))]
+                        (ops/config-restore! sess path (store/parse-config :manifest text)
+                                             :agent agent
+                                             :prompt (str "clone: config from " url)))
+                      (db/set-meta! conn "git-base-sha" tip)
+                      ;; what git had before the import — the records answer
+                      ;; an agent otherwise shells out for (eval27 opus)
+                      (db/set-meta! conn "git-log" (pr-str (git/recent-commits repo tip 20)))
+                      ;; A clone establishes the PROJECT, so it lands on the
+                      ;; branch. Everything above went through the ordinary
+                      ;; verified write path, which means it went to this
+                      ;; session's thread — and a store whose main is empty is
+                      ;; not a clone of anything: the next serve would decide
+                      ;; the store was still empty and import all over again.
+                      (branch/land-thread! sess))
+                    ;; ACCOUNT for what was left behind. `:namespaces` counts what the clone
+                    ;; decided to take, so on its own a lossy import announces success
+                    ;; with a smaller number and nothing downstream can tell — which is
+                    ;; how `path-ns` dropped every .cljc and every instrument for three
+                    ;; weeks. A file slopp did not write is ordinary (build.clj, a
+                    ;; README); saying which ones is what makes the ordinary case
+                    ;; checkable instead of indistinguishable from the bug.
+                    (let [ignored (vec (sort (remove path-ns (keys tree))))
+                          ;; and for the DECLARATIONS it restored — a config path
+                          ;; that blobbed is invisible in `:namespaces` and the
+                          ;; store looks complete while every capability reads nil
+                          restored (into (sorted-map)
+                                         (for [[path text] tree
+                                               :when (and (store/projected-config-paths path)
+                                                          (not= "modules" path))]
+                                           [path (count (:values (store/parse-config :manifest text)))]))
+                          ;; ACCOUNT for the shape of what came in, not just the
+                          ;; count. Adoption derives the manifest from the code
+                          ;; as it stands, and an imported codebase can arrive
+                          ;; tangled — a module cycle needs only a cross-module
+                          ;; call in each direction, which is a codebase Clojure
+                          ;; loads happily. Since declaring an edge that closes a
+                          ;; cycle is refused, a clone is the one moment a knot
+                          ;; can enter, and reporting `:namespaces n` alone lets
+                          ;; it enter silently.
+                          cycles (vec (:cycles (store/module-layers
+                                                (:modules (:store @sess)))))]
+                      (cond-> {:dir (str dir) :namespaces (count sources)
+                               :base tip :branch used}
+                                                (seq ignored) (assoc :ignored ignored)
+                        (seq restored) (assoc :config restored)
+                        (seq cycles) (assoc :cycles cycles)
+                        (seq (security-hazards (:store @sess))) (assoc :security-hazards (security-hazards (:store @sess)))))
+                    (catch clojure.lang.ExceptionInfo e
+                      {:error (str "clone failed at " (ex-message e)
+                                   " — partial store left at " dir
+                                   "; delete it to retry")})
+                    (finally (ops/close! sess))))))))
+        (catch Exception e
+          {:error (str "clone failed: " (ex-message e))})
+        (finally (.close repo))))))
+
+(defn import!
+  "THE onboarding command: inside a git checkout (main checked out, the
+  human's files on disk), build `.slopp/store.db` from the repo's slopp
+  BRANCH — found on local heads or the checkout's remote-tracking refs — and
+  configure the store to sync against the LOCAL repo (`git-remote \".\"`,
+  resolved relative to the store dir). Only `.slopp/` is created; the
+  working dir stays the human's checkout, and origin interaction stays with
+  regular git. Returns {:dir :namespaces :base :branch :remote} | {:error}."
+  [dir & {:keys [token branch agent]}]
+  (if-not (.exists (io/file dir ".git"))
+    {:error (str dir " is not a git checkout — clone the repo first"
+                 " (or use clone <url> <dir> for a fresh fileless store)")}
+    (let [r (clone! (str dir) (str dir) :token token :branch branch :agent agent)]
+      (if (:error r)
+        r
+        (do (with-open [conn (db/open! dir)]
+              (db/set-meta! conn "git-remote" "."))
+            (assoc r :remote "."))))))
+
+(defn maybe-auto-import!
+  "Serve-time onboarding: when `dir` is a git checkout carrying a slopp
+  branch and its store is absent or EMPTY, import the branch into the
+  store — the zero-ceremony path for `git clone` then serve. Anything
+  else (plain repos, stores with content, import failures) is a nil
+  no-op; serving must never be blocked by this."
+  [dir]
+  (try
+    (when (and (.exists (io/file dir ".git"))
+               (or (not (.exists (io/file dir ".slopp" "store.db")))
+                   (empty-store? dir))
+               (slopp-branch? dir))
+      (let [r (import! dir)]
+        (when-not (:error r) r)))
+    (catch Exception _ nil)))
+
+(defn -main
+  "clojure -M -m slopp.sync clone <url> <dir> | import <dir> | import-dir <store-dir> <from-dir> | push <dir> [url] | pull <dir> | test <dir>"
+  [& [cmd a b]]
+  (let [usage (str "usage: clone <url> <dir> | import <dir>"
+                   " | import-dir <store-dir> <from-dir> | push <dir> [url]"
+                   " | pull <dir> | test <dir> [shards]")
+        r (case cmd
+            "clone"  (clone! a b)
+            "import" (import! (or a "."))
+            ;; the git-free doorway, from a shell: the tool that PRODUCED the
+            ;; directory is often a script, and it should not have to make a
+            ;; repo to hand its work back
+            "import-dir" (let [sess (external/open! {:slopp.ops/dir a})]
+                           (try (import-dir! sess b)
+                                (finally (ops/close! sess))))
+            "push"   (push! a :url b)
+            "pull"   (let [sess (external/open! {:slopp.ops/dir a})]
+                       (try (pull! sess)
+                            (finally (ops/close! sess))))
+            "test"   (let [sess (external/open! {:slopp.ops/dir a})]
+                       (try (external/external-test-run! sess :parallel (test-args a b))
+                            (finally (ops/close! sess))))
+            {:error usage})]
+    (println (pr-str r))
+    (shutdown-agents)
+    (when (or (:error r) (false? (:ok r)) (= :red (:status r))) (System/exit 1))))

@@ -1250,3 +1250,29 @@
         (rm-rf! dir-a)
         (rm-rf! (.getParentFile (io/file dir-b)))
         (rm-rf! (.getParentFile (io/file bare)))))))
+
+(deftest ^:external a-clone-reports-the-hazards-it-brought-in
+  ;; slopp-s8x.6: a clone lands reality first, so the security gates are skipped
+  ;; on the way in. It must still say what it brought.
+  (let [dir-a (temp-dir)
+        dir-b (str (temp-dir) "/clone")
+        bare  (bare-repo! (str (temp-dir) "/remote.git"))
+        sess  (external/open! {:slopp.ops/dir dir-a})]
+    (try
+      (swap! sess assoc :human-intent "this fixture turns unproven-change and security-hazard off")
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "fixture")
+      (ops/config-file! sess "rules" :key "security-hazard" :value "off" :prompt "fixture")
+      (swap! sess assoc :adopting? true)
+      (ops/ingest! sess 'hz.core (str "(ns hz.core (:require [clojure.java.shell :as sh]))\n\n"
+                                      "(defn ^{:unused-ok \"fixture\"} runs \"R.\" [] (sh/sh \"ls\"))\n"))
+      (swap! sess dissoc :adopting?)
+      (external/commit-point! sess "v1" :agent "alice")
+      (is (nil? (:error (sync/push! dir-a :url bare))))
+      (let [c (sync/clone! bare dir-b :agent "bob")]
+        (is (nil? (:error c)) (pr-str c))
+        (is (some #(re-find #"hz.core/runs" %) (:security-hazards c)) (pr-str c)))
+      (finally
+        (ops/close! sess)
+        (rm-rf! dir-a)
+        (rm-rf! (.getParentFile (io/file dir-b)))
+        (rm-rf! (.getParentFile (io/file bare)))))))

@@ -1696,3 +1696,27 @@
     (testing "an external test that reaches it is what the image cannot judge"
       (is (not-any? #(= 'hs.core/ext-run (:form %)) rows) (pr-str rows))
       (is (some #(some #{'hs.core/ext-run} (:unjudged %)) rows) (pr-str rows)))))
+
+(deftest a-security-hazard-is-judged-at-done-too
+  ;; slopp-s8x.6: the write gates see only what is written through them, and a
+  ;; clone or a pull skips them. So done asks again of what it would land.
+  (let [st  (-> (store/empty-store)
+                (store/ingest 'sh.core (str "(ns sh.core (:require [clojure.java.shell :as sh]))\n\n"
+                                            "(defn runs [] (sh/sh \"ls\"))\n\n"
+                                            "(defn ^{:adapter \"process — ls, faked by a param\"} adapted [] (sh/sh \"ls\"))\n\n"
+                                            "(defn reads [in] (java.io.ObjectInputStream. in))\n\n"
+                                            "(defn clean [x] x)\n"))
+                (store/ingest 'sh.core-test (str "(ns sh.core-test (:require [clojure.java.shell :as sh]))\n\n"
+                                                 "(defn helper [] (sh/sh \"ls\"))\n")))
+        fid (fn [nsx nm] (:id (store/form-named st nsx nm)))
+        all [(fid 'sh.core 'runs) (fid 'sh.core 'adapted) (fid 'sh.core 'reads) (fid 'sh.core 'clean)
+             (fid 'sh.core-test 'helper)]
+        forms (fn [s] (set (map :form (rules/security-hazard-check nil s all))))]
+    (is (= '#{sh.core/runs sh.core/reads} (forms st))
+        "the marked adapter, a clean form and a test namespace stay quiet")
+    (testing "a dial the human turned off is honoured form by form"
+      (let [off (assoc-in st [:config "rules" :values "java-deserialization"] "off")]
+        (is (= '#{sh.core/runs} (forms off)))))
+    (testing "each row teaches what the write gate teaches"
+      (is (re-find #"PORT" (:teach (first (filter #(= 'sh.core/runs (:form %))
+                                                  (rules/security-hazard-check nil st all)))))))))

@@ -5330,7 +5330,8 @@
                              (capabilities/disable-refusal (:store @session)
                                                            (str key) (str value)))
                          "rules"
-                         (catalog/config-refusal (str key) (str value))
+                         (or (catalog/config-refusal (str key) (str value))
+                             (catalog/security-dial-refusal (str key) (str value) (:human-intent @session)))
                          "dev"
                          (dev/config-refusal (str key) (str value))
                          "dev.local"

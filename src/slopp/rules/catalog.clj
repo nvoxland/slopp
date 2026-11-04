@@ -228,6 +228,9 @@
    {:rule :stale-reference :grain :done
     :escape "fix the prose (or the reference) so the name resolves — the text is teaching, and teaching that lies costs a failed call to discover"
     :teach "a docstring/teach-string names a.b/c where namespace a.b is in this store but has no form c — a rename or move left the prose behind (gates never see a var inside a string)"}
+   {:rule :security-hazard :grain :done
+    :escape "meet the write gate it names: a process launch moves into a form marked ^{:adapter \"process — which program, and how a test fakes it\"}, and Java deserialization becomes reading data as data. Turning this down needs the human's ask to name it"
+    :teach "a changed production form starts a process outside its adapter or reads Java-serialized objects. The write gates catch this at the write; a clone, a pull or a merge goes around them, so done asks again of what it would land"}
    {:rule :direct-http :grain :done
     :escape "call slopp.http.client/request, taking it as a PARAMETER so callers can pass client/fake-requester — or ^{:adapter \"http — why\"} on the name if this form IS the adapter (it polices itself; the value's first word names the port, so a \"postgres\" adapter is ignored rather than called stale)"
     :teach "a form reaches the network itself — a java.net.http.HttpClient, or a slurp of an http(s):// literal. Raw reaching belongs in a declared ADAPTER; everything else goes through the port and inherits its fake and its contract suite. TESTS ARE NOT EXEMPT: calling the port from a test still makes a REAL call, so an exemption would buy nothing and would carve out the one place this boilerplate breeds. Scoped to HTTP because a gate may only demand a port that EXISTS — slopp ships one for HTTP and none for files or subprocesses"}
@@ -424,3 +427,23 @@
       (str (str v) " is not a severity — a rules dial takes "
            (str/join " / " (sort rule-severities))
            ". query_rules shows what each rule is set to now."))))
+
+(def security-rules
+  "The rules whose dial is the human's: each stops code that can run what an
+  attacker chose or hand a secret to the world, so an agent turning one down
+  would be walking around the gate it was just refused by."
+  #{"process-launch" "java-deserialization" "facet-reveal" "security-hazard"})
+
+(defn ^:export security-dial-refusal
+  "nil when the `rules` dial `k` may go to `v` under the human's ask `intent`;
+  else why not. Weakening a [[security-rules]] member (`off` or `advisory`) needs
+  the ask to name the rule as a whole name. Raising one needs nothing."
+  [k v intent]
+  (when (and (contains? security-rules (str k))
+             (contains? #{"off" "advisory"} (str/replace (str v) #"^:+" ""))
+             (not (and intent
+                       (re-find (re-pattern (str "(?<![\\w./-])" (java.util.regex.Pattern/quote (str k)) "(?![\\w-])"))
+                                intent))))
+    (str k " is a security rule, so turning it down is the human's decision, and"
+         " their ask does not name it. Ask them to name it, or meet the rule: query_rules"
+         " gives its escape.")))

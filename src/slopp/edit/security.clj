@@ -92,7 +92,7 @@
            " marker makes that safe. Read data as data: clojure.edn/read-string,"
            " or a JSON reader. If this store truly must accept it, dial"
            " :java-deserialization off in the rules config, where the choice is"
-           " visible to every reader."))))
+           " visible to every reader; that needs the human's ask to name the rule."))))
 
 (defn ^:export security-scan
   "The import path's face of [[process-launch]] and [[java-deserialization]]:

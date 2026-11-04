@@ -115,27 +115,6 @@
                        (str/starts-with? % "Reflection warning"))
                   lines)))))
 
-^:unsafe (defn ^:export load-checked!
-  "Like `load!` but surfaces evaluation failures instead of silently dropping
-  them (T4 — a failed load must never leave the store and image out of step).
-  Returns {:values [...]} or {:err msg}. `image` is the opaque handle — see
-  `eval!` for why it is not destructured."
-  [image src path]
-  (let [msgs (doall (nrepl/message
-                     (:client image)
-                     {:op "load-file" :file src :file-path path
-                      :file-name (subs path (inc (or (str/last-index-of path "/") -1)))
-                      :session (:session image)}))
-        errs (concat (remove benign-load-noise? (keep :err msgs))
-                     (mapcat (fn [m]
-                               (when (some #{"eval-error"} (:status m))
-                                 [(or (:ex m) "eval-error")]))
-                             msgs))]
-    (if (seq errs)
-      {:err (str/trim (str/join " " (distinct errs)))}
-      {:values (->> msgs (keep :value)
-                    (mapv (fn [v] (try (read-string v) (catch Exception _ v)))))})))
-
 (defonce ^{:ambient-ok "process-global by necessity: an image is an OS
   subprocess, so the pool of reusable ones is a property of this JVM and not
   of any session. Bounded, and every path that cannot prove an image clean
@@ -460,6 +439,27 @@
                 (when-let [st (seq (distinct (mapcat :status msgs)))]
                   (str " nREPL status: " (str/join ", " st) "."))
                 " `restart` builds a fresh image.")])))))
+
+^:unsafe (defn ^:export load-checked!
+  "Like `load!` but surfaces evaluation failures instead of silently dropping
+  them (T4 — a failed load must never leave the store and image out of step).
+  Returns {:values [...]} or {:err msg}. `image` is the opaque handle — see
+  `eval!` for why it is not destructured."
+  [image src path]
+  (let [msgs (doall (nrepl/message
+                     (:client image)
+                     {:op "load-file" :file src :file-path path
+                      :file-name (subs path (inc (or (str/last-index-of path "/") -1)))
+                      :session (:session image)}))
+        errs (concat (remove benign-load-noise? (keep :err msgs))
+                     (mapcat (fn [m]
+                               (when (some #{"eval-error"} (:status m))
+                                 [(or (:ex m) "eval-error")]))
+                             msgs))]
+    (if (seq errs)
+      {:err (str/trim (str/join " " (distinct errs)))}
+      {:values (->> msgs (keep :value)
+                    (mapv read-printed))})))
 
 ^:unsafe (defn- eval-outcome
   "Classify a completed nREPL eval's messages: `{:values [...]}` (plus

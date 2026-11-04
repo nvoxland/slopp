@@ -508,3 +508,22 @@
     (let [i (.indexOf cmd "-J-Dclojure.read.eval=false")]
       (is (nat-int? i) (str "the switch rides every launch: " cmd))
       (is (< i (.indexOf cmd "-M")) "before -M, where the launcher reads clj-opts"))))
+
+^:unsafe (deftest ^:external a-value-a-load-printed-cannot-run-code-in-the-server
+  ;; slopp-s8x.6: load-checked! read the image's printed values with a bare
+  ;; read-string, the one read site left after eval! moved to read-eval off.
+  ;; Bound on here (hence ^:unsafe): the test JVM may already default it off,
+  ;; which would hide this.
+  (let [f (java.io.File/createTempFile "slopp-read-eval" ".txt")
+        p (.getPath f)
+        h (repl/start!)]
+    (.delete f)
+    (try
+      (let [src (str "(ns evil.load)\n(deftype Evil [])\n"
+                     "(defmethod print-method Evil [_ w] (.write w \"#=(clojure.core/spit \\\"" p "\\\" \\\"x\\\")\"))\n"
+                     "(Evil.)\n")
+            r (binding [*read-eval* true] (repl/load-checked! h src "evil/load.clj"))]
+        (is (nil? (:err r)) (pr-str r))
+        (is (not (.exists f)) "the printed value ran code in this JVM"))
+      (finally (repl/stop! h)
+               (.delete f)))))

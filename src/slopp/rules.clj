@@ -21,7 +21,7 @@
   (:require [slopp.store :as store]
             [slopp.rules.schema :as schema]
             [slopp.rules.keywords :as keywords]
-            [slopp.rules.breakage :as breakage] [slopp.edit.modules :as edit.modules] [rewrite-clj.node :as n] [clojure.string :as str] [slopp.rules.http :as rules.http] [slopp.rules.catalog :as catalog] [slopp.index.refs :as refs] [slopp.rules.shape :as shape] [rewrite-clj.parser :as p] [slopp.rules.markers :as markers] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.rest :as rules.rest] [slopp.project.capabilities :as capabilities] [slopp.rules.webapp :as rules.webapp] [slopp.index.crossings :as crossings] [slopp.store.db :as db] [slopp.rules.mutate :as mutate] [slopp.image.repl :as repl] [slopp.edit.facet :as edit.facet]))
+            [slopp.rules.breakage :as breakage] [slopp.edit.modules :as edit.modules] [rewrite-clj.node :as n] [clojure.string :as str] [slopp.rules.http :as rules.http] [slopp.rules.catalog :as catalog] [slopp.index.refs :as refs] [slopp.rules.shape :as shape] [rewrite-clj.parser :as p] [slopp.rules.markers :as markers] [slopp.edit.tiers :as tiers] [slopp.edit.gates :as gates] [slopp.rules.rest :as rules.rest] [slopp.project.capabilities :as capabilities] [slopp.rules.webapp :as rules.webapp] [slopp.index.crossings :as crossings] [slopp.store.db :as db] [slopp.rules.mutate :as mutate] [slopp.image.repl :as repl] [slopp.edit.facet :as edit.facet] [slopp.edit.security :as security]))
 
 (defn- changed-qsyms
   "The qualified symbols of the CHANGED forms this episode."
@@ -1357,6 +1357,23 @@
                                (str/join "; " (for [t named]
                                                 (str (:form t) " (" (get untested-waivers (str (:form t))) ")"))))}])))))
 
+(defn security-hazard-check
+  "Done rule: a changed production form that starts a process outside its
+  adapter, or reads Java serialization. The same questions the write gates ask,
+  asked again because a clone, a pull and a merge do not pass through those gates.
+  A store's dial on the underlying gate is honoured, so the choice is made once."
+  [_session st* changed]
+  (vec (for [fid changed
+             :let [e (store/form-by-id st* fid) ns-sym (store/ns-of-form-id st* fid)]
+             :when (and e ns-sym (:name e) (not (str/ends-with? (str ns-sym) "-test")))
+             :let [on?   (fn [k] (contains? #{:refuse :error} (gates/rule-severity st* k :refuse)))
+                   teach (or (when (on? "process-launch")
+                               (security/process-launch st* ns-sym (:name e)))
+                             (when (on? "java-deserialization")
+                               (security/java-deserialization st* ns-sym (:name e))))]
+             :when teach]
+         {:form (symbol (str ns-sym) (str (:name e))) :teach teach})))
+
 (def done-advisories
   "The done-time advisory registry (D9 rule-registry — the done-grain sibling of
    `edit.modules/per-form-write-gates`): an ordered list of {:key :severity
@@ -1597,6 +1614,8 @@
    ;; the port from a test still makes a real call, so exempting them would buy
    ;; nothing and would carve out exactly the place where seven copies of
    ;; build-a-client-send-a-request had already bred.
+   {:key :security-hazard :severity :error :applies-to :production :check #'security-hazard-check :sweep true
+    :selftest-note "the write gates refuse this shape, so a fixture cannot be written through them; rules-test/a-security-hazard-is-judged-at-done-too calls the check over a store built directly"}
    {:key :direct-http :severity :error :applies-to :both :check #'direct-http-check
     ;; the rule that made the sweep exist: slopp-ui carried two of these
     ;; through a green full_check because both forms predate the rule and no
