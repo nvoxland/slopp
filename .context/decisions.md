@@ -7978,6 +7978,18 @@ that touched an untested function and broke two "a clean done says
 nothing" tests. `verify {op mutate}` and the false-green instrument still
 count these functions; the done advisory reports survivors only.
 
+**Amended 2026-11-04 (slopp-s8x.1): the human's channel is `:human-intent`.**
+The ask that lifts this guard, endorsement and the dependency allow-list is
+read from `:human-intent`, which only `absorb-pending-intent!` sets when it
+takes the prompt hook's mailbox. It was `:last-intent`, which the `turn_begin`
+tool and a write's own `prompt` also set, so an agent refused on a test or a
+library could name it in a `turn_begin` and retry: the one channel the
+decision called the human's was agent-writable. `:last-intent` stays what
+orientation and the commit description read. Limits that remain: the match
+is a substring on the bare test name, so a short name is named by many asks;
+and a process with a shell can write the mailbox file itself, which no tool
+gate can hold.
+
 ## D-endorsed-examples (2026-11-02, user-directed) — a human-endorsed test is the readable spec, and no agent episode edits it
 
 **Decision.** `^{:endorsed "who/why"}` on a deftest (one `marker-registry`
@@ -7996,8 +8008,9 @@ each, never a second language.
 
 **Built 2026-11-02.** `ops/endorsement-refusal`, checked first inside
 `protected-test-refusal`. The marker is granted the same way an endorsed test
-is moved: only when the human's verbatim ask (`:last-intent`, from the prompt
-hook — never the agent's own write prompt) names the test. That is what makes
+is moved: only when the human's verbatim ask (`:human-intent`, from the prompt
+hook — never the agent's own write prompt or `turn_begin`; amended 2026-11-04,
+slopp-s8x.1) names the test. That is what makes
 endorsement a turn-level act of the human rather than a marker an agent could
 put on its own tests to lock its own oracle. A patch is checked by whether a
 replacement mentions `:endorsed`, since its resulting metadata is not known
@@ -8187,7 +8200,7 @@ downloaded. A version change of a held library passes.
 package in five does not exist, and the same names recur across runs, which
 makes them squattable. An agent's own pick is therefore not enough; a human
 names the library. The human's ask is the existing human channel
-(D-test-immutability), which works under Claude Code since slopp-oa7 was
+(D-test-immutability; `:human-intent` since 2026-11-04, slopp-s8x.1), which works under Claude Code since slopp-oa7 was
 fixed (d6b2c0d53515a): the server's `mcp-` session label no longer counts as
 a claim, so the prompt hook's ask reaches the session.
 
