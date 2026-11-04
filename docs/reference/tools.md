@@ -298,7 +298,7 @@ Other threads' un-landed work is also said without asking: `session_brief` carri
 |---|---|
 | `git_push {url? branches?}` | Publish slopp history to the remote. Fast-forward only. |
 | `git_pull` | Fetch and absorb remote history by a form-granular 3-way merge. |
-| `git_clone {url dir}` | Clone a remote into a fileless store. |
+| `git_clone {url dir}` | Clone a remote into a fileless store. A clone lands reality first and skips the security write gates, so `:security-hazards` lists what it brought in. |
 | `import_dir {dir}` | Absorb a directory of files the same way `git_pull` absorbs a remote — 3-way against your last commit point, no git anywhere. |
 | `git_conflicts` | Unresolved pull conflicts, with the raw remote content. |
 | `git_resolve {path?}` | Mark a conflict resolved. Unblocks `git_push`. |

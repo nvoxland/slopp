@@ -134,9 +134,11 @@ elsewhere without moving (`help {topic "threads"}`).
   (`:unproven-change`), and a later done does not get past it. Docstring edits
   and renames are not checked. Two exits, both visible in review: for a change
   that keeps behaviour (a refactor), `done {untested {"ns/name" "why"}}`, which
-  covers that exact version until you edit it again; for a function no in-image
-  test can watch, `^{:untested-ok "why"}` on its name. A function only
-  `^:external` tests reach is reported, not held. A pull skips this for what
+  covers that exact version until you edit it again and is refused with no
+  reason; for a function no in-image test can watch, `^{:untested-ok "why"}` on
+  its name. A function only `^:external` tests reach is reported, not held; a
+  test that only names a function, as in `(is (fn? f))`, does not count as
+  reaching it. `def` of a `fn` and `defmethod` are checked like `defn`. A pull skips this for what
   commits slopp stamped as passing brought, because they proved it where they
   were written.
 - **Assert the behaviour, not the fixture.** A repro can be too minimal; a

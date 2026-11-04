@@ -163,7 +163,7 @@ that keeps behaviour is waived on the done call, `done {untested {"ns/name"
 "why"}}`, for that exact version, and a function no in-image test can watch
 carries `^{:untested-ok "why"}`. Both reasons show in review. A function that
 only `^:external` tests reach is reported but not held, because the image cannot
-run those tests. A pull skips the check for what its incoming commits brought
+run those tests. A test that only names a function does not count as reaching it. A pull skips the check for what its incoming commits brought
 when slopp stamped all of them as passing.
 
 **It breaks the code on purpose.** Each function the episode changed gets up

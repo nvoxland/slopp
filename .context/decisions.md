@@ -100,8 +100,15 @@ the change here (same commit).
   that the author make one of THEIR forms the adapter, which is always
   satisfiable. Not matched as names in `banned-syms`, because a write gate
   sees the namespace's aliases (`sh/sh`) and the dialect check does not.
-  The `:dialect` catalog row is still open (the catalog test requires every
-  row to come from a registry, and D3 is not in one).
+  The `:dialect` row exists (`fixed-catalog`, not dialable). Amended
+  2026-11-04 (slopp-s8x.6): the gates skipped a clone, a pull and a merge and
+  an agent could dial them off, so `:security-hazard` asks again at `done`
+  over what would land, a clone reports `:security-hazards`, and turning down
+  `process-launch`, `java-deserialization`, `facet-reveal` or `security-hazard`
+  needs the human's ask to name the rule (`catalog/security-dial-refusal`).
+  NOT built: a string-built SQL rule, reflection past the denylist, and
+  self-marking (an author can still mark its own form `^{:adapter "process"}`;
+  that is visibility in review, not a boundary against the author).
 - **D3.1 (user, 2026-08-06) — the reader-conditional ban STANDS everywhere,
   and the framework pays the cost that ban creates.** Revisited explicitly
   rather than silently, on slopp-ui's ask: a `:cljc` namespace targets two
@@ -7938,6 +7945,10 @@ is re-loaded from the store value after every mutant. Default ON with a
 10s per-episode budget, cheapest forms (fewest covering tests) first.
 `slopp.rules.mutate` holds it; `verify {op mutate}` is the catch-up.
 
+**Amended 2026-11-04 (slopp-s8x.4).** A form whose mutants all failed to load
+is `:unchecked` with its own finding. It read `:killed`, a clean row nobody
+earned, and the false-green rate counted it as tested.
+
 **Why default-on, not opt-in (the bead said opt-in).** Measured over 49
 main episodes before building: 461 changed forms, 256 defns, 202 with an
 in-image observed test; in-image tests ~10ms each. Per episode, all
@@ -8150,7 +8161,8 @@ evidence. It measured nothing about writing the test FIRST against writing it
 after, so the order is not the thing to enforce; the red against the old code
 is. Checks the agent cannot argue with work and advice does not; the
 history ablation showed it again on 2026-11-03, where Haiku read a recorded
-rule and shipped against it. Today a `change` whose tests never went red is
+rule and shipped against it (n=5 per cell, one model, so this is a direction
+and not a magnitude). Today a `change` whose tests never went red is
 only a note, and a fix written before its test is checked by nothing.
 Sub-threads holding only the tests were considered and not chosen: a child
 thread forks from its parent's head, so it would see the fix, and a sibling
@@ -8178,6 +8190,20 @@ is a stub that throws, a changed `def` goes back too, and the covering tests run
 once. Real threads were not needed, and that shape fixes what one at a time
 could not: a new function could not go red, and a fix spread over two functions
 passed with either half.
+
+**Amended 2026-11-04 (slopp-s8x.4, s8x.5), from a code review.** "Only
+`^:external` tests cover it" was computed as "any test statically reaches it",
+so `(is (fn? f))` excused a new function and in a mature store almost nothing
+held. Only an `^:external` test or a declared `^{:covers}` claim excuses a
+function no in-image test ran now. `def` of a `fn` and `defmethod` are checked
+as well as `defn`, by both this rule and mutation; a new method goes red by
+removal, since an intern would replace its multi. A method no test was seen
+running is an `:info` row, because dispatch hides static reach. A blank waiver
+is refused and a blank `:equivalent-mutants` reason discharges nothing. Limits
+still standing: one failing test proves every target it touches in the shared
+red state, which is the cost of "a fix spread over two functions" passing;
+`defrecord`/`deftype`/`reify` methods and custom defn-like macros are outside
+it; the test/production line is the `-test` namespace suffix.
 
 **What testing it found, all fixed:**
 - Measuring from the last done let a HELD done pass the next one, because the

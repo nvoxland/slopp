@@ -500,6 +500,8 @@ The main `slopp` skill has the mechanics; these are the shapes worth writing.
 how to discharge each rule** — a project can dial any rule `:off`/`:advisory`/
 `:error`/`:refuse` with `config_file {path "rules" key <rule> value <severity>}`,
 so treat the table below as the defaults and `query_rules` as the truth here.
+Turning down a security rule (`process-launch`, `java-deserialization`,
+`facet-reveal`, `security-hazard`) needs the human's ask to name the rule.
 
 **A rule's SCOPE is part of the rule.** When you're about to apply one, ask what
 the gate actually FLAGS — `cleanup {all true}` reports every gate's findings, and
@@ -515,8 +517,8 @@ cover, so drifting either way turns the suite red.
 | Effectful fn is `!`-named | **Yes** (D6, write warning + `:suggest`) |
 | No macros / eval / dynamic-var action-at-a-distance | **Yes** (dialect gate) |
 | No `#=` read-time eval, anywhere — quoted, tagged, in metadata, even under `^:unsafe` | **Yes** (dialect gate) — the reader runs it before any gate or test sees the value; compute the value in code instead |
-| Shipped code starts a process only in its adapter | **Yes** (write gate `:process-launch`, production only) — `clojure.java.shell`, `ProcessBuilder` and `.exec` belong in ONE form marked `^{:adapter "process — which program, and how a test fakes it"}` that takes its arguments as a vector; never build a shell string (`sh -c` + `str` is command injection) |
-| No Java deserialization in shipped code | **Yes** (write gate `:java-deserialization`, production only) — `ObjectInputStream` runs code chosen by whoever wrote the bytes; read data with `clojure.edn/read-string` or a JSON reader. No marker discharges it; the per-store rules dial is the only escape |
+| Shipped code starts a process only in its adapter | **Yes** (write gate `:process-launch`, production only, asked again at `done` as `:security-hazard` because a clone or pull goes around the gate) — `clojure.java.shell`, `ProcessBuilder` and `.exec` belong in ONE form marked `^{:adapter "process — which program, and how a test fakes it"}` that takes its arguments as a vector; never build a shell string (`sh -c` + `str` is command injection) |
+| No Java deserialization in shipped code | **Yes** (write gate `:java-deserialization`, production only) — `ObjectInputStream` runs code chosen by whoever wrote the bytes; read data with `clojure.edn/read-string` or a JSON reader. No marker discharges it; the per-store rules dial is the only escape, and it needs the human's ask to name the rule |
 | Cross-module edge declared; no cycles; cohesion vs export | **Yes** (module gate at write) — plus `done`'s `:module-governance` and `full_check`'s `:module-violations`, both error-grade, because a RELOCATION rewrites callers without writing them through the gate |
 | Public surface documented | **Yes** (write advisory) |
 | Dead public surface removed | **Yes** (`done`/`commit_point` gate) |
