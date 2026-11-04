@@ -135,7 +135,7 @@ a jar from a commit point and run the launcher against it:
 slopp build . --jar    # materialize the FILELESS store into target/jar-src, run the
                        # store-tracked build.clj there, copy the jar to target/slopp.jar
 
-SLOPP_JAR=~/src/nvoxland/slopp/target/slopp.jar ~/.claude/skills/slopp/bin/slopp dev .
+SLOPP_JAR=$PWD/target/slopp.jar plugins/slopp/bin/slopp dev .
 ```
 
 `slopp build` opens the store itself, read-only, materializes what has
@@ -154,8 +154,8 @@ a running server, from the session's own view.)
 `SLOPP_JAR` is honoured by the plugin's `bin/slopp` and skips the fetch and
 the checksum. The path to the launcher is spelled out because a plain
 terminal has no `slopp` on PATH: Claude Code puts a plugin's `bin/` on the
-PATH of the shells it runs, and `~/.claude/skills/slopp` is where this
-machine's plugin is loaded from (a symlink to a checkout's `plugins/slopp`).
+PATH of the shells it runs, and this repo installs its plugin at project scope
+from its own `plugins/slopp` (`.claude/settings.json`), so it applies here only.
 Stop the running instance first; the new runner takes the same port.
 
 Never do this as part of ordinary development, which the instance already
@@ -286,7 +286,10 @@ says exercise the touched forms, and:
 - `full_check` — the whole store, every namespace, every tier. Nothing forces
   it; reach for it on a broad change or after deleting a caller.
 - `test_run {external true}` — materializes the store into a temp dir and runs
-  `clojure -M:test` **there**, against the generated `deps.edn`.
+  `clojure -M:test` **there**, against the generated `deps.edn`. A red run names
+  every failure in `:failed-tests`, and so does `full_check`.
+- `test_run {external true failed true}` — re-runs only what is still failing,
+  in seconds. Fix failures together, re-run these, then run the whole tier once.
 - From a shell: `slopp --main slopp.sync/-main test .`
 
 Image-spawning tests must be `^:external` and must `close!`/`stop!` in a

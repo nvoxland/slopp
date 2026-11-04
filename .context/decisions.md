@@ -8138,7 +8138,7 @@ registered as `:unproven-change`; `done {untested {...}}` is the waiver,
 is for code written from scratch, so a new function with no test holds too, and
 imports of untested code are not a case to design for. Test fixtures must not
 drive the rule: a fixture whose subject is something else dials it off
-(`config_file rules unproven-change off`, 43 of them). The first version swapped
+(`config_file rules unproven-change off`, about 70 of them). The first version swapped
 one function at a time; it now rebuilds one state, the user's "sub-threads"
 idea done internally. Every changed function goes back together, a new function
 is a stub that throws, a changed `def` goes back too, and the covering tests run
@@ -8160,6 +8160,14 @@ passed with either half.
 is exactly what those commits brought, so a local edit beside the pull is still
 judged. A stamp is a statement by the producer, not a signature. A pull still
 runs the suite.
+
+**What a done judges (slopp-bft).** A done judges everything its land would
+carry: every un-landed write on the line, by any agent (`engine/land-deltas`).
+It used to read one agent's episode while the land took the whole line, so
+another agent's writes landed unjudged, and a thread whose last done was red
+landed with no suite when a second session closed it. Episodes stay per agent
+for history and revert. Fixing this exposed fixtures whose writes and commit
+named different agents: they had been judged by nothing.
 
 **Known limits.** When in-image tests run a function but only an `^:external`
 test proves its change, the done holds, and the exit is a waiver naming that
