@@ -1275,10 +1275,8 @@ gaps    (gaps-by-ns st (:test-map @session))
         pos (into {} (map-indexed (fn [i d] [(:id d) i])) (store/deltas st))]
     ;; a range arrives from a URL, so both ends are user input. "Nothing
     ;; changed here" and "that is not a range" are different answers, and
-    ;; only the second one is a 404. A range that does not run forward is
-    ;; not one: range-deltas would read past `to` to the end of the journal.
-    (when (and (pos from) (pos to) (or (< (pos from) (pos to))
-                   (and (= from to) (not= :commit (:op (nth (store/deltas st) (pos from)))))))
+    ;; only the second one is a 404. A range running backwards is not one.
+    (when (and (pos from) (pos to) (<= (pos from) (pos to)))
       (let [ch        (history/query-changes session :from from :to to)
             by-target (refs/refs-by-target st)
             prompts   (range-prompts st from to)

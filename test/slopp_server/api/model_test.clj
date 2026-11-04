@@ -1112,7 +1112,8 @@
         cv  (fn [from to] (model/change-view (atom {:store st :test-map nil}) from to))]
     (is (some? (cv "c1" "c2")))
     (is (nil? (cv "c2" "c1")))
-    (is (nil? (cv "c1" "c1")))))
+    (is (= {:changed 0 :no-observed-test nil :system-deltas 0} (:absence (cv "c1" "c1")))
+        "a point to itself is an empty range, not the journal after it")))
 
 (deftest a-change-range-shows-the-alternative-a-write-rejected
   ;; slopp-s8x.9: :rejected was stored and only form history read it
