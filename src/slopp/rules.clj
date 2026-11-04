@@ -1330,8 +1330,11 @@
                    (assoc t :old o))
         named    (filterv #(contains? untested-waivers (str (:form %))) cands)
         ts       (vec (remove waived? cands))]
-    (if (or (nil? image) (and (empty? ts) (empty? named)))
-      []
+    (cond
+      (and (empty? ts) (empty? named)) []
+      (nil? image) [{:severity :info :unjudged (mapv :form ts)
+                     :teach "no image was running, so nothing shows these changes were needed"}]
+      :else
       (into (mutate/proof-findings
              (let [outside? (fn [t] (and (empty? (:tests t)) (outside-image? st* t)))
                    [ext own] ((juxt filter remove) outside? ts)]

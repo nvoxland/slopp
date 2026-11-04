@@ -1720,3 +1720,12 @@
     (testing "each row teaches what the write gate teaches"
       (is (re-find #"PORT" (:teach (first (filter #(= 'sh.core/runs (:form %))
                                                   (rules/security-hazard-check nil st all)))))))))
+
+(deftest no-image-means-unjudged-not-clean
+  ;; slopp-s8x.12: a done with no image returned [] from the proof rule, the same
+  ;; answer as a change with nothing to prove.
+  (let [st   (store/ingest (store/empty-store) 'ni.core "(ns ni.core)\n\n(defn f \"F.\" [x] x)\n")
+        rows (rules/red-proof-check! (atom {:image nil :test-map {}}) st
+                                     [(:id (store/form-named st 'ni.core 'f))])]
+    (is (= '[ni.core/f] (mapcat :unjudged rows)) (pr-str rows))
+    (is (every? #(= :info (:severity %)) rows) "it cannot say, so it does not hold")))
