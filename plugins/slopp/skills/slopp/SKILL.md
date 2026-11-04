@@ -159,7 +159,7 @@ elsewhere without moving (`help {topic "threads"}`).
 - **A test grading your change is not yours to edit.** Changing a test whose
   traced coverage reaches a form you changed this episode is refused. If you
   believe it is wrong, `flag_test {ns name reason}` records that for the human
-  (the `verify` family) — then say so in your reply. Tests you wrote this
+  (the `edit` family) — then say so in your reply. Tests you wrote this
   episode stay editable; an ask that names the test lifts the guard.
 - **An endorsed test is the human's.** `^{:endorsed "who: what it pins"}` on
   a deftest says a human read it and said yes. No agent edits or deletes it,

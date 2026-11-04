@@ -180,8 +180,10 @@ plus the links, and skips cleanly when `ideas/` is absent (a fresh clone).
   **Call `done` at every point you think you're finished with something,
   not once at the end** — finishing a unit of work and starting the next IS
   a done point, and finding out you weren't done is cheapest right then.
-  `done` runs the whole in-image suite plus impacted `^:external` tests and
-  REPORTS rather than refuses; `commit_point` has no checks of its own and
+  `done` runs the whole in-image suite plus impacted `^:external` tests. It
+  never refuses the call, but a red result or an `:error` rule
+  (`:unproven-change`, `:security-hazard`, `:direct-http`, ...) holds the
+  landing; `commit_point` has no checks of its own and
   gates on done's verdict, so there is exactly ONE bar. A red done STANDS
   until new work supersedes it. `done` is EPISODE-scoped (its `:scope` field
   says so); **`full_check`** is the whole store — every namespace, every

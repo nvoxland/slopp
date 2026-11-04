@@ -55,6 +55,18 @@ A row flagged `:weak-oracle` had a mutant survive at the last `done`: its tests
 run it and stay green with a fault in place. Read the code itself, not the test
 names, and add the assertion that would have failed.
 
+A done's findings hold signals the scan's rows do not. Read them for the range
+under review:
+
+- `:intent-mismatch`: the ask named a form the change did not touch.
+- `:spread`, and the change screen's "across N modules": wide changes are where
+  agent work fails most, so read those more closely.
+- `:unread-callees`: the edit was made without reading what the form calls.
+- A `:finisher` in a change result: the agent moved a literal expectation with
+  `accept`, which the test guard leaves open on purpose. Check the new value is
+  what the ask wanted.
+- `rejected`, on the change screen: the alternative the author turned down.
+
 A row flagged `:flagged-test` has an oracle the agent disputes: it was refused
 an edit to a test grading its own change and recorded `flag_test` instead. The
 scan's `:flagged-tests` lists each objection (test, reason, who), and the change

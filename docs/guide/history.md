@@ -54,6 +54,15 @@ It is a *terminal* call, not a starting point. One read already carries what
 four separate history queries would re-derive, and re-deriving it is a
 measurable waste of a session's budget.
 
+## One form's story
+
+`history {op query_history ns "x.a" name "f"}` lists a form's versions.
+`diff true` adds each change's ask, verdict and changed lines. `green true`
+keeps only versions whose own verification ran tests and passed: a version with
+no verification of its own is not counted as green. A write can carry
+`rejected`, the alternative it turned down, which shows here and on the change
+screen.
+
 ## Dead ends are first-class
 
 When an approach does not work out, revert it with a `prompt` saying why:

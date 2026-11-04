@@ -759,6 +759,18 @@ credit (a rename sweep credits hundreds of forms at once — a selector would
 weight by 1/|changed|), and the top rows are the rule-catalog tests, which
 go red beside almost any rule change.
 
+## Evidence at done: red-proof, mutation, false-green (2026-11-02 to 11-04)
+
+`slopp.rules.mutate` runs both checks over an episode's changed functions
+(`defn`, `def` of a `fn`, `defmethod`). **Red-proof** (`:unproven-change`,
+holds) builds one state before the change, runs the covering tests once and
+restores. **Mutation** (`:mutants-survived`, reports) tries up to five one-token
+faults per form under a 10s budget and records what it did not reach as owed.
+`slopp.lab.falsegreen` turns mutation results into a rate. Decisions and limits:
+`D-red-proof`, `D-mutation-at-done`. A form whose mutants all failed to load is
+`:unchecked`: forms only external tests run land there, since nothing in the
+image can kill or spare a mutant for them.
+
 ## Gotchas
 
 - `clojure.test/*test-out*` does NOT follow `with-out-str` — this is exactly

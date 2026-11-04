@@ -8050,6 +8050,9 @@ beside `:count` and `:endorsed true` per shown test.
 flagged it; carries `:target` commit id, `:verdict`, `:note`) and `:claim`
 (an episode holds these form ids; carries `:forms`, `:agent`, released by the
 episode's done). Both travel through merges (`travelling-markers`).
+**Corrected 2026-11-04:** `:claim` was never registered; D-holds replaced it
+with a warning that stores nothing. `:review` travels on a rebase-land, not on
+an ordinary merge.
 
 **Why.** Commit points are immutable (`store/record-commit`, `extra` only at
 mint) and episodes are inferred, never stored — so a later fact about either
@@ -8455,4 +8458,11 @@ evidence (architecture overview rated lowest; reviewers read every line
 anyway because agent confidence is uniform) says the next unit of effort on an
 overview is the lowest-value unit available. The labeled notation is
 superseded by these views (moved to the done record).
+
+**Built / not built (checked 2026-11-04).** Built: the absence block's first
+two items, `:never-red`, and escape markers. NOT built: "forms the ask names
+that did not change" in the absence block, intent/delta mismatch as a
+`review_scan` row (it is a done advisory; `slopp.rules/intent-mismatches`), and
+endorsed-vs-agent-written coverage in `review_scan` (the form page shows it;
+zrs.1 judged the row noise on stores with no endorsements).
 

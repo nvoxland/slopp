@@ -494,6 +494,15 @@ The main `slopp` skill has the mechanics; these are the shapes worth writing.
   Write it before the code, never after the fact, and keep it to the
   behaviours the asker cares about.
 
+## 10. Remove freely, add reluctantly
+
+Removing a form costs a model nothing: it never has to learn a replacement for
+something that is refused. Adding vocabulary, such as a macro, a niche wrapper or
+a new marker, costs real output quality: models write worse code against
+unfamiliar names, and rules stated in context barely help where examples do. So
+an addition must be the only and the shortest way to do its thing. Prefer core
+functions and plain data, and teach the addition with an example.
+
 ## Checkable vs. judgment — a quick map
 
 **`query_rules` shows exactly what's enforced in THIS store, at what severity, and

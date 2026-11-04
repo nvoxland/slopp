@@ -84,6 +84,11 @@ the in-progress version runs as a dev instance the slopp server re-serves at eac
   a fresh boot dies on it), **error-level lint refusal**, then the affected
   tests run automatically (a trace map knows which tests exercise which
   forms). A failed gate commits nothing.
+- **A landing needs evidence.** `done` runs the suite and lands the work only
+  if it is green and every changed function has a test that fails against its
+  old version, or a stated reason it needs none. It also breaks the changed
+  code on purpose and names any fault the tests let through. A test grading
+  the change is not the agent's to edit; the agent can flag it for a person.
 - **Every write is provenance.** Deltas carry the agent, the prompt, and the
   enclosing *turn* (the user's verbatim ask). `query_form_history` replays
   any form's life; `query_form_at` time-travels; `file_history`/`file_get`
