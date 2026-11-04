@@ -5546,3 +5546,9 @@
                      (call! sess "query_source" {:targets ["pd.other-test/f-is-identity"]}))))
       (finally (ops/close! sess)
                (sh/sh "rm" "-rf" dir)))))
+
+(deftest an-untested-waiver-needs-a-reason
+  ;; slopp-s8x.5: a waiver with no reason gives the reviewer nothing to read
+  (is (= {"a/f" "a refactor"} (mcp/untested-waivers {:a/f "a refactor"})))
+  (is (thrown-with-msg? Exception #"a/f" (mcp/untested-waivers {"a/f" "  "})))
+  (is (thrown-with-msg? Exception #"reason" (mcp/untested-waivers {"a/f" nil}))))

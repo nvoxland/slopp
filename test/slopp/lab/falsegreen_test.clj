@@ -42,3 +42,13 @@
 (deftest a-count-a-result-does-not-carry-is-zero
   (is (= {:caught 0 :survived 1 :invalid 0}
          (:mutants (fg/rates [{:status :survived :survivors [{:mutation "a"}]}])))))
+
+(deftest a-form-whose-mutants-all-failed-to-load-moves-no-rate
+  ;; slopp-s8x.4: it used to read :killed, so the rate counted it as a tested,
+  ;; non-surviving form exactly where the oracle had vanished
+  (let [r (fg/rates [{:form 'a/f :status :unchecked :invalid 3}
+                     {:form 'a/g :status :killed :killed 1}])]
+    (is (= 1 (:tested r)))
+    (is (= 1 (:unchecked r)))
+    (is (= 3 (get-in r [:mutants :invalid])) (pr-str r))
+    (is (= 0.0 (get-in r [:false-green :per-mutant])))))

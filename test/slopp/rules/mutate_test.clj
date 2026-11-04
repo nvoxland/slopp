@@ -4,7 +4,7 @@
             [clojure.string :as str]
             [slopp.rules.mutate :as mutate]
             [slopp.store :as store]
-            [slopp.image.repl :as repl]))
+            [slopp.image.repl :as repl] [rewrite-clj.node :as n] [slopp.edit.hotload :as hotload]))
 
 (deftest a-mutant-is-one-small-fault-in-the-body
   (let [src "(defn f\n  \"Doc.\"\n  [x]\n  (if (< x 10) (inc x) false))"
@@ -300,3 +300,104 @@
                (mapv :status (mutate/prove! h s [(t 'fixed '[demo.prove-test/fixed-t] "(defn fixed [x] x)")]
                                             :budget-ms 0)))))
       (finally (repl/stop! h)))))
+
+(deftest a-def-of-a-fn-and-a-defmethod-are-functions-too
+  ;; slopp-s8x.4: only defn and defn- were checked, so logic written as a
+  ;; defmethod or (def f (fn ...)) was outside both red-proof and mutation.
+  (testing "the shapes that hold behaviour"
+    (is (mutate/defn-source? "(defn f [x] x)"))
+    (is (mutate/defn-source? "(def f (fn [x] x))"))
+    (is (mutate/defn-source? "(def f \"doc\" (fn [x] x))"))
+    (is (mutate/defn-source? "(def f #(inc %))"))
+    (is (mutate/defn-source? "(defmethod m :k [x] x)")))
+  (testing "and the ones that do not"
+    (is (not (mutate/defn-source? "(def data 1)")))
+    (is (not (mutate/defn-source? "(def data {:f 1})")))
+    (is (not (mutate/defn-source? "(defmulti m :k)"))))
+  (testing "a mutant of each lands in the body, not on the dispatch value"
+    (is (= ["inc → dec"] (mapv :mutation (mutate/mutants "(def f (fn [x] (inc x)))" 50))))
+    (is (= ["inc → dec"] (mapv :mutation (mutate/mutants "(defmethod m 1 [x] (inc x))" 50)))))
+  (testing "a nameless registration is a target, found by the key its trace uses"
+    (let [s   (store/ingest (store/empty-store) 'dm.core
+                            "(ns dm.core)\n\n(defmulti m :k)\n\n(defmethod m :a [x] (inc x))\n\n(def g (fn [x] x))\n")
+          es  (store/forms s 'dm.core)
+          mth (first (filter #(re-find #"defmethod" (str (n/string (:node %)))) es))
+          g   (store/form-named s 'dm.core 'g)
+          q   (symbol "dm.core" (:id mth))
+          ts  (mutate/targets s {'dm.core-test/t #{q} 'dm.core-test/u #{'dm.core/g}} [(:id mth) (:id g)])]
+      (is (= [[q ['dm.core-test/t]] ['dm.core/g ['dm.core-test/u]]]
+             (mapv (juxt :form :tests) ts))))))
+
+(deftest ^:external a-new-defmethod-goes-red-by-being-absent
+  ;; slopp-s8x.4: a new function is a throwing stub in the red state, and that
+  ;; stub is an `intern`: over a defmethod's multi it would replace the multi
+  ;; itself, and the restore would not bring it back.
+  (let [src (str "(ns demo.dm)\n\n(defmulti m :k)\n\n"
+                 "(defmethod m :a [_] 1)\n\n(defmethod m :b [_] 2)\n")
+        s   (store/ingest (store/empty-store) 'demo.dm src)
+        mth (filter #(re-find #"defmethod" (str (n/string (:node %)))) (store/forms s 'demo.dm))
+        a-id (:id (first mth))
+        h   (repl/start!)]
+    (try
+      (repl/eval! h (str src
+                         "(ns demo.dm-test (:require [clojure.test :refer [deftest is]] [demo.dm :as d]))\n"
+                         "(deftest a-t (is (= 1 (d/m {:k :a}))))\n"
+                         "(deftest b-t (is (= 2 (d/m {:k :b}))))\n"
+                         "(in-ns 'user)"))
+      (let [[r] (mutate/prove! h s [{:fid a-id :form (symbol "demo.dm" a-id)
+                                     :tests '[demo.dm-test/a-t] :old nil}]
+                               :budget-ms 30000)]
+        (is (= :proven (:status r)) (pr-str r))
+        (is (= 'demo.dm-test/a-t (:by r))))
+      (testing "the method is back, and the multi and its other method were never disturbed"
+        (is (= [1] (repl/eval! h "(demo.dm/m {:k :a})")))
+        (is (= [2] (repl/eval! h "(demo.dm/m {:k :b})"))))
+      (finally (repl/stop! h)))))
+
+(deftest a-form-whose-mutants-all-failed-to-load-is-owed-not-killed
+  ;; slopp-s8x.4: an invalid mutant only incremented a counter, and no survivor
+  ;; read as :killed, so a form nothing tested came back clean and the
+  ;; false-green rate counted it. A clean row nobody earned.
+  (let [s   (store/ingest (store/empty-store) 'mi.core "(ns mi.core)\n\n(defn f [x] (inc x))\n")
+        fid (:id (store/form-named s 'mi.core 'f))
+        t   {:fid fid :form 'mi.core/f :tests '[mi.core-test/t]}
+        [r] (with-redefs [hotload/hot-load-form! (constantly "it does not compile")]
+              (mutate/mutate! :no-image s [t]))]
+    (is (= :unchecked (:status r)) (pr-str r))
+    (is (= 1 (:invalid r)))
+    (testing "and the finding says why, not that a budget ran out"
+      (let [teach (str/join " " (map :teach (mutate/findings [r])))]
+        (is (re-find #"could not be loaded" teach) teach)
+        (is (not (re-find #"budget ran out" teach)) teach)))))
+
+(deftest a-blank-reason-discharges-nothing
+  ;; slopp-s8x.5: flag_test refuses an empty reason; the two exits that quiet a
+  ;; finding took one, so a marker with an empty reason was a free pass.
+  (let [st (store/ingest (store/empty-store) 'bl.core
+                         (str "(ns bl.core)\n\n"
+                              "(defn ^{:equivalent-mutants {\"< → <=\" \"  \"}} f [x] x)\n"))
+        [r] (mutate/discharge st [{:form 'bl.core/f :status :survived
+                                   :survivors [{:mutation "< → <=" :at "(< a b)"}]}])]
+    (is (= :survived (:status r)) (pr-str r))
+    (is (= 1 (count (:survivors r))))))
+
+(deftest a-failed-restore-still-restores-the-rest
+  ;; slopp-s8x.5: the restore was (first (keep hot-load ...)), lazy, so once a
+  ;; reload failed the forms past its chunk stayed at their OLD versions while
+  ;; the message said the image MAY hold one.
+  (let [src (apply str "(ns rs.core)\n\n" (for [i (range 40)] (str "(defn f" i " [x] x)\n\n")))
+        s   (store/ingest (store/empty-store) 'rs.core src)
+        ids (mapv #(:id (store/form-named s 'rs.core (symbol (str "f" %)))) (range 40))
+        ts  (vec (for [[i id] (map-indexed vector ids)]
+                   {:fid id :form (symbol "rs.core" (str "f" i)) :tests '[rs.core-test/t]
+                    :old (str "(defn f" i " [x] 0)")}))
+        calls (atom {})
+        rs  (with-redefs [hotload/hot-load-form!
+                          (fn [_ _ fid]
+                            (let [n (get (swap! calls update fid (fnil inc 0)) fid)]
+                              (when (and (= 2 n) (= fid (first ids))) "boom")))
+                          repl/eval! (fn [& _] [{:failed [] :passed '[rs.core-test/t]}])]
+              (mutate/prove! :no-image s ts))]
+    (is (every? #(= :restore-failed (:status %)) rs))
+    (is (every? #(= 2 (get @calls %)) ids)
+        (str "forms never reloaded: " (count (remove #(= 2 (get @calls %)) ids))))))

@@ -145,7 +145,10 @@
         (cond
           (nil? m)
           (merge base acc {:mutants (count ms)
-                           :status  (if (seq (:survivors acc)) :survived :killed)})
+                           :status  (cond
+                                     (seq (:survivors acc)) :survived
+                                     (pos? (+ (:killed acc) (:timeout acc))) :killed
+                                     :else :unchecked)})
 
           (<= (left) 0) (assoc base :status :unchecked)
 
@@ -215,29 +218,38 @@
        vec))
 
 (defn defn-source?
-  "True when `src` is a `defn`/`defn-` (reader metadata on the whole form
-  allowed): the only forms mutated, because only a function body is behaviour
-  a test can be asked to notice."
+  "True when `src` holds a function body a test can be asked to notice: a
+  `defn`/`defn-`, a `defmethod`, or a `def` whose value is a `fn` or `#()`
+  (reader metadata on the whole form allowed). Data defs are not: they have no
+  body to run. Logic in a shape this misses is outside red-proof and mutation,
+  so a `defrecord`/`deftype`/`reify` method or a custom defn-like macro is a
+  known limit."
   [src]
   (let [top  (try (z/of-string src) (catch Exception _ nil))
         root (if (and top (= :meta (z/tag top))) (-> top z/down z/rightmost) top)
-        head (some-> root z/down)]
-    (boolean (and head (= :list (z/tag root))
-                  (contains? '#{defn defn-} (try (z/sexpr head) (catch Exception _ nil)))))))
+        head (some-> root z/down)
+        h    (when head (try (z/sexpr head) (catch Exception _ nil)))]
+    (boolean
+     (and head (= :list (z/tag root))
+          (or (contains? '#{defn defn- defmethod} h)
+              (and (= 'def h)
+                   (let [v (try (last (z/sexpr root)) (catch Exception _ nil))]
+                     (and (seq? v) (contains? '#{fn fn*} (first v))))))))))
 
 (defn ^:export targets
-  "The mutation targets among form ids `fids`: each production `defn`, with
-  the tests the trace map `tmap` (`{test #{form …}}`) saw run it, sorted, and
-  its version (see [[form-sig]]). Test namespaces are skipped — a test is the
-  oracle here, not the subject — and so is anything that is not a function."
+  "The mutation targets among form ids `fids`: each production function (see
+  [[defn-source?]]), with the tests the trace map `tmap` (`{test #{form …}}`)
+  saw run it, sorted, and its version (see [[form-sig]]). A `defmethod` has no
+  name of its own, so its `:form` is `ns/<form id>`, the key its trace uses.
+  Test namespaces are skipped: a test is the oracle here, not the subject."
   [store tmap fids]
   (vec (for [fid  fids
              :let [e (store/form-by-id store fid) ns-sym (store/ns-of-form-id store fid)]
-             :when (and e ns-sym (:name e)
+             :when (and e ns-sym
                         (not (str/ends-with? (str ns-sym) "-test"))
                         (defn-source? (n/string (:node e))))
              :let [ks (set (store/form-trace-keys ns-sym e))]]
-         {:fid fid :form (symbol (str ns-sym) (str (:name e))) :sig (form-sig store fid)
+         {:fid fid :form (symbol (str ns-sym) (str (or (:name e) (:id e)))) :sig (form-sig store fid)
           :tests (vec (sort (keep (fn [[t fs]] (when (some #(contains? ks %) fs) t)) tmap)))})))
 
 (defn ^:export findings
@@ -255,7 +267,7 @@
   can stop that thread from outside, so the result says so and names the fix."
   [results]
   (let [by       (group-by :status results)
-        owed     (mapv :form (:unchecked by))
+        owed     (mapv :form (remove :invalid (:unchecked by)))
         untested (mapv :form (:untested by))
         timed    (filterv #(pos? (:timeout % 0)) results)
         names    (fn [xs] (str (str/join ", " (take 5 xs)) (when (> (count xs) 5) ", …")))]
@@ -294,6 +306,11 @@
                               " changed function(s) were checked: " (names owed)
                               ". They are recorded as owed; `verify {op mutate}` checks"
                               " what is owed with a larger budget.")}])
+          (when-let [bad (seq (filter :invalid (:unchecked by)))]
+            [{:severity  :info
+              :unchecked (mapv :form bad)
+              :teach     (str "the mutants of " (names (map :form bad)) " could not be loaded and"
+                              " run, so nothing was learned about the tests. It stays owed.")}])
           (when (seq untested)
             [{:severity :info
               :untested untested
@@ -322,8 +339,9 @@
   (mapv (fn [{:keys [form status survivors] :as r}]
           (if-not (= :survived status)
             r
-            (let [named (some-> (store/form-named store (symbol (namespace form)) (symbol (name form)))
-                                store/form-name-meta :equivalent-mutants)
+            (let [named (into {} (remove (comp str/blank? str val))
+                              (some-> (store/form-named store (symbol (namespace form)) (symbol (name form)))
+                                      store/form-name-meta :equivalent-mutants))
                   left  (vec (remove #(contains? named (:mutation %)) survivors))]
               (cond
                 (empty? named) r
@@ -362,8 +380,7 @@
   (let [by    (group-by :status results)
         exits (str " If the change keeps behaviour (a refactor), waive it on the done call:"
                    " done {untested {\"ns/name\" \"why\"}}. A function no in-image test can"
-                   " watch takes ^{:untested-ok \"why\"} on its name.")
-        names (fn [xs] (str/join ", " (map :form xs)))]
+                   " watch takes ^{:untested-ok \"why\"} on its name.")]
     (vec (concat
           (for [{:keys [form tests]} (:unproven by)]
             {:form  form
@@ -415,13 +432,21 @@
 
 (defn- load-old!
   "Put `fid`'s version from `old` (source text) into `image`; nil `old` means the
-  form is new, so `form` becomes a stub that throws. Returns nil, or why it could
-  not load."
+  form is new, so `form` becomes a stub that throws. A new `defmethod` is removed
+  from its multi instead: `form` names no var, and an intern over the multi would
+  outlive the restore, which only re-evaluates the defmethod. Returns nil, or why
+  it could not load."
   [image store fid form old]
   (if (nil? old)
-    (let [r (try (repl/eval! image (format "(do (intern '%s '%s (fn [& _] (throw (ex-info \"absent before this change\" {})))) :stubbed)"
-                                           (namespace form) (name form)))
-                 (catch Throwable t [(str t)]))]
+    (let [src  (some-> (store/form-by-id store fid) :node n/string)
+          x    (when src (try (n/sexpr (p/parse-string src)) (catch Exception _ nil)))
+          code (if (and (seq? x) (= 'defmethod (first x)))
+                 (format "(let [n (the-ns '%s)] (binding [*ns* n] (remove-method (deref (ns-resolve n '%s)) (eval '%s))) :stubbed)"
+                         (namespace form) (second x) (pr-str (nth x 2)))
+                 (format "(do (intern '%s '%s (fn [& _] (throw (ex-info \"absent before this change\" {})))) :stubbed)"
+                         (namespace form) (name form)))
+          r    (try (repl/eval! image code)
+                    (catch Throwable t [(str t)]))]
       (when (not= [:stubbed] r) (str r)))
     (let [st' (try (first (store/replace-node store (store/ns-of-form-id store fid) fid (p/parse-string old)))
                    (catch Throwable _ nil))]
@@ -461,7 +486,7 @@
             r      (when (seq loaded)
                      (try (first (repl/eval! image (run-all-string (mapcat :tests loaded) budget-ms)))
                           (catch Throwable t (str t))))
-            back   (first (keep #(hotload/hot-load-form! image store %)
+            back   (first (into [] (keep #(hotload/hot-load-form! image store %))
                                 (concat (map :fid some-tests) (keys also-old))))
             failed (set (:failed r))
             ran    (into failed (:passed r))]

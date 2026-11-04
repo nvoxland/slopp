@@ -1675,3 +1675,24 @@
         (let [r (external/done! sess :label "no second waiver")]
           (is (:landed (:land r)) (pr-str (:findings r)))))
       (finally (ops/close! sess)))))
+
+(deftest a-function-a-test-only-reaches-statically-is-held
+  ;; slopp-s8x.4: `(is (fn? p/f))` statically reaches f and never runs it. Any
+  ;; static reach used to downgrade the hold to an :info row labelled 'only
+  ;; tests outside the image reach it', which is not what it computed.
+  (let [st  (-> (store/empty-store)
+                (store/ingest 'hs.core (str "(ns hs.core)\n\n"
+                                            "(defn named-only \"N.\" [x] x)\n\n"
+                                            "(defn ext-run \"E.\" [x] x)\n"))
+                (store/ingest 'hs.core-test
+                              (str "(ns hs.core-test (:require [clojure.test :refer [deftest is]] [hs.core :as p]))\n\n"
+                                   "(deftest names-it (is (fn? p/named-only)))\n\n"
+                                   "(deftest ^:external runs-it (is (= 1 (p/ext-run 1))))\n")))
+        fid #(:id (store/form-named st 'hs.core %))
+        rows (rules/red-proof-check! (atom {:image :no-test-runs-here :test-map {}}) st
+                                     [(fid 'named-only) (fid 'ext-run)])]
+    (testing "an in-image test that only names the function does not excuse it"
+      (is (some #(= 'hs.core/named-only (:form %)) rows) (pr-str rows)))
+    (testing "an external test that reaches it is what the image cannot judge"
+      (is (not-any? #(= 'hs.core/ext-run (:form %)) rows) (pr-str rows))
+      (is (some #(some #{'hs.core/ext-run} (:unjudged %)) rows) (pr-str rows)))))

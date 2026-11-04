@@ -23,14 +23,15 @@
 (defn ^:export rates
   "False-green rates over mutation `results` (one per form, as
   `slopp.rules.mutate/mutate!` returns them). A mutant that timed out counts
-  as caught, since a done that never finishes is not a green one. Rates are
-  nil, not zero, when nothing was measured."
+  as caught, since a done that never finishes is not a green one. A form whose
+  mutants all failed to load is `:unchecked`, not tested: it adds to `:invalid`
+  and to no rate. Rates are nil, not zero, when nothing was measured."
   [results]
   (let [by       (group-by :status results)
         tested   (concat (:killed by) (:survived by))
         caught   (reduce + 0 (map #(+ (:killed % 0) (:timeout % 0)) tested))
         survived (reduce + 0 (map #(count (:survivors %)) tested))
-        invalid  (reduce + 0 (map #(:invalid % 0) tested))
+        invalid  (reduce + 0 (map #(:invalid % 0) (concat tested (:unchecked by))))
         n-surv   (count (:survived by))
         n-test   (count tested)
         n-untest (count (:untested by))

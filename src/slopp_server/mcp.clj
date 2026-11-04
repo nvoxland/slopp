@@ -2049,15 +2049,21 @@
 (defn untested-waivers
   "`done`'s `untested` argument as `{\"ns/name\" \"why\"}`, or nil. It may arrive as
   a map with string or keyword keys, or as a JSON string: a client holding a
-  tool schema from before this argument existed sends objects as text."
+  tool schema from before this argument existed sends objects as text. A waiver
+  with no reason is refused: the reason is all a reviewer has to read."
   [x]
   (let [m (if (string? x)
             (let [v (try (json/parse-string x) (catch Exception _ nil))]
               (if (map? v)
                 v
                 (throw (ex-info (str "untested must be a map of \"ns/name\" to why, got: " x) {:untested x}))))
-            x)]
-    (not-empty (into {} (map (fn [[k v]] [(if (keyword? k) (subs (str k) 1) (str k)) (str v)])) m))))
+            x)
+        w (into {} (map (fn [[k v]] [(if (keyword? k) (subs (str k) 1) (str k)) (str v)])) m)]
+    (when-let [blank (seq (filter (comp str/blank? val) w))]
+      (throw (ex-info (str "untested needs a reason for " (str/join ", " (map key blank))
+                           ": why does this change need no test?")
+                      {:untested x})))
+    (not-empty w)))
 
 (defn- with-verdict
   "A done that is not plainly green, with its verdict at the top level: `:status`,

@@ -1262,6 +1262,22 @@
   `^:unsafe`."
   [{:key :dialect :severity :refuse}])
 
+(defn- outside-image?
+  "Whether target `t`, which no in-image test was observed running, is run only
+  where the image cannot watch: an `^:external` test reaches it, or a test
+  declares `^{:covers}` over a path neither trace nor graph can see. An in-image
+  test that merely NAMES the function does not count: `(is (fn? f))` is a static
+  reach that runs nothing. A `defmethod` has no static callers to read, since
+  dispatch hides them, so its absence from the trace is not a verdict either."
+  [st {:keys [fid form]}]
+  (or (nil? (:name (store/form-by-id st fid)))
+      (boolean
+       (some (fn [{:keys [test via]}]
+               (or (contains? via :declared)
+                   (:external (some-> (store/form-named st (symbol (namespace test)) (symbol (name test)))
+                                      store/form-name-meta))))
+             (refs/covered-by st nil form)))))
+
 (defn red-proof-check!
   "Done rule: every production function changed since the last LANDED done must
   be SHOWN to need the change. `mutate/prove!` builds the state before the change
@@ -1317,8 +1333,7 @@
     (if (or (nil? image) (and (empty? ts) (empty? named)))
       []
       (into (mutate/proof-findings
-             (let [outside? (fn [t] (and (empty? (:tests t))
-                                         (seq (refs/covered-by st* nil (:form t)))))
+             (let [outside? (fn [t] (and (empty? (:tests t)) (outside-image? st* t)))
                    [ext own] ((juxt filter remove) outside? ts)]
                (concat (for [t ext]
                          (assoc (select-keys t [:form :fid]) :status :unprovable
