@@ -1514,6 +1514,7 @@
   ;; whole log.
   (let [sess (external/open!)]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'shc.a "(ns shc.a)\n\n(defn ^:unused-ok one [] 1)\n")
       (external/commit-point! sess "a commit point to plot" :agent "a")
       (let [ctx (server/context sess)

@@ -1058,3 +1058,16 @@
         "a review is a fact about a commit point, so it outlives the thread it was written on")
     (is (nil? (:note (second (store/record-review (store/empty-store) "d7" :flagged :by "n"))))
         "no note is no key")))
+
+(deftest the-landing-span-starts-after-the-last-done-that-was-not-red
+  (let [done (fn [id status] {:id id :op :done :findings {:episode-status status}})
+        w    (fn [id] {:id id :op :replace})
+        span (fn [ds] (mapv :id (store/landing-span {:recent ds})))]
+    (testing "everything after the last good done"
+      (is (= [:b] (span [(w :a) (done :d1 :green) (w :b)]))))
+    (testing "a red done lands nothing, so what it judged is still to land"
+      (is (= [:a :d2 :b] (span [(done :d1 :green) (w :a) (done :d2 :red) (w :b)]))))
+    (testing "a done that judged nothing carried nothing, so it is a boundary"
+      (is (= [:b] (span [(w :a) (done :d1 :none) (w :b)]))))
+    (testing "with no done in the window, all of it"
+      (is (= [:a :b] (span [(w :a) (w :b)]))))))

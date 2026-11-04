@@ -303,6 +303,7 @@
         bare (bare-repo! (str (temp-dir) "/remote.git"))
         sess (external/open! {:slopp.ops/dir dir})]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'mo.core "(ns mo.core)\n(defn ^:unused-ok f [] 1)\n")
       (external/commit-point! sess "v1" :agent "a")
       (testing "default push lands on the slopp branch; main is never created"
@@ -366,6 +367,7 @@
         sess   (external/open! {:slopp.ops/dir seed-d})]
     (try
       ;; seed origin's slopp branch from a store, and main from a "human"
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'im.core "(ns im.core)\n(defn ^:unused-ok f [] 41)\n")
       (external/commit-point! sess "v1" :agent "a")
       (is (nil? (:error (sync/push! seed-d :url origin))))
@@ -416,6 +418,7 @@
         seed-d (temp-dir)
         sess   (external/open! {:slopp.ops/dir seed-d})]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'im2.core "(ns im2.core)\n(defn ^:unused-ok f [] 41)\n")
       (external/commit-point! sess "v1" :agent "a")
       (is (nil? (:error (sync/push! seed-d :url origin))))
@@ -443,6 +446,7 @@
         seed-d (temp-dir)
         sess   (external/open! {:slopp.ops/dir seed-d})]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'ai.core "(ns ai.core)\n(defn ^:unused-ok f [] 41)\n")
       (external/commit-point! sess "v1" :agent "a")
       (is (nil? (:error (sync/push! seed-d :url origin))))
@@ -493,9 +497,10 @@
         bare  (bare-repo! (str (temp-dir) "/remote.git"))
         sess  (external/open! {:slopp.ops/dir dir-a})]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (swap! sess assoc :adopting? true)
-      (ops/ingest! sess 'rt.core "(ns rt.core)\n\n(defn base \"B.\" [x] x)\n")
-      (ops/ingest! sess 'rt.lab "(ns rt.lab)\n\n(defn probe \"P.\" [] 1)\n")
+      (ops/ingest! sess 'rt.core "(ns rt.core)\n\n(defn ^{:unused-ok \"fixture\"} base \"B.\" [x] x)\n")
+      (ops/ingest! sess 'rt.lab "(ns rt.lab)\n\n(defn ^{:unused-ok \"fixture\"} probe \"P.\" [] 1)\n")
       (swap! sess dissoc :adopting?)
 
       (let [ds [(ops/module-platform! sess "rt.core" :cljc :prompt "portable")
@@ -783,6 +788,7 @@
   (let [dir (work-repo! (temp-dir))
         s   (external/open! {:slopp.ops/dir dir})]
     (try
+      (ops/config-file! s "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! s 'al.core "(ns al.core)\n(defn ^:unused-ok f [x] x)\n")
       (external/commit-point! s "first" :agent "alice")
       (is (nil? (:error (sync/publish-local! dir "main")))
@@ -1032,6 +1038,7 @@
         bare  (bare-repo! (str (temp-dir) "/remote.git"))
         sess  (external/open! {:slopp.ops/dir dir-a})]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'pf.core "(ns pf.core)\n\n(defn ^:unused-ok base \"B.\" [x] x)\n")
       (is (nil? (:error (ops/module-platform! sess "pf.dom" :cljs :prompt "browser only"))))
       ;; a namespace only a browser can load
@@ -1181,6 +1188,7 @@
                               (finally (.close repo)))))]
     (try
       (with-open [conn (db/open! dir)] (db/set-meta! conn "git-remote" "."))
+      (ops/config-file! s "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! s 'st.core "(ns st.core)\n(defn ^:unused-ok f [x] x)\n")
       (external/commit-point! s "first" :agent "alice")
       (testing "stale: nothing is minted or moved, and the answer says why"

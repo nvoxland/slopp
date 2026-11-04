@@ -8,7 +8,7 @@
   namespace, and the pair belongs together: they are the store admitting the
   limits of reading."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.ops :as ops] [slopp.ops.external :as external]))
+            [slopp.ops :as ops] [slopp.ops.external :as external] [slopp.store :as store]))
 
 (deftest ^:external observe-captures-what-flows-through
   (let [sess (external/open!)]
@@ -127,3 +127,15 @@
                  :only '[a.core-test/one]})]
       (is (not (contains? o :ns-status)) (pr-str o))
       (is (= '[a.core-test/one] (:only o)) "and it still records WHICH tests it ran"))))
+
+(deftest a-red-run-records-every-failing-test-not-the-capped-detail
+  (let [st  (store/ingest (store/empty-store) 'ob.t-test
+                          "(ns ob.t-test)\n\n(defn t1 [] 1)\n\n(defn t2 [] 2)\n\n(defn t3 [] 3)\n")
+        obs (external/observation-of st {:status :red :ran 3
+                                         :failing [{:test "t1" :detail "first"}]
+                                         :all-failing {"t_test.clj" ["t1" "t2"] "core.clj" ["t2" "t3"]}})]
+    (testing "every failure, qualified and once each, though the detail was capped at one"
+      (is (= '[ob.t-test/t1 ob.t-test/t2 ob.t-test/t3] (:failed-tests obs)))
+      (is (= '[ob.t-test/t1 ob.t-test/t2 ob.t-test/t3] (mapv :test (:failures obs)))))
+    (testing "a green run has none"
+      (is (nil? (:failed-tests (external/observation-of st {:status :green :ran 3})))))))

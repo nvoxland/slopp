@@ -1289,11 +1289,11 @@
   budget ran out) is `:info` too, never a hold."
   [session st* changed]
   (let [{:keys [image test-map untested-waivers proof-trusted db line]} @session
-        ds       (vec (:recent st*))
-        landed?  #(and (= :done (:op %)) (= :green (get-in % [:findings :episode-status])))
-        boundary (:id (last (filter landed? ds)))
-        since    (if boundary (rest (drop-while #(not= boundary (:id %)) ds)) ds)
-        fids     (vec (distinct (concat changed (keep :form-id since))))
+        
+        
+        boundary (store/landing-boundary st*)
+        since    (store/landing-span st*)
+        fids     (vec changed)
         old      (if (and db boundary)
                    (db/sources-at db (or line (db/trunk-line-id! db)) boundary fids)
                    (:sources (first (:baselines st*))))

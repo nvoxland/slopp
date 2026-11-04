@@ -2194,3 +2194,22 @@
                 by   (assoc :by by)
                 note (assoc :note note))]
     [(record-delta store' delta) delta]))
+
+(defn ^:export landing-boundary
+  "The id of the last done in the recent window that was not red, or nil. A red
+  done lands nothing, so it is no boundary: what it judged is still to land. A
+  done that judged nothing carried nothing, so it is one."
+  [store]
+  (:id (last (filter #(and (= :done (:op %))
+                           (not= :red (get-in % [:findings :episode-status])))
+                     (:recent store)))))
+
+(defn ^:export landing-span
+  "The deltas a land would carry: everything after [[landing-boundary]], by any
+  agent. A land takes the whole line, so this and not one agent's episode is what
+  a done has to judge; reading one agent's writes let another's land unjudged."
+  [store]
+  (let [ds (:recent store)]
+    (if-let [b (landing-boundary store)]
+      (rest (drop-while #(not= b (:id %)) ds))
+      ds)))

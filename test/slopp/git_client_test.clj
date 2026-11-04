@@ -213,12 +213,13 @@
         bare (bare-repo! (str (temp-dir) "/remote.git"))
         sess (external/open! {:slopp.ops/dir dir})]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'gc.core seed)
       (external/commit-point! sess "v1: f ships" :agent "alice")
       (let [ctx (git/open-ctx! dir)]
         (try
           (let [sha1 (:pushed (git.client/push-to-remote! ctx bare))
-                _    (ops/ingest! sess 'gc.two "(ns gc.two)\n\n(defn g [] 2)")
+                _    (ops/ingest! sess 'gc.two "(ns gc.two)\n\n(defn ^:unused-ok g [] 2)")
                 _    (external/commit-point! sess "v2: g ships" :agent "alice")
                 sha2 (:pushed (git.client/push-to-remote! ctx bare))]
             (is (string? sha1))

@@ -164,6 +164,7 @@
 (deftest ^:external session-brief-is-the-one-call-orientation
   (let [sess (external/open!)]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'br.a (str "(ns br.a)\n(defn ^:unused-ok f [x] x)\n"
                                    "(defn ^:unused-ok g [x] x)\n"))
       (ops/ingest! sess 'br.b "(ns br.b)\n(defn ^:unused-ok h [x] x)\n")

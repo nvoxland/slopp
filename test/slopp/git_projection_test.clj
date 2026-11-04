@@ -256,6 +256,7 @@
   (let [dir  (temp-dir)
         sess (external/open! {:slopp.ops/dir dir})]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (is (pos? (:forms (ops/ingest! sess 'gl.core "(ns gl.core)\n(defn ^:unused-ok f [] 1)\n"))))
       (is (pos? (:forms (ops/ingest! sess 'gl.lab "(ns gl.lab)\n(defn ^:unused-ok -main [] 1)\n"))))
       (is (pos? (:forms (ops/ingest! sess 'gl.shared "(ns gl.shared)\n(defn ^:unused-ok s [] 1)\n"))))
@@ -343,7 +344,8 @@
   (let [dir  (temp-dir)
         sess (external/open! {:slopp.ops/dir dir})]
     (try
-      (ops/ingest! sess 'mb.core "(ns mb.core)\n\n(defn ^:unused-ok f [] 1)")
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
+      (ops/ingest! sess 'mb.core "(ns mb.core)\n\n(defn f [] 1)")
       (ops/ingest! sess 'mb.core-test
                    (str "(ns mb.core-test (:require [clojure.test :refer [deftest is]]))\n\n"
                         "(deftest t (is (= 1 (mb.core/f))))"))
@@ -382,6 +384,7 @@
   (let [dir  (temp-dir)
         sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "proj"})]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (is (pos? (:forms (ops/ingest! sess 'up.core
                                      "(ns up.core)\n(defn ^:unused-ok f [] :landed)\n"))))
       (let [r (external/commit-point! sess "v1" :agent "proj")]
@@ -447,7 +450,7 @@
     (try
       (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (is (pos? (:forms (ops/ingest! sess 'po.core "(ns po.core)\n(defn ^:unused-ok a [] 1)\n"))))
-      (is (nil? (:error (ops/add-form! sess 'po.core "(defn ^:unused-ok c [] 2)" :prompt "c"))))
+      (is (nil? (:error (ops/add-form! sess 'po.core "(defn c [] 2)" :prompt "c"))))
       ;; a now needs c, which was created AFTER it: the live write reorders
       (is (nil? (:error (ops/edit-replace! sess 'po.core 'a "(defn ^:unused-ok a [] (c))" :prompt "a calls c"))))
       (is (= '[po.core c a] (mapv :name (store/forms (:store @sess) 'po.core))))
@@ -602,6 +605,7 @@
   (let [dir  (temp-dir)
         sess (external/open! {:slopp.ops/dir dir})]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (is (pos? (:forms (ops/ingest! sess 'ap.core "(ns ap.core)\n(defn ^:unused-ok f [] 1)\n"))))
       (let [bs    (.getBytes "console.log('bundle')" "UTF-8")
             entry (artifacts/put! dir bs {:kind :build :tool "compile_client"}

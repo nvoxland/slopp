@@ -110,6 +110,7 @@
   (let [sess (external/open!)]
     (try
       (swap! sess assoc :require-turns? true)
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'cm.core seed)
       (let [call (fn [tool args]
                    (get-in (slopp-server.mcp/handle! sess
@@ -126,6 +127,7 @@
 (deftest ^:external repeat-commit-point-on-unchanged-store-returns-it
   (let [sess (external/open!)]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/create-ns! sess 'rm.core :source "(ns rm.core)\n(defn ^:unused-ok f [] 1)\n")
       (let [m1 (external/commit-point! sess "v1" :agent "t")
             m2 (external/commit-point! sess "anything" :agent "t")]
@@ -244,6 +246,7 @@
   ;; its done and its land; the wire adds the app refresh and the publish.
   (let [sess (external/open!)]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'ms.core "(ns ms.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n")
       (let [r (external/commit-point! sess "timed commit-point" :agent "bob")]
         (is (nil? (:error r)) (pr-str r))

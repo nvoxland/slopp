@@ -2507,6 +2507,7 @@
         week-ago (- (System/currentTimeMillis) (* 8 86400000))]
     (try
       ;; b lands its work: it is now on a fresh thread with nothing to resume
+      (ops/config-file! b "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (is (nil? (:error (ops/ingest! b 'gc.core "(ns gc.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n"))))
       (is (nil? (:error (external/done! b :label "land" :agent "b"))))
       ;; c opens on the moved branch and has un-landed work
@@ -2515,14 +2516,14 @@
           (is (nil? (:error (ops/ingest! c 'gc.other "(ns gc.other)\n(defn ^:unused-ok g \"G.\" [] 2)\n")))
               "c's write lands on c's thread")
           (let [conn   (:db @a)
-                b-line (slopp.ops.engine/session-line b)
-                c-line (slopp.ops.engine/session-line c)
+                b-line (engine/session-line b)
+                c-line (engine/session-line c)
                 rows   (fn [line] (:n (jdbc/execute-one! conn ["SELECT COUNT(*) AS n FROM elements WHERE line = ?" line])))
                 status (fn [line] (:status (first (filter #(= line (:id %)) (db/lines conn)))))]
             (is (zero? (rows b-line)) "b's fresh thread holds NO copy — fork on write")
             (is (pos? (rows c-line)) "c's thread holds its own view: it wrote")
-            (is (pos? (db/unlanded-count conn c-line slopp.read.history/content-ops)) "c has un-landed work")
-            (is (zero? (db/unlanded-count conn b-line slopp.read.history/content-ops)) "b has none")
+            (is (pos? (db/unlanded-count conn c-line history/content-ops)) "c has un-landed work")
+            (is (zero? (db/unlanded-count conn b-line history/content-ops)) "b has none")
             (testing "live owners: nothing is touched"
               (let [r (external/compact-store! a)]
                 (is (zero? (:threads-settled r 0)) (pr-str r))
@@ -3001,3 +3002,63 @@
         "a version change of a dependency the store already has")
     (is (re-find #"deps-allow" (str (ops/deps-allow-refusal st lib "add org.example/left-padding")))
         "a look-alike name in the ask is not the library")))
+
+(deftest ^:external a-close-during-a-lazy-boot-stops-what-the-boot-started
+  (let [sess    (external/open! {:slopp.ops/lazy-image? true})
+        started (promise)
+        go-on   (promise)
+        booted  (atom nil)
+        real    engine/start-image!]
+    (with-redefs [repl/unpark! (constantly nil) ; a recycled image never reaches the launch
+                  engine/start-image!
+                  (fn [s st]
+                    (if (identical? s sess)
+                      (do (deliver started true)
+                          @go-on
+                          (let [img (real s st)] (reset! booted img) img))
+                      (real s st)))]
+      (let [boot (future (try (ops/await-image! sess) :returned
+                              (catch Throwable _ :threw)))]
+        (is (true? (deref started 30000 false)) "fixture: the boot reached the launch")
+        (ops/close! sess)
+        (deliver go-on true)
+        (is (not= ::hung (deref boot 60000 ::hung)))
+        (is (some? @booted) "fixture: the late boot really launched a process")
+        (when-let [^Process p (:process @booted)]
+          (is (not (.isAlive p)) "nothing holds this image, so it must not outlive the boot")
+          (.destroyForcibly p))
+        (is (nil? (:image @sess)) "and the closed session does not pretend to hold it")))))
+
+(deftest ^:external a-closed-session-boots-nothing
+  (let [sess  (external/open! {:slopp.ops/lazy-image? true})
+        calls (atom 0)]
+    (ops/close! sess)
+    (with-redefs [engine/start-image! (let [real slopp.ops.engine/start-image!]
+                                                    (fn [s st] (if (identical? s sess) (do (swap! calls inc) nil) (real s st))))]
+      (is (thrown? clojure.lang.ExceptionInfo (ops/await-image! sess)))
+      (is (zero? @calls)))))
+
+(deftest what-is-still-failing-follows-the-runs-since-the-last-full-one
+  (let [obs  (fn [scope result] {:op :observe :scope scope :result (assoc result :test-run true)})
+        left (fn [& ds] (ops/still-failing {:recent (vec ds)}))]
+    (testing "no external run recorded: no answer, which is not the same as nothing failing"
+      (is (nil? (left))))
+    (testing "a full run's failures"
+      (is (= '[a-test/x b-test/y] (left (obs '[a-test b-test] '{:failed-tests [a-test/x b-test/y]})))))
+    (testing "a green full run leaves nothing"
+      (is (= [] (left (obs '[a-test b-test] {:status :green})))))
+    (testing "a narrower run clears what it ran and adds what it found"
+      (is (= '[b-test/y c-test/z]
+             (left (obs '[a-test b-test c-test] '{:failed-tests [a-test/x b-test/y]})
+                   (obs '[a-test c-test] '{:only [a-test/x c-test/z] :failed-tests [c-test/z]})))))
+    (testing "a one-namespace run clears that whole namespace"
+      (is (= '[b-test/y]
+             (left (obs '[a-test b-test] '{:failed-tests [a-test/x a-test/w b-test/y]})
+                   (obs '[a-test] {:status :green})))))
+    (testing "an older full run is superseded by a newer one"
+      (is (= '[b-test/y]
+             (left (obs '[a-test b-test] '{:failed-tests [a-test/x]})
+                   (obs '[a-test b-test] '{:failed-tests [b-test/y]})))))
+    (testing "only a run test_run made counts: not a done's observation, not another op's result"
+      (is (nil? (left {:op :observe :scope '[a-test b-test] :result '{:failed-tests [a-test/x]}})))
+      (is (nil? (left {:op :verify :scope '[a-test b-test] :result '{:test-run true :failed-tests [a-test/x]}}))))))

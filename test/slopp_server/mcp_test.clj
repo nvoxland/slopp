@@ -424,6 +424,7 @@
         _     (sh/sh "git" "init" "--bare" bareb)
         sess  (external/open! {:slopp.ops/dir dir})]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'pr.core "(ns pr.core)\n(defn ^:unused-ok f [x] x)\n")
       (external/commit-point! sess "seed" :agent "t")
       (testing "the FIRST url is saved as the default"
@@ -5365,4 +5366,67 @@
         (let [d (call! sess "done" {:thread "t-next" :label "unwaived"})]
           (is (not (re-find #":landed \"main\"" d)) d)
           (is (re-find #"unproven-change" d) d)))
+      (finally (ops/close! sess)))))
+
+(deftest the-untested-waiver-reads-a-map-or-a-json-string
+  (testing "keys are the form's name as a string, whichever way they arrive"
+    (is (= {"a.b/c" "why"} (mcp/untested-waivers {"a.b/c" "why"})))
+    (is (= {"a.b/c" "why"} (mcp/untested-waivers {:a.b/c "why"})))
+    (is (= {"a.b/c" "why"} (mcp/untested-waivers "{\"a.b/c\": \"why\"}"))))
+  (testing "nothing means nothing"
+    (is (nil? (mcp/untested-waivers nil)))
+    (is (nil? (mcp/untested-waivers {}))))
+  (testing "text that is not a map is said, not crashed on"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"untested" (mcp/untested-waivers "not json")))))
+
+(deftest the-failure-list-survives-the-trim
+  (let [small  (into {} (for [i (range 60)] [(keyword (str "k" i)) i]))
+        failed (vec (for [i (range 25)] (symbol "some.long-namespace-test" (str "a-failing-test-" i))))
+        out    (#'mcp/fit-payload (assoc small :failed-tests failed :huge (apply str (repeat 5000 "x"))) 1200)]
+    (testing "a reader of a red run gets every failure, whatever else is cut"
+      (is (= failed (:failed-tests (edn/read-string (:body out))))))
+    (testing "and the cut is still a cut"
+      (is (nil? (:huge (edn/read-string (:body out))))))))
+
+(deftest ^:external a-red-run-names-every-failure-and-can-re-run-only-those
+  (let [sess (external/open!)]
+    (try
+      (call! sess "config_file" {:path "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof"})
+      (call! sess "ns_create" {:ns "rr.core" :source "(ns rr.core \"R.\")\n(defn f \"F.\" [x] x)\n"})
+      (call! sess "ns_create" {:ns "rr.core-test"
+                               :source (str "(ns rr.core-test \"T.\" (:require [clojure.test :refer [deftest is]] [rr.core :as c]))\n"
+                                            "(deftest ^:external good (is (= 1 (c/f 1))))\n"
+                                            "(deftest ^:external bad-one (is (= 2 (c/f 1))))\n"
+                                            "(deftest ^:external bad-two (is (= 3 (c/f 1))))\n")})
+      (testing "before any external run there is nothing to re-run, and it says so"
+        (is (re-find #"no external run" (call! sess "test_run" {:external true :failed true}))))
+      (let [r (call! sess "test_run" {:external true :ns "rr.core-test"})]
+        (testing "the run names every failing test, qualified"
+          (is (re-find #":failed-tests" r) r)
+          (is (re-find #"rr.core-test/bad-one" r) r)
+          (is (re-find #"rr.core-test/bad-two" r) r)))
+      (testing "a repeat answering from the record names them too"
+        (let [r (call! sess "test_run" {:external true :ns "rr.core-test"})]
+          (is (re-find #":standing true" r) r)
+          (is (re-find #"rr.core-test/bad-two" r) r)))
+      (testing "and so does the whole-store check, on its first answer and its standing one"
+        (dotimes [_ 2]
+          (let [r (call! sess "full_check" {})]
+            (is (re-find #":failed-tests" r) r)
+            (is (re-find #"rr.core-test/bad-one" r) r))))
+      (testing "fresh runs it anyway"
+        (is (not (re-find #":standing true" (call! sess "test_run" {:external true :ns "rr.core-test" :fresh true})))))
+      (call! sess "change" {:prompt "fix one" :tests [{:ns "rr.core-test" :name "bad-one" :source "(deftest ^:external bad-one (is (= 1 (c/f 1))))"}]})
+      (testing "failed re-runs only what was failing, and the good test does not run"
+        (let [r (call! sess "test_run" {:external true :failed true})]
+          (is (re-find #":ran 2" r) r)
+          (is (re-find #"rr.core-test/bad-two" r) r)
+          (is (not (re-find #"rr.core-test/bad-one" (str (re-find #":failed-tests \[[^\]]*\]" r)))) r)))
+      (testing "and now only the one still failing is left"
+        (call! sess "change" {:prompt "fix the other" :tests [{:ns "rr.core-test" :name "bad-two" :source "(deftest ^:external bad-two (is (= 1 (c/f 1))))"}]})
+        (let [r (call! sess "test_run" {:external true :failed true})]
+          (is (re-find #":ran 1" r) r)
+          (is (re-find #":status :green" r) r)))
+      (testing "with nothing failing there is nothing to run"
+        (is (re-find #"nothing is failing" (call! sess "test_run" {:external true :failed true}))))
       (finally (ops/close! sess)))))

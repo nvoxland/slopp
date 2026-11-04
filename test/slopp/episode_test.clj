@@ -455,6 +455,7 @@
   ;; + form names. Errors are never demoted.
   (let [sess (external/open!)]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'lc.core
                    (str "(ns lc.core)\n\n"
                         "(defn ^:unused-ok stale \"S.\" [x] (let [a x] (let [b a] b)))\n\n"
@@ -914,6 +915,7 @@
                   "(defn ^:unused-ok g [x] (dec x))\n"
                   "(deftest f-t (is (= 2 (f 1))))\n")]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'sp.core src)
       (ops/edit-replace! sess 'sp.core 'f "(defn f [x] (+ x 1))"
                          :prompt "first change" :agent "alice")
@@ -1005,6 +1007,7 @@
   (let [sess (external/open!)
         n-deltas #(count (ops/journal sess))]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'nd.core "(ns nd.core)\n(defn f [x] x)\n")
       (let [first-done (external/done! sess :label "real work")
             after-first (n-deltas)]
@@ -1321,4 +1324,38 @@
         (let [r (external/done! sess :label "green again" :agent "dv")]
           (is (= :green (get-in r [:findings :episode-status])) (pr-str (:findings r)))
           (is (empty? (get-in r [:findings :unloadable-namespaces])) (pr-str (:findings r)))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external a-done-judges-everything-it-would-land
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'jl.core "(ns jl.core \"J.\")\n\n(defn f \"F.\" [x] x)\n" :agent "t")
+      (ops/ingest! sess 'jl.core-test (str "(ns jl.core-test \"T.\" (:require [clojure.test :refer [deftest is]] [jl.core :as c]))\n\n"
+                                           "(deftest f-t (is (= 1 (c/f 1))))\n") :agent "t")
+      (is (:landed (:land (external/done! sess :label "baseline" :agent "t"))) "fixture: the baseline lands")
+      (ops/edit-replace! sess 'jl.core 'f "(defn f \"F.\" [x] (inc x))" :prompt "breaks f-t" :agent "alice")
+      (testing "a second agent's done on the thread judges alice's write and does not land it"
+        (let [r (external/done! sess :label "bob closes" :agent "bob")]
+          (is (= :red (get-in r [:findings :episode-status])) (pr-str (:findings r)))
+          (is (not (:landed (:land r))) (pr-str (:land r)))))
+      (testing "nor does a third agent's, after that done went red"
+        (let [r (external/done! sess :label "carol closes" :agent "carol")]
+          (is (not (:landed (:land r))) (pr-str (:land r)))))
+      (testing "and fixing it lands the lot, whoever calls done"
+        (ops/edit-replace! sess 'jl.core-test 'f-t "(deftest f-t (is (= 2 (c/f 1))))" :prompt "the new behaviour" :agent "alice")
+        (let [r (external/done! sess :label "dave closes" :agent "dave")]
+          (is (= :green (get-in r [:findings :episode-status])) (pr-str (:findings r)))
+          (is (:landed (:land r)) (pr-str (:land r)))))
+      (finally (ops/close! sess)))))
+
+(deftest ^:external another-agents-delete-is-judged-by-the-done-that-lands-it
+  (let [sess (external/open!)]
+    (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
+      (ops/ingest! sess 'dd.core "(ns dd.core \"D.\")\n\n(defn ^{:unused-ok \"fixture\"} a \"A.\" [] 1)\n\n(defn ^{:unused-ok \"fixture\"} b \"B.\" [] 2)\n" :agent "t")
+      (is (:landed (:land (external/done! sess :label "baseline" :agent "t"))) "fixture: the baseline lands")
+      (ops/delete-form! sess 'dd.core 'b :prompt "alice removes it" :agent "alice")
+      (let [r (external/done! sess :label "bob closes" :agent "bob")]
+        (is (= :green (get-in r [:findings :episode-status])) (pr-str (:findings r)))
+        (is (:landed (:land r)) (pr-str (:land r))))
       (finally (ops/close! sess)))))

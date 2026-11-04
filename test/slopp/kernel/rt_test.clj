@@ -161,13 +161,28 @@
   ;; parent and exited the whole suite mid-run with status 0 — which is how
   ;; the from-files CI lane stayed green while never finishing. ^:external
   ;; because the child requires slopp.kernel.rt off the classpath.
+  ;;
+  ;; The pipe stays open until the child has answered, and never closes on a
+  ;; timer: `( sleep 3 ) | clojure` went red under load, when the JVM took longer
+  ;; to start than the pipe lived and the watchdog did its job. Closing it after
+  ;; the answer is what ends the child, since the watchdog waits on that pipe.
   (let [code (str "(require 'slopp.kernel.rt)"
                   " (slopp.kernel.rt/install-parent-watchdog!)"
                   " (slopp.kernel.rt/install-parent-watchdog!)"
                   " (println :threads (count (filter #(= \"slopp-parent-watchdog\" (.getName %))"
                   " (keys (Thread/getAllStackTraces)))))")
-        r    (sh/sh "sh" "-c" (str "( sleep 3 ) | clojure -M -e " (pr-str code)))]
-    (is (re-find #":threads 1" (str (:out r))) (pr-str r))))
+        p    (-> (ProcessBuilder. ^java.util.List ["clojure" "-M" "-e" code])
+                 (.redirectErrorStream true)
+                 (.start))]
+    (try
+      (let [answer (future (->> (line-seq (java.io.BufferedReader.
+                                           (java.io.InputStreamReader. (.getInputStream p))))
+                                (filter #(re-find #":threads" %))
+                                first))]
+        (is (= ":threads 1" (deref answer 120000 :no-answer))))
+      (finally
+        (.close (.getOutputStream p))
+        (.destroyForcibly p)))))
 
 (deftest ^:external the-watchdog-does-not-read-a-closed-stdin-as-a-dead-parent
   ;; The watchdog treated stdin-EOF as \"the parent closed its pipe\" — true for

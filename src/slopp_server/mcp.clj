@@ -162,7 +162,11 @@
                            (pr-str (vec (drop n x)))))))))
 
        (and (map? x) (seq x))
-       (let [kept (fit (sort-by #(count (pr-str %)) (seq x)) "{" "}" budget)]
+       (let [kept (fit (sort-by (fn [e]
+                                     ;; the failures are what a red answer is for: a
+                                     ;; partial list costs a whole re-run to complete
+                                     [(if (= :failed-tests (key e)) 0 1) (count (pr-str e))])
+                                   (seq x)) "{" "}" budget)]
          (when (seq kept)
            (cond-> {:body (pr-str (into {} kept))
                     :note (str (count kept) " of " (count x) " keys shown")
@@ -2309,6 +2313,19 @@
                      #(str (str/join "" (map (fn [n] (str ";; " n "\n")) notes)) %))
           r)))))
 
+(defn untested-waivers
+  "`done`'s `untested` argument as `{\"ns/name\" \"why\"}`, or nil. It may arrive as
+  a map with string or keyword keys, or as a JSON string: a client holding a
+  tool schema from before this argument existed sends objects as text."
+  [x]
+  (let [m (if (string? x)
+            (let [v (try (json/parse-string x) (catch Exception _ nil))]
+              (if (map? v)
+                v
+                (throw (ex-info (str "untested must be a map of \"ns/name\" to why, got: " x) {:untested x}))))
+            x)]
+    (not-empty (into {} (map (fn [[k v]] [(if (keyword? k) (subs (str k) 1) (str k)) (str v)])) m))))
+
 (defn- call-op!
   "THE dispatch seam every route crosses — family dispatch, the bare `--call`
   door, and explore's recursive entries — so it is where a shape is
@@ -3136,8 +3153,7 @@
                                                   :prompt (:prompt a))
                                     (select-keys tools/wire-keys)
                                     (summarize (:verbose a))))))
-      "done" (let [r (let [w (not-empty (into {} (map (fn [[k v]] [(if (keyword? k) (subs (str k) 1) (str k)) (str v)]))
-                                                    (:untested a)))]
+      "done" (let [r (let [w (untested-waivers (:untested a))]
                              (when w (swap! session assoc :untested-waivers w))
                              (try (external/done! session :label (:label a) :agent (:agent a))
                                   (finally (swap! session dissoc :untested-waivers))))
@@ -3227,11 +3243,14 @@
       "test_run" (text!
                        (cond
                          (:external a)
-                         (external/external-test-run! session
-                                                 :ns (some-> (:ns a) symbol)
-                                                 :affected (:affected a)
-                                                 :parallel (some-> (:parallel a) str parse-long)
-                                                 :only (some->> (:only a) (mapv symbol)))
+                         (if (:failed a)
+                           (external/rerun-failed! session)
+                           (external/external-test-run! session
+                                                        :ns (some-> (:ns a) symbol)
+                                                        :affected (:affected a)
+                                                        :fresh (:fresh a)
+                                                        :parallel (some-> (:parallel a) str parse-long)
+                                                        :only (some->> (:only a) (mapv symbol))))
                          ;; surgical spot-checks name a target; bare test_run is
                          ;; almost always the redundant \"confirm everything\" the
                          ;; done-point already does — make ALL explicit, and teach

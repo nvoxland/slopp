@@ -53,6 +53,7 @@
     ;; deps recycle exactly as well as an empty one. park! verifies the image
     ;; back to its boot baseline and STOPS it whenever it cannot, so the worst
     ;; case here is exactly the old behaviour.
+    (swap! session assoc :closed? true) ; first: a boot still running sees it, and stops its own image
     (safely! #(repl/park! (:image @session) (:deps (:store @session))))
     (safely! #(when-let [spare (:spare @session)]
                 (repl/stop! (deref spare 65000 nil))))   ; reap even if still booting
@@ -76,7 +77,7 @@
                           (when (.isDirectory f) (run! rm! (.listFiles f)))
                           (.delete f))]
                   (rm! (java.io.File. ^String d)))))
-    (swap! session dissoc :image :spare :db :reaper :lines :ephemeral-dir? :framework-dir))
+    (swap! session dissoc :image :spare :db :reaper :lines :ephemeral-dir? :framework-dir :boot-image!))
   nil)
 
 (defn sync-with-journal!
@@ -2241,14 +2242,20 @@
   lends, answering nil or a refusal — is asked: a machine-wide budget lives
   with the one process that sees every image, and the refusal names the
   fix. A boot failure throws to the caller as a sync open's would; the
-  thunk stays, so the next call tries again."
+  thunk stays, so the next call tries again.
+
+  A CLOSED session refuses: a call that outlives the session, such as a Stop
+  hook's done racing SessionEnd, would otherwise start a JVM nothing will stop."
   [session]
+  (when (:closed? @session)
+    (throw (ex-info "this session is closed, so it boots no image" {:closed true})))
   (when (and (nil? (:image @session)) (:boot-image! @session))
     (locking session
       (when (nil? (:image @session))
         (when-let [why (some-> (:image-permit @session) (apply []))]
           (throw (ex-info why {:image-budget true})))
-        ((:boot-image! @session)))))
+        (when-let [boot! (:boot-image! @session)]
+          (boot!)))))
   (when-let [p (:image-ready @session)]
     (let [r (deref p)]
       (when (instance? Throwable r) (throw r))))
@@ -5684,6 +5691,29 @@
                             " seconds to come up; ask again and :app carries its"
                             " url. If it never appears, the server's stderr"
                             " carries the boot verdict")))))
+
+(defn ^:export still-failing
+  "The tests still failing in the external tier, as far as this session's recent
+  runs say: the last whole run's failures, then each narrower run clearing what it
+  covered and adding what it found. A run naming tests covers those tests; a run
+  of a namespace covers that namespace. nil when no external run is recorded, which
+  is not the same answer as `[]`, nothing failing.
+
+  This is what makes a red run cheap to work through: fix some, re-run only these,
+  and run the whole tier once at the end."
+  [st]
+  (let [runs  (vec (filter #(and (= :observe (:op %)) (:test-run (:result %))) (:recent st)))
+        full? (fn [d] (and (nil? (:only (:result d))) (< 1 (count (:scope d)))))
+        last-full (last (keep-indexed (fn [i d] (when (full? d) i)) runs))]
+    (when (seq runs)
+      (reduce (fn [acc d]
+                (let [r       (:result d)
+                      only    (some-> (:only r) set)
+                      scope   (set (:scope d))
+                      covered (if only only #(contains? scope (some-> (namespace %) symbol)))]
+                  (vec (distinct (concat (remove covered acc) (:failed-tests r))))))
+              []
+              (subvec runs (or last-full 0))))))
 
 (defn create-ns!
   "F4: bring a brand-new namespace into being — two modes:

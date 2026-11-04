@@ -115,7 +115,13 @@
           vdir     (engine/framework-dir! session store)
           recycled (when-not vdir (repl/unpark! (engine/image-deps store)))
           image    (or recycled (engine/start-image! session store))]
-      (swap! session assoc :image image)
+      (let [[before _] (swap-vals! session #(if (:closed? %) % (assoc % :image image)))]
+        ;; Atomic with close!'s mark: the image is either on the session for
+        ;; close! to release, or close! has passed and it is ours to stop.
+        ;; Otherwise a session closed during this boot leaves a JVM nothing holds.
+        (when (:closed? before)
+          (repl/stop! image)
+          (throw (ex-info "the session closed while its image booted" {:closed true}))))
       (engine/start-spare! session)
       (let [t      (java.util.Timer. "slopp-branch-reaper" true)
             period (long (max 1000 (quot ttl 3)))]
@@ -124,7 +130,8 @@
                      (run [] (try (ops/reap-idle-images! session)
                                   (catch Throwable _))))
                    period period)
-        (swap! session assoc :reaper t))
+        (swap! session assoc :reaper t)
+        (when (:closed? @session) (.cancel t)))
       ;; No reset: a fresh image is minted with an empty record and a recycled
       ;; one was emptied by `reset-to-baseline!`, which is where its handle
       ;; changed tenant. This used to reset a process-global atom, because the
@@ -1107,7 +1114,8 @@ client-deps (merge (:client-deps st) (:client provided))
                                             :lint-warnings :checked])
                          :scope :full-check)
             (:test res)     (assoc :test (select-keys (:test res) [:test :pass :fail :error]))
-            (:external res) (assoc :external (select-keys (:external res) [:ran :status])))))
+            (:external res) (assoc :external (select-keys (:external res) [:ran :status]))
+            (:failed-tests res) (assoc :failed-tests (:failed-tests res)))))
        []))))
 
 (defn ^:export compact-store!
@@ -1199,8 +1207,12 @@ client-deps (merge (:client-deps st) (:client provided))
         ;; DISTINCT: clojure.test emits a FAIL block per failing ASSERTION, so one
         ;; red test arrives three times. The observation records which tests went
         ;; red, not how many of their assertions did — measured on a real red run
-        failures (vec (distinct (for [f (:failing result) :when (:test f)]
-                                  {:test (qualify (:test f))})))
+        failures (vec (sort-by (comp str :test)
+                              (distinct (for [nm (concat (keep :test (:failing result))
+                                                         ;; :failing is capped detail; this
+                                                         ;; rollup is every failing test
+                                                         (mapcat val (:all-failing result)))]
+                                          {:test (qualify nm)}))))
         per-ns   (when (and (:ns-ms result) (not (:only result)))
                    ;; a NARROWED run (:only) executed some tests inside these
                    ;; namespaces, not all of them — its green is evidence about
@@ -1222,6 +1234,7 @@ client-deps (merge (:client-deps st) (:client provided))
       (:ns-ms result) (assoc :ns-ms (:ns-ms result))
       per-ns          (assoc :ns-status per-ns)
       ;; what the run WAS — `standing-run` finds a repeat by these
+      (seq failures)     (assoc :failed-tests (mapv :test failures))
       (:test-run result) (assoc :test-run true)
       (:only result)     (assoc :only (:only result)))))
 
@@ -1242,15 +1255,18 @@ client-deps (merge (:client-deps st) (:client provided))
   The shell: [[observation-of]] and `closure-hashes` are the transforms, and
   the parts that can be WRONG are all in there. Returns the result WITHOUT
   the `:test-run` marker: that is for the record, where a repeated run finds
-  it (`ops/standing-run`), not for the caller."
+  it (`ops/standing-run`), not for the caller. It carries `:failed-tests`,
+  every failing test qualified, so a fresh answer and a standing one name the
+  same tests."
   [session scope result]
-  (let [st (:store @session)]
+  (let [st  (:store @session)
+        obs (observation-of st result)]
     (engine/commit-appended!
      session
-     #(store/record-observation % scope (observation-of st result)
-                                (engine/closure-hashes st scope))
-     []))
-  (dissoc result :test-run))
+     #(store/record-observation % scope obs (engine/closure-hashes st scope))
+     [])
+    (cond-> (dissoc result :test-run)
+      (:failed-tests obs) (assoc :failed-tests (:failed-tests obs)))))
 
 (defn ^:export external-test-run!
   "Run the STORE's test suite in a FRESH EXTERNAL JVM: materialize the store
@@ -1302,7 +1318,7 @@ client-deps (merge (:client-deps st) (:client provided))
   is the only place their test→form evidence can come from. Silent — the
   trace lands in the session's test-map (and persists), surfacing later as
   honest `:warranty` and affected-test narrowing, not as output here."
-  [session & {:keys [alias ns only affected parallel nses]}]
+  [session & {:keys [alias ns only affected parallel nses fresh]}]
   (let [t0    (System/currentTimeMillis)
         stamp (fn [r] (cond-> r (map? r) (assoc :ms (- (System/currentTimeMillis) t0))))
         aff   (when affected (ops/affected-test-nses session))]
@@ -1331,7 +1347,7 @@ client-deps (merge (:client-deps st) (:client provided))
                                                   only)))))
                            []))
             selection (when (seq only) (vec (map #(symbol (str %)) only)))
-            standing  (ops/standing-run (:store @session) :observe scope selection)]
+            standing  (when-not fresh (ops/standing-run (:store @session) :observe scope selection))]
         (if standing
           (stamp (assoc standing :external true))
           (let [par (cond (some? parallel) parallel
@@ -1796,6 +1812,7 @@ client-deps (merge (:client-deps st) (:client provided))
       (seq (:unused rep)) (assoc :unused-public (:unused rep))
       (seq (:stale rep))  (assoc :stale-unused-ok (:stale rep))
       iso                 (assoc :external iso)
+      (:failed-tests iso) (assoc :failed-tests (:failed-tests iso))
       ;; The three fields this check REPORTS rather than EARNS — the host's
       ;; image (friction #10), the browser bundle, and the served app (slopp-ui
       ;; friction #5). A whole-store green is exactly the verdict an agent
@@ -2054,14 +2071,16 @@ client-deps (merge (:client-deps st) (:client provided))
         ;; declare/require hygiene, the suite and the external slice all skip),
         ;; which is why the guard only has to stop the RECORDING.
         standing (unchanged-since-done st agent)
-        changed  (->> (history/episode-span st agent)
-                      (filter (let [agents (engine/episode-agents session agent)]
-                                ;; mine, and what my CHILD threads landed here
-                                #(and (contains? history/content-ops (:op %))
-                                      (contains? agents (:agent %)))))
-                      (mapcat history/delta-fids)
-                      distinct
-                      (filter #(store/ns-of-form-id st %)))
+        changed  (when-not standing
+                   (->> ;; mine, and what my CHILD threads landed here
+                        ;; exactly what the land carries: every write on this line
+                        ;; by anyone, and nothing already on the branch, whose red
+                        ;; is somebody else's
+                        (engine/land-deltas session st)
+                        (filter #(contains? history/content-ops (:op %)))
+                        (mapcat history/delta-fids)
+                        distinct
+                        (filter #(store/ns-of-form-id st %))))
         rewrites (done/normalize-rewrites changed st)
         _        (done/apply-normalization! rewrites st label agent  session)
         ;; automatic declare hygiene: the pipeline OWNS declares (auto-inserted
@@ -2069,7 +2088,7 @@ client-deps (merge (:client-deps st) (:client provided))
         ;; remove it here. SILENT: the agent never manages declares, so this
         ;; runs for effect and is not reported.
         _
-        (doseq [ns* (done/touched-namespaces session (:store @session) agent changed)]
+        (doseq [ns* (done/touched-namespaces session (:store @session) changed)]
           (ops/fix-declares! session ns*
                          :prompt (or label "done declare hygiene")
                          :agent agent))
@@ -2079,7 +2098,7 @@ client-deps (merge (:client-deps st) (:client provided))
         ;; manages unused requires; done does.
         pruned-reqs
         (into (sorted-map)
-              (for [ns* (done/touched-namespaces session (:store @session) agent changed)
+              (for [ns* (done/touched-namespaces session (:store @session) changed)
                     :let [pr (ops/prune-requires! session ns*
                                                   :prompt (or label "done require hygiene")
                                                   :agent agent)]
@@ -2087,7 +2106,7 @@ client-deps (merge (:client-deps st) (:client provided))
                 [ns* pr]))
         ;; kondo lint over every namespace touched since the last done-point —
         ;; carried mid-episode errors (stale callers) get re-checked HARD here
-        lint (done/anchored-lint session (done/touched-namespaces session (:store @session) agent changed))
+        lint (done/anchored-lint session (done/touched-namespaces session (:store @session) changed))
         ;; the unused-public GATE: unmarked dead surface — and stale
         ;; ^:unused-ok markers — join as ERROR-grade lint (never demoted)
         unused-rep (let [st* (:store @session)]
@@ -2096,7 +2115,7 @@ client-deps (merge (:client-deps st) (:client provided))
                      ;; caller, so the store-wide sweep is real — it is just
                      ;; `full_check`'s job, not every done point's.
                      (read.modules/unused-report
-                      st* (done/touched-namespaces session st* agent changed)))
+                      st* (done/touched-namespaces session st* changed)))
         lint (done/with-unused-gate lint unused-rep)
         ;; NEW warnings (on forms this episode touched) report in full;
         ;; CARRIED ones (pre-existing, untouched forms) compress to a count —
@@ -2149,7 +2168,7 @@ client-deps (merge (:client-deps st) (:client provided))
                              ;; suite, which would otherwise grade a namespace
                              ;; no fresh process can load
                              (engine/reload-namespaces!
-                              session (done/touched-namespaces session st* agent changed))
+                              session (done/touched-namespaces session st* changed))
                              (mapv :ns (:image-load-failures @session)))
                 main-ns  (vec (sort (remove (set unloadable)
                                             (keys (:namespaces st*)))))
@@ -2296,7 +2315,7 @@ client-deps (merge (:client-deps st) (:client provided))
       nothing-judged? (and (nil? summary) (nil? iso) (zero? lint-errors)
                            ;; a delete-only episode has no form left to run a
                            ;; suite for, but it DID judge its namespaces above
-                           (empty? (done/touched-namespaces session st* agent changed)))
+                           (empty? (done/touched-namespaces session st* changed)))
       missing-doc (vec (sort (distinct
                               (keep (fn [fid]
                                       (when-let [e (store/form-by-id st* fid)]
@@ -2708,3 +2727,16 @@ client-deps (merge (:client-deps st) (:client provided))
                             (assoc :config (cond-> (:config st)
                                              (read.modules/modules-config-entry st)
                                              (assoc "modules" (read.modules/modules-config-entry st)))))))))))))
+
+(defn ^:export rerun-failed!
+  "Run only what [[slopp.ops/still-failing]] says is still failing: about 30s rather
+  than the whole tier's minutes. With nothing failing, or no run to go on, it runs
+  nothing and says which."
+  [session]
+  (let [t (ops/still-failing (:store @session))]
+    (cond
+      (nil? t)   {:status :none :ran 0
+                  :note "no external run recorded yet: test_run {external true} makes the first"}
+      (empty? t) {:status :green :ran 0
+                  :note "nothing is failing: the last external run and everything since passed"}
+      :else      (external-test-run! session :only t))))

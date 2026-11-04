@@ -17,7 +17,7 @@
   Mostly `^:external`: a done-advisory's input is an episode, which needs a
   real session with a real baseline and real verification deltas behind it."
   (:require [clojure.test :refer [deftest testing is]]
-            [slopp.rules :as rules] [slopp.store :as store] [slopp.ops :as ops] [clojure.set :as set] [slopp.ops.external :as external] [slopp.rules.catalog :as catalog] [slopp.edit.http :as edit.http] [slopp.edit.gates :as gates] [slopp.project.capabilities :as capabilities] [clojure.string :as str] [slopp.rules.http :as rules.http] [slopp.store.fields :as fields] [rewrite-clj.parser :as p] [slopp.rules.rest :as rules.rest] [slopp.edit :as edit]))
+            [slopp.rules :as rules] [slopp.store :as store] [slopp.ops :as ops] [clojure.set :as set] [slopp.ops.external :as external] [slopp.rules.catalog :as catalog] [slopp.edit.http :as edit.http] [slopp.edit.gates :as gates] [slopp.project.capabilities :as capabilities] [clojure.string :as str] [slopp.rules.http :as rules.http] [slopp.store.fields :as fields] [rewrite-clj.parser :as p] [slopp.rules.rest :as rules.rest] [slopp.edit :as edit] [slopp.ops.branch :as branch]))
 
 (deftest done-advisory-registry-and-severity
   (testing "the registry carries every done-time advisory with a key, severity, and check"
@@ -229,7 +229,7 @@
           (is (re-find #"(?i)nothing has happened" (:note again)) (pr-str again))))
       (testing "and it does NOT re-fire on the next done that judges something —
                 one prompt, not nagging"
-        (ops/add-form! sess 'sw.core "(defn later-work [x] x)" :prompt "more work")
+        (ops/add-form! sess 'sw.core "(defn ^:unused-ok later-work [x] x)" :prompt "more work")
         (let [f (get-in (external/done! sess :label "later") [:findings :shell-widening])]
           (is (nil? f) (pr-str f))))
       (testing "and it is advisory: a question does not turn the done red"
@@ -659,6 +659,7 @@
   ;; only what passes through them, so something has to ask again.
   (let [sess (external/open!)]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'sw.core
                    (str "(ns sw.core \"Reaches the network by hand.\")\n\n"
                         "(defn ^{:unused-ok \"fixture: the standing violation\"} fetch\n"
@@ -672,6 +673,8 @@
         (is (= '[sw.core/fetch]
                (mapv :form (get-in (external/done! sess :label "wrote it")
                                    [:findings :direct-http])))))
+      (is (= "main" (:landed (branch/land-thread! sess)))
+          "fixture: landed directly, because a red done lands nothing and the next done would judge it again")
       (ops/add-form! sess 'sw.core
                      "(defn ^{:unused-ok \"fixture: unrelated work\"} tag \"Tags.\" [x] x)"
                      :prompt "an episode that touches something else")

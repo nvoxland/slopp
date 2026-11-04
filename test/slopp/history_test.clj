@@ -47,6 +47,7 @@
   (let [sess (external/open!)
         at   (fn [nm at] (history/query-form-at (ops/with-history sess) 'hi.core nm :at at))]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'hi.core seed)
       (let [v1 (external/commit-point! sess "v1: f adds one" :agent "a")]
         (ops/edit-replace! sess 'hi.core 'f "(defn f [x] (+ x 100))"
@@ -100,6 +101,7 @@
 (deftest ^:external was-green-at-reads-the-verification-arc
   (let [sess (external/open!)]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'hi.core seed)
       (let [green-head (:head (:store @sess))]
         (testing "a delta after a passing verify is green, naming its verify delta"
@@ -422,6 +424,7 @@
   ;; except one request per commit point, and even that would not answer it.
   (let [sess (external/open!)]
     (try
+      (ops/config-file! sess "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (ops/ingest! sess 'shp.a "(ns shp.a)\n\n(defn ^:unused-ok one [] 1)\n")
       (external/commit-point! sess "first" :agent "a")
       (ops/ingest! sess 'shp.b "(ns shp.b)\n\n(defn ^:unused-ok two [] 2)\n")

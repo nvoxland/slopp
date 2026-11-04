@@ -1316,21 +1316,6 @@
                 (first (filter #(= line-id (:id %)) (db/lines conn))))]
       (str "thread " (or (:agent row) line-id)))))
 
-^:reads (defn ^:export episode-agents
-  "Whose deltas an episode on this session's line GRADES: `agent`'s own, and
-  those of every CHILD thread that has landed into this line. A child
-  (`thread_open {parent}`) lands into its parent rather than the branch, so
-  the parent's done is what stands behind that work when the parent lands —
-  a done that graded only its own agent's deltas would land a subagent's
-  work unjudged. Read from the registry, not the session: a child's row
-  survives its land with `parent` still naming this line."
-  [session agent]
-  (into #{agent}
-        (when-let [conn (:db @session)]
-          (when-let [line (:line @session)]
-            (into #{} (comp (filter #(= line (:parent %))) (keep :agent))
-                  (db/lines conn))))))
-
 (defn ^:export reload-namespaces!
   "Reload `nses` and every namespace that (transitively) requires one of
   them WHOLE into the session's image, dependencies first, and answer the
@@ -2090,6 +2075,17 @@
              ;; noise about an implementation detail
              boundary? (dissoc :external-pending))]
     (assoc r :ms (- (System/currentTimeMillis) t0))))
+
+^:reads (defn ^:export land-deltas
+  "What a land of this session's line would carry: every write on the line by
+  anyone, a child thread's too, and nothing already on the branch, whose red is
+  somebody else's. A rebase's replayed copies (`:merged-from`) are landed work. A
+  done judges this, because one agent's episode is narrower than what the land
+  takes. A session with no journal has only the store value's recent window."
+  [session st]
+  (if-let [conn (:db @session)]
+    (remove :merged-from (db/unlanded-deltas conn (session-line session)))
+    (store/landing-span st)))
 
 (defn ^{:export "slopp-server"} refresh-cache!
   "Advance the cached store from the journal (the record of truth in a

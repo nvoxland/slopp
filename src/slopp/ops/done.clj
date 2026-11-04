@@ -34,7 +34,7 @@
             [slopp.index :as index]
             [slopp.index.normalize :as normalize]
             [slopp.store.render :as store.render]
-            [slopp.store :as store] [rewrite-clj.node :as n] [slopp.read.history :as history] [slopp.edit.modules :as edit.modules] [slopp.index.refs :as refs]))
+            [slopp.store :as store] [rewrite-clj.node :as n] [slopp.edit.modules :as edit.modules] [slopp.index.refs :as refs]))
 
 (defn normalize-rewrites "Which of the episode's `changed` form ids the normalizer would actually
   rewrite, as `[{:form-id :form :node :applied}]` — pure, nothing committed.
@@ -242,22 +242,19 @@
                declared)))
 
 (defn touched-namespaces
-  "The namespaces this episode TOUCHED, derived from the deltas rather than
+  "The namespaces this done has to judge, derived from the deltas rather than
   from the post-state: the namespace of every form in `changed` (ids the
-  store still holds), plus the `:ns` of every `:delete` delta the episode's
-  agents appended. A deleted form has no namespace in the store any more,
-  so a set derived from `ns-of-form-id` alone was EMPTY for a delete-only
-  episode — no lint, no dead-surface scan, a done that judged nothing — and
-  the red the deletion had just fixed stood for the commit point."
-  [session st agent changed]
-  (let [agents (engine/episode-agents session agent)]
-    (vec (distinct
-          (concat (keep #(store/ns-of-form-id st %) changed)
-                  (for [d (history/episode-span st agent)
-                        :when (and (= :delete (:op d))
-                                   (contains? agents (:agent d))
-                                   (symbol? (:ns d)))]
-                    (:ns d)))))))
+  store still holds), plus the `:ns` of every `:delete` the land would carry.
+  A deleted form has no namespace in the store any more, so a set derived from
+  `ns-of-form-id` alone was EMPTY for a delete-only episode — no lint, no
+  dead-surface scan, a done that judged nothing — and the red the deletion had
+  just fixed stood for the commit point."
+  [session st changed]
+  (vec (distinct
+        (concat (keep #(store/ns-of-form-id st %) changed)
+                (for [d (engine/land-deltas session st)
+                      :when (and (= :delete (:op d)) (symbol? (:ns d)))]
+                  (:ns d))))))
 
 (defn episode-spread
   "`{:forms :namespaces :modules}` for the episode's changed form ids `form-ids`, over PRODUCTION namespaces only (test namespaces are skipped)."

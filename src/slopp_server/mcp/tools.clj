@@ -398,11 +398,12 @@
                                :target {:type "string"}}
                   :required ["label"]}}
    {:name "test_run" :read-only true
-    :description "SPOT-CHECK specific tests: {ns \"x.y-test\"} or {only [\"x.y-test/some-t\"]}. Targets run in their OWN tier: in-image members in-image, named ^:external members in one serial external JVM — the red/green fast lane for an external test needs no {external true} detour. You do NOT need this before done or commit_point — done runs the affected tests in every tier (impacted ^:external included) and the commit-point runs the whole external suite itself. Whole in-image suite: {all true} (rarely needed). Explicit full external run: {external true} — fresh JVM, auto-shards (:parallel N overrides), {affected true} narrows to test nses reaching changes since the last commit-point. Red external runs return :failing + :all-failing {file [tests]} + :themes."
+    :description "SPOT-CHECK specific tests: {ns \"x.y-test\"} or {only [\"x.y-test/some-t\"]}. Targets run in their OWN tier: in-image members in-image, named ^:external members in one serial external JVM — the red/green fast lane for an external test needs no {external true} detour. You do NOT need this before done or commit_point — done runs the affected tests in every tier (impacted ^:external included) and the commit-point runs the whole external suite itself. Whole in-image suite: {all true} (rarely needed). Explicit full external run: {external true} — fresh JVM, auto-shards (:parallel N overrides), {affected true} narrows to test nses reaching changes since the last commit-point. Red external runs return :failed-tests (every failure, qualified) + :failing (capped detail) + :all-failing {file [tests]} + :themes. After fixing, {external true failed true} re-runs only what is still failing: fix them together, and run the whole tier once at the end."
     :inputSchema {:type "object"
                   :properties {:ns {:type "string"}
                                :only {:type "array" :items {:type "string"}}
                                :all {:type "boolean"}
+                               :failed {:type "boolean" :description "with external: run only what the last external run found failing and nothing since has cleared"}
                                :external {:type "boolean"}
                                :affected {:type "boolean"}
                                :fresh {:type "boolean"}

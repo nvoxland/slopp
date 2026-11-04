@@ -551,13 +551,14 @@
   ;; value, not just the namespace it touched, so a resume sees everything.
   (let [dir  (str (java.nio.file.Files/createTempDirectory "fw" (make-array java.nio.file.attribute.FileAttribute 0)))
         a    (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "alice"})
-        rows (fn [sess line] (:n (next.jdbc/execute-one! (:db @sess) ["SELECT COUNT(*) AS n FROM elements WHERE line = ?" line])))
-        nss  (fn [sess line] (:n (next.jdbc/execute-one! (:db @sess) ["SELECT COUNT(DISTINCT ns) AS n FROM elements WHERE line = ?" line])))]
+        rows (fn [sess line] (:n (jdbc/execute-one! (:db @sess) ["SELECT COUNT(*) AS n FROM elements WHERE line = ?" line])))
+        nss  (fn [sess line] (:n (jdbc/execute-one! (:db @sess) ["SELECT COUNT(DISTINCT ns) AS n FROM elements WHERE line = ?" line])))]
     (try
+      (ops/config-file! a "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (is (nil? (:error (ops/ingest! a 'fw.core "(ns fw.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n"))))
       (is (nil? (:error (ops/ingest! a 'fw.util "(ns fw.util)\n(defn ^:unused-ok u \"U.\" [] 2)\n"))))
       (is (nil? (:error (external/done! a :label "land" :agent "alice"))))
-      (let [fresh (slopp.ops.engine/session-line a)]
+      (let [fresh (engine/session-line a)]
         (testing "after the land, the fresh thread holds NO copy"
           (is (zero? (rows a fresh)) "no element rows for a thread that has written nothing"))
         (testing "and still reads its branch whole"
@@ -566,8 +567,8 @@
         (testing "a BOOKKEEPING delta is not a write: a turn marker leaves it rowless"
           ;; the first marker after a done used to copy the whole store onto
           ;; the thread, which is the 138-copies problem back through the side door
-          (slopp.ops.engine/commit-appended! a #(first (slopp.store/record-turn % :turn-begin :agent "alice" :intent "a look")) [])
-          (is (not= (slopp.store.db/line-head (:db @a) fresh) (slopp.store.db/line-base (:db @a) fresh)) "fixture: the marker moved the head")
+          (engine/commit-appended! a #(first (store/record-turn % :turn-begin :agent "alice" :intent "a look")) [])
+          (is (not= (db/line-head (:db @a) fresh) (db/line-base (:db @a) fresh)) "fixture: the marker moved the head")
           (is (zero? (rows a fresh)) "still no element rows"))
         (testing "a returning session adopts the rowless thread and sees everything"
           (let [a2 (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "alice"})]
@@ -622,6 +623,7 @@
         line   (atom nil)
         branch (atom nil)]
     (try
+      (ops/config-file! a "rules" :key "unproven-change" :value "off" :prompt "this fixture is not about test proof")
       (is (nil? (:error (ops/ingest! a 'sv.core "(ns sv.core)\n(defn ^:unused-ok f \"F.\" [] 1)\n"))))
       (is (nil? (:error (external/done! a :label "land" :agent "alice"))))
       ;; give alice's fresh thread the pre-fork-on-write shape: a copied view
