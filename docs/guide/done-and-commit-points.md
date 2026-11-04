@@ -178,7 +178,8 @@ most about 10 seconds; the functions it did not reach are listed as
 larger budget (`{ns X}` checks one namespace).
 
 On the day it shipped, a third of these planted faults in slopp's own recently
-changed code got past the tests `done` runs.
+changed code got past the tests `done` runs. Two days later it was a quarter,
+over different code, so that is a direction and not a measured effect.
 
 **The test grading a change is not the agent's to edit.** A write that changes
 an existing test whose traced coverage reaches code the agent changed in this

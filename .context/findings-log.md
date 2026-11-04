@@ -3304,6 +3304,30 @@ first survivors reviewed by hand that was 4 of 13, so read 33.7% as an upper
 bound of the true miss rate, not the rate. Each run appends a `false-green`
 measurement row; this is the baseline to compare later runs against.
 
+**After, 2026-11-04** (same command, last 50 trunk episodes; 19s):
+
+| | baseline | now |
+|---|---|---|
+| functions in the window | 145 | 68 |
+| tested functions | 94 | 40 |
+| defects planted and run | 356 | 173 |
+| defects every test still passed | 33.7% | **25.4%** |
+| tested functions with a surviving defect | 56.4% | **45.0%** |
+| could not be judged | 50 defects | 77 defects, 18 forms |
+
+The direction is right and the comparison is weak. The two windows hold
+different functions, and the second is mostly work done after the mechanisms
+existed, by one agent, on this store. The instrument also changed on 11-04: a
+form whose mutants all failed to load no longer counts as tested and clean, and
+`def` of a `fn` and `defmethod` count. So this does not show Wave 1 caused the
+drop. A fair test replays one fixed set of tasks with the mechanisms on and off.
+
+**Red-proof on this store** (`query_rule_telemetry`, all dones since it shipped
+2026-11-03): `:unproven-change` fired on 19 dones, 29 instances, 19 discharged
+and 5 repeated at a later done. Holds that caught real gaps on 11-04: a guard
+exemption nobody had tested, a rate change with no test. The telemetry does not
+split holds from waivers.
+
 **Red-first** (`rules/red-first-rate` over the trunk journal since its last
 compaction, now on every `full_check` as `:red-first`): of existing deftests
 that GAINED assertions, 14 of 27 (52%) were seen failing before their
