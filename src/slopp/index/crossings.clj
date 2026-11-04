@@ -295,7 +295,9 @@
   and the one real hole drowns in five false ones. That precision failure is
   what got the `:positional-form-access` advisory withdrawn, so it is a named
   hazard rather than a hypothetical."
-  {:http/auth      "a policy the dispatcher enforces in-process, on data that
+  {:facet/claims   "the claims a route's port checks with the actor it resolved,
+                   in-process, before the handler runs"
+   :http/auth      "a policy the dispatcher enforces in-process, on data that
                    never leaves"
    :http/effectful "declares the handler performs its own effects — a statement
                    about where effects run, not about anything crossing"
