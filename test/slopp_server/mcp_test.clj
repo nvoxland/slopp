@@ -5430,3 +5430,24 @@
       (testing "with nothing failing there is nothing to run"
         (is (re-find #"nothing is failing" (call! sess "test_run" {:external true :failed true}))))
       (finally (ops/close! sess)))))
+
+(deftest a-held-done-says-so-whatever-the-trim-cuts
+  (let [r   {:done "d1"
+             :findings {:episode-status :red :test-status :red
+                        :unproven-change [{:form 'a/held :teach (apply str (repeat 400 "why "))}
+                                          {:severity :info :unjudged ['a/fine] :teach "t"}]
+                        :big (apply str (repeat 5000 "x"))}}
+        out (#'mcp/terse-done r)
+        fit (edn/read-string (:body (#'mcp/fit-payload (merge out (zipmap (map #(keyword (str "k" %)) (range 40)) (range 40))) 300)))]
+    (testing "the top level says it"
+      (is (= :red (:status out)))
+      (is (false? (:landed out)))
+      (is (= '[a/held] (:held-by out)) "an :info row holds nothing"))
+    (testing "and the trim keeps it"
+      (is (= :red (:status fit)) (pr-str fit))
+      (is (false? (:landed fit)) (pr-str fit))
+      (is (= '[a/held] (:held-by fit)) (pr-str fit))))
+  (testing "a store red that is someone else's, with the land done, says it landed"
+    (let [out (#'mcp/terse-done {:done "d2" :land {:landed "main"} :findings {:episode-status :green :test-status :red}})]
+      (is (= :red (:status out)))
+      (is (true? (:landed out))))))

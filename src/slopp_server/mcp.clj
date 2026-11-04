@@ -165,7 +165,7 @@
        (let [kept (fit (sort-by (fn [e]
                                      ;; the failures are what a red answer is for: a
                                      ;; partial list costs a whole re-run to complete
-                                     [(if (= :failed-tests (key e)) 0 1) (count (pr-str e))])
+                                     [(if (#{:failed-tests :status :landed :held-by} (key e)) 0 1) (count (pr-str e))])
                                    (seq x)) "{" "}" budget)]
          (when (seq kept)
            (cond-> {:body (pr-str (into {} kept))
@@ -709,62 +709,6 @@
    "merge_from"
    (fn [session a _sym]
      (text! (branch/merge! session (:dir a))))})
-
-(defn- terse-done
-  "A green done is ONE LINE: the id, the verdict, where it landed — plus only
-  what needs the agent (an external tier that ran, a deferral count, a host
-  that drifted or failed a reload, a standing advisory, the app note).
-  eval10 measured `done` at ~2k chars a call, six calls a session,
-  byte-identical prose about episode scope and oracle currency riding every
-  one; a red done keeps the full report, because there the findings are the
-  answer."
-  [r]
-  (let [f (:findings r)]
-    (if-not (and (= :green (:episode-status f))
-                 (= :green (:test-status f))
-                 (zero? (:lint-errors f 0))
-                 (empty? (:unloadable-namespaces f))
-                 ;; a land that REFUSED (the branch moved and the rebase
-                 ;; conflicts, a lost thread) is the one fact the one-liner
-                 ;; cannot carry: the work is still UNLANDED, so the refusal
-                 ;; and its recovery path come back in full, exactly as a red
-                 ;; done keeps its findings. No :land at all is a done with
-                 ;; nothing to land — that stays terse; absence and refusal
-                 ;; are different facts.
-                 (let [land (:land r)]
-                   (or (nil? land) (boolean (:landed land)))))
-      r
-      (let [advisory (into {}
-                           (remove (fn [[k v]]
-                                     (or (#{:episode-status :test-status :lint-errors :ms :failures
-                                            :unloadable-namespaces :external-pending :host-stale
-                                            :http-dangling-route-refs :red-attribution :scope} k)
-                                         (and (coll? v) (empty? v))
-                                         (nil? v))))
-                           f)
-            info-only? (every? #(= :info (:severity %)) (:http-dangling-route-refs f))]
-        (cond-> {:done (:done r) :status :green}
-          (:landed (:land r))            (assoc :landed (:landed (:land r)))
-          ;; spread is shown only when wide: a narrow change stays one line
-          (>= (get-in r [:spread :modules] 0) 3) (merge (select-keys r [:spread :spread-note]))
-          ;; an edit made blind to a callee is a fact that needs the agent
-          (seq (:unread-callees r))      (assoc :unread-callees (:unread-callees r))
-          ;; the number a handoff quotes, on the answer it reads first
-          ;; (eval24 opus: without it, test_run {all} after every green done)
-          (:test r)                      (assoc :suite (let [s (:test r)]
-                                                         {:tests (:test s) :pass (:pass s)
-                                                          :fail (:fail s) :error (:error s)}))
-          (:external r)                  (assoc :external (select-keys (:external r) [:ran :status :failures]))
-          (:external-pending f)          (assoc :external-pending (:count (:external-pending f)))
-          ;; the host warning rides the one-liner WHENEVER there is one: a
-          ;; reload the live host could not apply used to be dropped here
-          ;; unless the oracle had drifted too, which is how a host serving
-          ;; old definitions stayed invisible on every green done
-          (:host-stale f)
-          (assoc :host-stale (select-keys (:host-stale f) [:oracle-drift :failed :note]))
-          (not info-only?)               (assoc :http-dangling-route-refs (:http-dangling-route-refs f))
-          (seq advisory)                 (assoc :advisories advisory)
-          (:app-note r)                  (assoc :app-note (:app-note r)))))))
 
 (defn plugin-root
   "Where the plugin's files are, or nil: Claude Code sets CLAUDE_PLUGIN_ROOT for
@@ -1913,41 +1857,6 @@
       ws (assoc :whole-store (select-keys ws [:status :test :external :standing]))
       cp (assoc :commit (select-keys cp [:commit :status :error :note :jar-stale :published])))))
 
-(defn- close-unit-after-write!
-  "Threaded after a change's result `ri`: when the call carried `done` (a
-  label) or `commit` and the write is GREEN (`red?` says), close the unit
-  here — the done, its landing and suite, the app refresh and its note, the
-  whole-store verdict when cheap, the commit point — under `:closed`; a red
-  write closes nothing and `:closed` says so. The write that finishes an
-  ask is one turn, not four. Both write shapes take it: the impl change and
-  the tests-only change (eval26 sonnet: a tests-only fix carrying done was
-  ignored, the session ended, and the work stayed on its thread).
-
-  The app refresh rides here exactly as it rides a plain done: this is the
-  path most units close on, and it used to drop the one note that carries
-  a cold-boot failure (2026-09-07, found by `restart {app true}`)."
-  [ri session a red?]
-  (if-not (or (:done a) (:commit a))
-    ri
-    (if red?
-      (assoc ri :closed {:closed false
-                         :why (if (seq (:impl a))
-                                "the change is red — nothing lands until it is green; fix forward and close again"
-                                "the tests landed red — the impl is the next change; close with it")})
-      (let [lbl (or (and (string? (:done a)) (:done a))
-                    (and (string? (:commit a)) (:commit a))
-                    (:prompt a))
-            d   (external/done! session :label lbl :agent (:agent a))
-            app (deref (future (refresh-app! session)) 20000 ::refresh-timed-out)
-            td  (terse-done (if-let [note (app-note-for app)]
-                              (assoc d :app-note note)
-                              d))]
-        (assoc ri :closed
-               (merge (select-keys td [:done :status :landed :suite :external :external-pending :advisories :app-note])
-                      (when (= :red (get-in d [:findings :episode-status]))
-                        {:closed false :why "the done is red — see :findings" :findings (:findings d)})
-                      (close-extras! session (assoc a :label lbl) d)))))))
-
 ^:unsafe (defn ^:export reserve-owner!
   "Bring an app OWNER (a project's reader) current with its branch and
   re-serve its managed app from the advanced value. The server calls this to
@@ -1967,184 +1876,6 @@
   (if (and (string? rejected) (not (str/blank? rejected)))
     (mapv #(update % :rejected (fn [r] (or r rejected))) steps)
     steps))
-
-(def ^:private change-handlers!
-  "The write VERB (s11) plus its aliases, and `check`. `change`: a whole
-  unit of work as one call — tests land first and the result reports which
-  went RED (watched, red-first honored), impl lands, accepted shifts
-  finish, ONE verification, one result — and NO done inside: done is the
-  agent's separate this-unit-is-finished move (a unit may span change ->
-  explore -> change; the Stop hook is the landing floor), which also
-  removes any red special case — a red change is a red result with
-  :test-src, nothing landed, nothing lost. `check`: assertion code run in
-  the image with clojure.test reporting CAPTURED — nothing written; the
-  diagnostic red as an ANSWER. (`explore` dispatches as a case label on
-  the batch branch — an entry here would close the load cycle
-  call-op! -> tail-handlers! -> this map -> call-op!.)"
-  (let [change-fn
-        (fn [session a _sym]
-          (let [tests0 (stamp-rejected (wire-steps (or (:tests a) [])) (:rejected a))
-                impl0  (stamp-rejected (wire-steps (or (:impl a) [])) (:rejected a))
-                guard  (ops/protected-test-refusal (:store @session) (:test-map @session)
-                                          (or (:agent a) (:agent-id @session))
-                                          (:last-intent @session)
-                                          (into tests0 impl0))
-                born   (if guard
-                         {:error guard}
-                         (create-leading-ns! session (into tests0 impl0) a))
-                keep?  (if (:error born) (constantly true) (set (:steps born)))
-                tests  (vec (filter keep? tests0))
-                impl   (vec (filter keep? impl0))]
-            (if (or (:error born) (empty? impl))
-              (cond
-                (:error born)
-                (text! {:error (:error born) :phase (if guard :tests :create)})
-
-                (seq (:created born))
-                ;; the blob WAS a namespace creation — create-ns! landed and
-                ;; verified it; nothing is left for the group
-                (text! {:ok true :status :green
-                        :created (mapv #(select-keys % [:ns :forms :test :warnings])
-                                       (:created born))})
-
-                :else
-                (if (seq tests)
-                  ;; TESTS ONLY: the red-first ritual's first half on its own
-                  ;; — land the spec, watch it fail, and say the impl is the
-                  ;; next change (s17 grid: the top residual refusal, five
-                  ;; times in one cell, was exactly this gesture)
-                  (let [rt (ops/edit-group! session tests
-                                            :prompt (str (:prompt a) " [tests first — expected red]")
-                                            :agent (:agent a))]
-                    (if (:error rt)
-                      (text! (assoc (select-keys rt [:error :step :source-now]) :phase :tests))
-                      (let [went-red (vec (distinct (concat (:failed-tests (:test rt))
-                                                            (keep :test (:failures (:test rt))))))]
-                        (ledger-written! session "edit_group" {:steps tests})
-                        (text! (-> {:ok true
-                                    :status (if (seq went-red) :red :green)
-                                    :tests (cond-> {:landed (count tests) :went-red went-red
-                                                    :spec-run (select-keys (:test rt)
-                                                                           [:test :pass :fail :error
-                                                                            :failed-tests :status])}
-                                             (:auto-require rt)
-                                             (assoc :auto-require (:auto-require rt)))
-                                    :note (if (seq went-red)
-                                            (str "the tests landed RED and are watched — the"
-                                                 " implementation is the next change {impl …}")
-                                            (str "the tests landed GREEN — the spec was never"
-                                                 " watched failing; a green you did not watch"
-                                                 " fail proves nothing"))}
-                                   ;; a tests-only change carrying done/commit closes
-                                   ;; too — an expectation fix is often the last write
-                                   (close-unit-after-write! session a (boolean (seq went-red))))))))
-                  (text! {:error (str "change needs :impl steps — a question is explore;"
-                                      " a test you are writing to FIND something out is"
-                                      " explore {ops [{op check code …}]}")})))
-              (let [rt (when (seq tests)
-                         (ops/edit-group! session tests
-                                          :prompt (str (:prompt a) " [tests first — expected red]")
-                                          :agent (:agent a)))]
-                (if (and rt (:error rt))
-                  (text! (assoc (select-keys rt [:error :step :source-now]) :phase :tests))
-                  (let [went-red (vec (distinct (concat (:failed-tests (:test rt))
-                                                        ;; a red-first stub THROWS — the spec's
-                                                        ;; first run is an :error row, not a
-                                                        ;; :failed-tests entry, and it was watched
-                                                        ;; failing all the same
-                                                        (keep :test (:failures (:test rt))))))
-                        _ (when rt (ledger-written! session "edit_group" {:steps tests}))
-                        ri (let [r (ops/edit-group! session impl
-                                                     :prompt (:prompt a) :agent (:agent a))]
-                             ;; a require the TESTS phase added is this write's repair
-                             ;; too — unreported, the agent learned nothing from it
-                             (merge (select-keys rt [:auto-require :auto-requires
-                                                     :auto-module-dep :auto-module-deps])
-                                    r))]
-                    (if (:error ri)
-                      (text! (cond-> (assoc (select-keys ri [:error :step :source-now])
-                                            :phase :impl)
-                               (seq tests) (assoc :tests {:landed (count tests)
-                                                          :went-red went-red})))
-                      (let [ri (-> ri
-                                   (held-after-write! session "edit_group" {:steps impl})
-                                   (finish-accepted! session a)
-                                   (attach-red-context! session)
-                                   (close-unit-after-write! session a (red? (:test ri))))]
-                        (text!
-                         (cond->
-                          {:ok true
-                           :impl (select-keys ri [:group :steps :warnings :drift
-                                                  :red-first :note :canonicalized
-                                                  :auto-require :auto-requires
-                                                  :auto-module-dep :auto-module-deps])
-                           :test (:test ri)
-                           :status (if (red? (:test ri)) :red :green)}
-                           (seq tests)
-                           (assoc :tests
-                                  (cond-> {:landed (count tests) :went-red went-red
-                                           :spec-run (select-keys (:test rt)
-                                                                  [:test :pass :fail :error
-                                                                   :failed-tests :status])}
-                                    (empty? went-red)
-                                    (assoc :note (str "the tests landed GREEN — the"
-                                                      " spec was never watched failing;"
-                                                      " a green you did not watch fail"
-                                                      " proves nothing"))))
-                           ;; a namespace this change had to create for a step is part of
-                           ;; what it did
-                           (seq (:created born)) (assoc :created (mapv #(select-keys % [:ns :forms]) (:created born)))
-                           (:finisher ri)      (assoc :finisher (:finisher ri))
-                           (:closed ri)        (assoc :closed (:closed ri))
-                           (:accept-unused ri) (assoc :accept-unused (:accept-unused ri))
-                           (red? (:test ri))
-                           (assoc :note (str "red — nothing landed, and nothing is"
-                                             " LOST: the tests and impl are on your"
-                                             " thread. Fix forward from :test-src;"
-                                             " done is YOUR move when the unit is"
-                                             " finished."))))))))))))]
-    {"change" change-fn
-     "intent" change-fn
-     "check"
-     (fn [session a _sym]
-       ;; the QUESTION is gated (check-gate: fixtures allowed, reaching out
-       ;; refused), then evaluated in a scratch namespace — clojure.core and
-       ;; clojure.test referred, symbols resolved there via eval — that is
-       ;; removed with the answer. The scaffolding is ours and runs ungated.
-       (let [code    (str "(do " (:code a) ")")
-             wrapped (str "(do (require (quote clojure.test))"
-                          " (let [slopp-check-ns (symbol (str \"slopp.check.scratch\" (System/nanoTime)))"
-                          "       slopp-check-reports (atom [])]"
-                          "  (try"
-                          "   (binding [*ns* (create-ns slopp-check-ns)]"
-                          "    (clojure.core/refer (quote clojure.core))"
-                          "    (clojure.core/refer (quote clojure.test))"
-                          "    (binding [clojure.test/report"
-                          "              (fn [m] (swap! slopp-check-reports conj"
-                          "                        (select-keys m [:type :expected :actual :message])))]"
-                          "     (let [slopp-check-value (eval (read-string " (pr-str code) "))]"
-                          "      {:value slopp-check-value"
-                          "       :assertions (deref slopp-check-reports)})))"
-                          "   (finally (remove-ns slopp-check-ns)))))")
-             r (if-let [err (edit/check-gate (:code a))]
-                 {:error err}
-                 (ops/query-eval session wrapped :gate (constantly nil)))]
-         (text!
-          (if (map? r)
-            r
-            (let [{:keys [value assertions]} (first r)
-                  types (frequencies (map :type assertions))]
-              {:value value
-               :pass (:pass types 0) :fail (:fail types 0)
-               :errors (:error types 0)
-               :assertions (vec assertions)
-               :note (str "nothing was written — this red is an ANSWER; land"
-                          " it as a test (change {tests […]}) only once it"
-                          " says what you mean")})))))}))
-
-(def ^:private tail-handlers!
-  "Every handler-map entry (Q4) — call-tool checks here first."
-  (merge env-handlers! file-handlers! sync-handlers! change-handlers!))
 
 (defn- with-whys
   "`x` with every row that carries a form's source (or a reference to it)
@@ -2325,6 +2056,290 @@
                 (throw (ex-info (str "untested must be a map of \"ns/name\" to why, got: " x) {:untested x}))))
             x)]
     (not-empty (into {} (map (fn [[k v]] [(if (keyword? k) (subs (str k) 1) (str k)) (str v)])) m))))
+
+(defn- with-verdict
+  "A done that is not plainly green, with its verdict at the top level: `:status`,
+  `:landed`, and `:held-by`, the forms findings name that are not `:info`. Its
+  report is large and the wire trims the largest key first, so `:findings` alone
+  can vanish, and with it the only sign that nothing landed."
+  [r]
+  (let [f     (:findings r)
+        forms (vec (distinct (for [[_ rows] f
+                                   :when (and (sequential? rows) (= :red (:episode-status f)))
+                                   row rows
+                                   :when (and (map? row) (:form row) (not= :info (:severity row)))]
+                               (:form row))))]
+    (cond-> (assoc r :status (:test-status f) :landed (boolean (:landed (:land r))))
+      (seq forms) (assoc :held-by forms))))
+
+(defn- terse-done
+  "A green done is ONE LINE: the id, the verdict, where it landed — plus only
+  what needs the agent (an external tier that ran, a deferral count, a host
+  that drifted or failed a reload, a standing advisory, the app note).
+  eval10 measured `done` at ~2k chars a call, six calls a session,
+  byte-identical prose about episode scope and oracle currency riding every
+  one; a red done keeps the full report, because there the findings are the
+  answer, with its verdict at the top level ([[with-verdict]])."
+  [r]
+  (let [f (:findings r)]
+    (if-not (and (= :green (:episode-status f))
+                 (= :green (:test-status f))
+                 (zero? (:lint-errors f 0))
+                 (empty? (:unloadable-namespaces f))
+                 ;; a land that REFUSED (the branch moved and the rebase
+                 ;; conflicts, a lost thread) is the one fact the one-liner
+                 ;; cannot carry: the work is still UNLANDED, so the refusal
+                 ;; and its recovery path come back in full, exactly as a red
+                 ;; done keeps its findings. No :land at all is a done with
+                 ;; nothing to land — that stays terse; absence and refusal
+                 ;; are different facts.
+                 (let [land (:land r)]
+                   (or (nil? land) (boolean (:landed land)))))
+      (with-verdict r)
+      (let [advisory (into {}
+                           (remove (fn [[k v]]
+                                     (or (#{:episode-status :test-status :lint-errors :ms :failures
+                                            :unloadable-namespaces :external-pending :host-stale
+                                            :http-dangling-route-refs :red-attribution :scope} k)
+                                         (and (coll? v) (empty? v))
+                                         (nil? v))))
+                           f)
+            info-only? (every? #(= :info (:severity %)) (:http-dangling-route-refs f))]
+        (cond-> {:done (:done r) :status :green}
+          (:landed (:land r))            (assoc :landed (:landed (:land r)))
+          ;; spread is shown only when wide: a narrow change stays one line
+          (>= (get-in r [:spread :modules] 0) 3) (merge (select-keys r [:spread :spread-note]))
+          ;; an edit made blind to a callee is a fact that needs the agent
+          (seq (:unread-callees r))      (assoc :unread-callees (:unread-callees r))
+          ;; the number a handoff quotes, on the answer it reads first
+          ;; (eval24 opus: without it, test_run {all} after every green done)
+          (:test r)                      (assoc :suite (let [s (:test r)]
+                                                         {:tests (:test s) :pass (:pass s)
+                                                          :fail (:fail s) :error (:error s)}))
+          (:external r)                  (assoc :external (select-keys (:external r) [:ran :status :failures]))
+          (:external-pending f)          (assoc :external-pending (:count (:external-pending f)))
+          ;; the host warning rides the one-liner WHENEVER there is one: a
+          ;; reload the live host could not apply used to be dropped here
+          ;; unless the oracle had drifted too, which is how a host serving
+          ;; old definitions stayed invisible on every green done
+          (:host-stale f)
+          (assoc :host-stale (select-keys (:host-stale f) [:oracle-drift :failed :note]))
+          (not info-only?)               (assoc :http-dangling-route-refs (:http-dangling-route-refs f))
+          (seq advisory)                 (assoc :advisories advisory)
+          (:app-note r)                  (assoc :app-note (:app-note r)))))))
+
+(defn- close-unit-after-write!
+  "Threaded after a change's result `ri`: when the call carried `done` (a
+  label) or `commit` and the write is GREEN (`red?` says), close the unit
+  here — the done, its landing and suite, the app refresh and its note, the
+  whole-store verdict when cheap, the commit point — under `:closed`; a red
+  write closes nothing and `:closed` says so. The write that finishes an
+  ask is one turn, not four. Both write shapes take it: the impl change and
+  the tests-only change (eval26 sonnet: a tests-only fix carrying done was
+  ignored, the session ended, and the work stayed on its thread).
+
+  The app refresh rides here exactly as it rides a plain done: this is the
+  path most units close on, and it used to drop the one note that carries
+  a cold-boot failure (2026-09-07, found by `restart {app true}`)."
+  [ri session a red?]
+  (if-not (or (:done a) (:commit a))
+    ri
+    (if red?
+      (assoc ri :closed {:closed false
+                         :why (if (seq (:impl a))
+                                "the change is red — nothing lands until it is green; fix forward and close again"
+                                "the tests landed red — the impl is the next change; close with it")})
+      (let [lbl (or (and (string? (:done a)) (:done a))
+                    (and (string? (:commit a)) (:commit a))
+                    (:prompt a))
+            d   (external/done! session :label lbl :agent (:agent a))
+            app (deref (future (refresh-app! session)) 20000 ::refresh-timed-out)
+            td  (terse-done (if-let [note (app-note-for app)]
+                              (assoc d :app-note note)
+                              d))]
+        (assoc ri :closed
+               (merge (select-keys td [:done :status :landed :suite :external :external-pending :advisories :app-note])
+                      (when (= :red (get-in d [:findings :episode-status]))
+                        {:closed false :why "the done is red — see :findings" :findings (:findings d)})
+                      (close-extras! session (assoc a :label lbl) d)))))))
+
+(def ^:private change-handlers!
+  "The write VERB (s11) plus its aliases, and `check`. `change`: a whole
+  unit of work as one call — tests land first and the result reports which
+  went RED (watched, red-first honored), impl lands, accepted shifts
+  finish, ONE verification, one result — and NO done inside: done is the
+  agent's separate this-unit-is-finished move (a unit may span change ->
+  explore -> change; the Stop hook is the landing floor), which also
+  removes any red special case — a red change is a red result with
+  :test-src, nothing landed, nothing lost. `check`: assertion code run in
+  the image with clojure.test reporting CAPTURED — nothing written; the
+  diagnostic red as an ANSWER. (`explore` dispatches as a case label on
+  the batch branch — an entry here would close the load cycle
+  call-op! -> tail-handlers! -> this map -> call-op!.)"
+  (let [change-fn
+        (fn [session a _sym]
+          (let [tests0 (stamp-rejected (wire-steps (or (:tests a) [])) (:rejected a))
+                impl0  (stamp-rejected (wire-steps (or (:impl a) [])) (:rejected a))
+                guard  (ops/protected-test-refusal (:store @session) (:test-map @session)
+                                          (or (:agent a) (:agent-id @session))
+                                          (:last-intent @session)
+                                          (into tests0 impl0))
+                born   (if guard
+                         {:error guard}
+                         (create-leading-ns! session (into tests0 impl0) a))
+                keep?  (if (:error born) (constantly true) (set (:steps born)))
+                tests  (vec (filter keep? tests0))
+                impl   (vec (filter keep? impl0))]
+            (if (or (:error born) (empty? impl))
+              (cond
+                (:error born)
+                (text! {:error (:error born) :phase (if guard :tests :create)})
+
+                (seq (:created born))
+                ;; the blob WAS a namespace creation — create-ns! landed and
+                ;; verified it; nothing is left for the group
+                (text! {:ok true :status :green
+                        :created (mapv #(select-keys % [:ns :forms :test :warnings])
+                                       (:created born))})
+
+                :else
+                (if (seq tests)
+                  ;; TESTS ONLY: the red-first ritual's first half on its own
+                  ;; — land the spec, watch it fail, and say the impl is the
+                  ;; next change (s17 grid: the top residual refusal, five
+                  ;; times in one cell, was exactly this gesture)
+                  (let [rt (ops/edit-group! session tests
+                                            :prompt (str (:prompt a) " [tests first — expected red]")
+                                            :agent (:agent a))]
+                    (if (:error rt)
+                      (text! (assoc (select-keys rt [:error :step :source-now]) :phase :tests))
+                      (let [went-red (vec (distinct (concat (:failed-tests (:test rt))
+                                                            (keep :test (:failures (:test rt))))))]
+                        (ledger-written! session "edit_group" {:steps tests})
+                        (text! (-> {:ok true
+                                    :status (if (seq went-red) :red :green)
+                                    :tests (cond-> {:landed (count tests) :went-red went-red
+                                                    :spec-run (select-keys (:test rt)
+                                                                           [:test :pass :fail :error
+                                                                            :failed-tests :status])}
+                                             (:auto-require rt)
+                                             (assoc :auto-require (:auto-require rt)))
+                                    :note (if (seq went-red)
+                                            (str "the tests landed RED and are watched — the"
+                                                 " implementation is the next change {impl …}")
+                                            (str "the tests landed GREEN — the spec was never"
+                                                 " watched failing; a green you did not watch"
+                                                 " fail proves nothing"))}
+                                   ;; a tests-only change carrying done/commit closes
+                                   ;; too — an expectation fix is often the last write
+                                   (close-unit-after-write! session a (boolean (seq went-red))))))))
+                  (text! {:error (str "change needs :impl steps — a question is explore;"
+                                      " a test you are writing to FIND something out is"
+                                      " explore {ops [{op check code …}]}")})))
+              (let [rt (when (seq tests)
+                         (ops/edit-group! session tests
+                                          :prompt (str (:prompt a) " [tests first — expected red]")
+                                          :agent (:agent a)))]
+                (if (and rt (:error rt))
+                  (text! (assoc (select-keys rt [:error :step :source-now]) :phase :tests))
+                  (let [went-red (vec (distinct (concat (:failed-tests (:test rt))
+                                                        ;; a red-first stub THROWS — the spec's
+                                                        ;; first run is an :error row, not a
+                                                        ;; :failed-tests entry, and it was watched
+                                                        ;; failing all the same
+                                                        (keep :test (:failures (:test rt))))))
+                        _ (when rt (ledger-written! session "edit_group" {:steps tests}))
+                        ri (let [r (ops/edit-group! session impl
+                                                     :prompt (:prompt a) :agent (:agent a))]
+                             ;; a require the TESTS phase added is this write's repair
+                             ;; too — unreported, the agent learned nothing from it
+                             (merge (select-keys rt [:auto-require :auto-requires
+                                                     :auto-module-dep :auto-module-deps])
+                                    r))]
+                    (if (:error ri)
+                      (text! (cond-> (assoc (select-keys ri [:error :step :source-now])
+                                            :phase :impl)
+                               (seq tests) (assoc :tests {:landed (count tests)
+                                                          :went-red went-red})))
+                      (let [ri (-> ri
+                                   (held-after-write! session "edit_group" {:steps impl})
+                                   (finish-accepted! session a)
+                                   (attach-red-context! session)
+                                   (close-unit-after-write! session a (red? (:test ri))))]
+                        (text!
+                         (cond->
+                          {:ok true
+                           :impl (select-keys ri [:group :steps :warnings :drift
+                                                  :red-first :note :canonicalized
+                                                  :auto-require :auto-requires
+                                                  :auto-module-dep :auto-module-deps])
+                           :test (:test ri)
+                           :status (if (red? (:test ri)) :red :green)}
+                           (seq tests)
+                           (assoc :tests
+                                  (cond-> {:landed (count tests) :went-red went-red
+                                           :spec-run (select-keys (:test rt)
+                                                                  [:test :pass :fail :error
+                                                                   :failed-tests :status])}
+                                    (empty? went-red)
+                                    (assoc :note (str "the tests landed GREEN — the"
+                                                      " spec was never watched failing;"
+                                                      " a green you did not watch fail"
+                                                      " proves nothing"))))
+                           ;; a namespace this change had to create for a step is part of
+                           ;; what it did
+                           (seq (:created born)) (assoc :created (mapv #(select-keys % [:ns :forms]) (:created born)))
+                           (:finisher ri)      (assoc :finisher (:finisher ri))
+                           (:closed ri)        (assoc :closed (:closed ri))
+                           (:accept-unused ri) (assoc :accept-unused (:accept-unused ri))
+                           (red? (:test ri))
+                           (assoc :note (str "red — nothing landed, and nothing is"
+                                             " LOST: the tests and impl are on your"
+                                             " thread. Fix forward from :test-src;"
+                                             " done is YOUR move when the unit is"
+                                             " finished."))))))))))))]
+    {"change" change-fn
+     "intent" change-fn
+     "check"
+     (fn [session a _sym]
+       ;; the QUESTION is gated (check-gate: fixtures allowed, reaching out
+       ;; refused), then evaluated in a scratch namespace — clojure.core and
+       ;; clojure.test referred, symbols resolved there via eval — that is
+       ;; removed with the answer. The scaffolding is ours and runs ungated.
+       (let [code    (str "(do " (:code a) ")")
+             wrapped (str "(do (require (quote clojure.test))"
+                          " (let [slopp-check-ns (symbol (str \"slopp.check.scratch\" (System/nanoTime)))"
+                          "       slopp-check-reports (atom [])]"
+                          "  (try"
+                          "   (binding [*ns* (create-ns slopp-check-ns)]"
+                          "    (clojure.core/refer (quote clojure.core))"
+                          "    (clojure.core/refer (quote clojure.test))"
+                          "    (binding [clojure.test/report"
+                          "              (fn [m] (swap! slopp-check-reports conj"
+                          "                        (select-keys m [:type :expected :actual :message])))]"
+                          "     (let [slopp-check-value (eval (read-string " (pr-str code) "))]"
+                          "      {:value slopp-check-value"
+                          "       :assertions (deref slopp-check-reports)})))"
+                          "   (finally (remove-ns slopp-check-ns)))))")
+             r (if-let [err (edit/check-gate (:code a))]
+                 {:error err}
+                 (ops/query-eval session wrapped :gate (constantly nil)))]
+         (text!
+          (if (map? r)
+            r
+            (let [{:keys [value assertions]} (first r)
+                  types (frequencies (map :type assertions))]
+              {:value value
+               :pass (:pass types 0) :fail (:fail types 0)
+               :errors (:error types 0)
+               :assertions (vec assertions)
+               :note (str "nothing was written — this red is an ANSWER; land"
+                          " it as a test (change {tests […]}) only once it"
+                          " says what you mean")})))))}))
+
+(def ^:private tail-handlers!
+  "Every handler-map entry (Q4) — call-tool checks here first."
+  (merge env-handlers! file-handlers! sync-handlers! change-handlers!))
 
 (defn- call-op!
   "THE dispatch seam every route crosses — family dispatch, the bare `--call`

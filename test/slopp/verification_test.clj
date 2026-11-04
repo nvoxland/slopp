@@ -252,18 +252,18 @@
 
 (deftest auto-parallel-scales-with-work-and-cores
   ;; sharding only pays above real scale (each shard reloads the whole store);
-  ;; default = auto, capped at 4 and by cores; explicit overrides. The 4 is a
-  ;; MEMORY cap and stays 4 even on a many-core box — see auto-parallel.
+  ;; default = auto, capped at 6 and by cores; explicit overrides. The 6 is a
+  ;; MEMORY cap and stays 6 even on a many-core box — see auto-parallel.
   (let [ap #'testrun/auto-parallel]
     (testing "small suites stay serial — boot overhead beats the gain"
       (is (= 1 (ap 2 8)))
       (is (= 1 (ap 7 8))))
-    (testing "real scale shards, capped at 4 and by cores"
+    (testing "real scale shards, capped at 6 and by cores"
       (is (= 2 (ap 20 8)))
-      (is (= 4 (ap 50 8)))
+      (is (= 4 (ap 50 8)) "half the cores")
       (is (= 1 (ap 50 2)) "a 2-core box never over-parallelizes")
-      (is (= 4 (ap 52 14)) "a many-core box still caps at 4 — the cap is memory, not cores")
-      (is (<= (ap 999 64) 4) "hard cap at 4"))))
+      (is (= 6 (ap 150 14)) "a many-core box reaches the cap")
+      (is (= 6 (ap 999 64)) "and stops there — the cap is memory, not cores"))))
 
 (deftest ^:external dead-shards-retry-once
   ;; a shard whose JVM dies with NO parseable summary (fork pressure, OOM —

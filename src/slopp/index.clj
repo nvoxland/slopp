@@ -8,7 +8,7 @@
   first-order code (higher-order/effect-polymorphic cases are left to the live
   oracle, D5). The dialect requires the `!` in a var's name to match its computed
   effectfulness; mismatches are reported for the edit pipeline to flag/auto-fix."
-  (:require [clj-kondo.core :as kondo] [slopp.index.derive :as derive]))
+  (:require [clj-kondo.core :as kondo] [slopp.index.derive :as derive] [clj-kondo.impl.hooks]))
 
 (def ^:private ^{:ambient-ok "a bounded process-local memo of a pure kondo pass, keyed by the source it linted — a performance record nothing branches on, and the measured reason it exists is that every write used to run kondo several times over identical source"} kondo-cache
   "source-string -> {:analysis :findings} memo (bounded). ONE kondo pass
@@ -58,6 +58,51 @@
   namespace teaches it, which is how any kondo cache fills."
   (atom nil))
 
+(defn reset-kondo-cache!
+  "Drop kondo's CROSS-NS fact cache (and the in-process source memo that keys
+  off it), so the next lint rebuilds from the code as it stands. nil when no
+  cache dir is set.
+
+  For the WHOLE-STORE gate, which must not inherit incremental cache state. A
+  restarted server once reported four `invalid-arity` ERRORS and eleven
+  unresolved vars against code that was correct and fully green: the cache
+  predated the vars, the sweep runs a namespace at a time, and 'linting a
+  namespace teaches it' — so whatever is linted early is judged against
+  yesterday's facts. The asymmetry is the point: an ABSENT fact is benign
+  (kondo simply says nothing), a STALE one is a confident lie.
+
+  `kondo-cache-dir` holds a PATH STRING in real use and a File in some tests,
+  so coerce — the first cut hinted ^File and threw ClassCastException on every
+  live call while its test, which had stored a File, passed."
+  []
+  (when-let [dir @kondo-cache-dir]
+    (let [cache (java.io.File. (str dir) ".cache")]
+      (when (.isDirectory cache)
+        (letfn [(rm! [^java.io.File f]
+                  (when (.isDirectory f) (run! rm! (.listFiles f)))
+                  (.delete f))]
+          (rm! cache)))
+      (reset! ns-source-hash {})
+      nil)))
+
+(defn- no-kondo-hooks
+  "What clj-kondo's hook lookup answers here: no hook, for anything. Slopp's
+  `derive/kondo-config` configures none, so this is what the real lookup returns
+  too, minus the memo."
+  [& _]
+  nil)
+
+^{:unsafe "redefines a LIBRARY var, not a store form, so no stored form disagrees with the root; the obligation: slopp configures no kondo hooks. index-test/a-lint-leaves-nothing-pinned-in-kondos-hook-memo watches it"}
+(defn- drop-kondo-hook-memo!
+  "Replace clj-kondo's hook lookup with [[no-kondo-hooks]]. The real one memoizes
+  forever on (config ns var), and the var symbols carry metadata that pins whole
+  parse trees: measured at about 1GB after a day on one server, 3712 entries, every
+  one nil. It is named by reference: if the library renames it, this fails to load
+  instead of quietly leaking again."
+  []
+  (alter-var-root #'clj-kondo.impl.hooks/hook-fn (constantly no-kondo-hooks))
+  nil)
+
 ^:reads (defn- kondo-pass
   "ONE real kondo run over `source` in language `lang` (`:clj`/`:cljs`/`:cljc`),
   stored. Also records what this pass just taught kondo's cache about `source`'s
@@ -76,7 +121,8 @@
   depend on a `.clj-kondo/` happening to sit next to the process."
   ([source] (kondo-pass source :clj))
   ([source lang]
-   (let [dir (some-> @kondo-cache-dir str)
+   (let [_   (drop-kondo-hook-memo!)
+         dir (some-> @kondo-cache-dir str)
          r (with-in-str source
              (kondo/run! (cond-> {:lint ["-"] :config derive/kondo-config :lang lang}
                            dir (assoc :cache-dir dir))))
@@ -153,30 +199,3 @@
                (= (get @ns-source-hash (:ns ent)) (hash source)))
         ent
         (kondo-pass source lang))))))
-
-(defn reset-kondo-cache!
-  "Drop kondo's CROSS-NS fact cache (and the in-process source memo that keys
-  off it), so the next lint rebuilds from the code as it stands. nil when no
-  cache dir is set.
-
-  For the WHOLE-STORE gate, which must not inherit incremental cache state. A
-  restarted server once reported four `invalid-arity` ERRORS and eleven
-  unresolved vars against code that was correct and fully green: the cache
-  predated the vars, the sweep runs a namespace at a time, and 'linting a
-  namespace teaches it' — so whatever is linted early is judged against
-  yesterday's facts. The asymmetry is the point: an ABSENT fact is benign
-  (kondo simply says nothing), a STALE one is a confident lie.
-
-  `kondo-cache-dir` holds a PATH STRING in real use and a File in some tests,
-  so coerce — the first cut hinted ^File and threw ClassCastException on every
-  live call while its test, which had stored a File, passed."
-  []
-  (when-let [dir @kondo-cache-dir]
-    (let [cache (java.io.File. (str dir) ".cache")]
-      (when (.isDirectory cache)
-        (letfn [(rm! [^java.io.File f]
-                  (when (.isDirectory f) (run! rm! (.listFiles f)))
-                  (.delete f))]
-          (rm! cache)))
-      (reset! ns-source-hash {})
-      nil)))

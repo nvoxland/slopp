@@ -103,20 +103,19 @@
   `cores`-core box. Each shard reloads the WHOLE materialized store AND spawns
   the child image JVMs its ^:external tests boot, so sharding only pays at real
   scale: 1 below ~8 test nses (boot overhead beats the gain), then n/8 shards,
-  capped at 4 and at half the cores.
+  capped at 6 and at half the cores.
 
-  **The 4 is a MEMORY cap, not a core cap, and it stays 4 even on a many-core
-  box.** Raising it to 6 on a 14-core/36GB M4 Max cut ~15% off the wall time in
-  isolation — but each shard's child-image fan-out is ~2-4GB, and under normal
-  load (a heavy dev app plus sessions running beside the check) the sixth shard
-  OOM-killed the SERVER, which takes every session with it. The count must also
-  stay DETERMINISTIC — a shard assignment that varied between runs would make a
-  flake unreproducible — so it cannot be dialed by free memory at runtime. 4 is
-  the value that holds on a loaded dev machine; the lever for a faster tier is
-  FEWER boots (splitting the heaviest namespace so the floor drops), not more
-  shards."
+  **The 6 is a MEMORY cap, not a core cap.** Each shard's child-image fan-out is
+  ~2-4GB. A sixth shard once OOM-killed the server under load, and the cap was 4
+  because of it; the server itself was then holding 2.4-2.8GB live, nearly all of it
+  clj-kondo's hook memo and per-thread store copies. With those gone it holds under
+  500MB. Measured on a 14-core/36GB machine, 150 test namespaces: 6 shards 351s and
+  340s, 4 shards 471s, all green, with 11GB still free at 6. The count must also stay
+  DETERMINISTIC — a shard assignment that varied between runs would make a flake
+  unreproducible — so it cannot be dialed by free memory at runtime. The other lever
+  for a faster tier is FEWER boots."
   [n cores]
-  (max 1 (min 4 (quot cores 2) (quot n 8))))
+  (max 1 (min 6 (quot cores 2) (quot n 8))))
 
 (defn ^{:export "slopp.verification"} read-traces
   "Merge the form traces this run's shards wrote into the built `dir` (#121):

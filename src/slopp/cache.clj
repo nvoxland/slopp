@@ -166,6 +166,11 @@
   other on every call. Per group, latest only: the heads that have moved
   on are dropped the moment the next one arrives.
 
+  At most four groups stay, and the one stored longest ago goes first. A group
+  can simply stop being asked for: a landed thread's view line never moves again,
+  so unbounded, each one kept a whole store copy until the process died. An evicted
+  group costs one recompute.
+
   A benign race under concurrent loads costs at most a recompute, never a
   wrong answer: the key covers the content, so a stale entry cannot match."
   [cache-id group key thunk]
@@ -175,5 +180,11 @@
       (if (and entry (= key k))
         v
         (let [v' (thunk)]
-          (swap! caches assoc-in [cache-id group] [key v'])
+          (swap! caches update cache-id
+                 (fn [m]
+                   (let [others (dissoc m group)
+                         kept   (if (>= (count others) 4)
+                                  (dissoc others (first (apply min-key #(nth (second %) 2) others)))
+                                  others)]
+                     (assoc kept group [key v' (System/nanoTime)]))))
           v')))))

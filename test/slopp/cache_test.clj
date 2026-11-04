@@ -69,3 +69,27 @@
     (testing "and it honours the test controls like every blessed cache"
       (is (= [:v big-a] (cache/without-caching! (fn [] (f big-a)))))
       (is (= 4 @calls)))))
+
+(deftest cached-latest-keeps-a-bounded-number-of-groups
+  ;; a group that stops being asked for, such as a landed thread's view line,
+  ;; must not hold its value forever: one of these was a whole store copy
+  (cache/reset-all!)
+  (let [calls (atom 0)
+        get!  (fn [g k] (cache/cached-latest :bounded g k (fn [] (swap! calls inc) [g k])))]
+    (try
+      (doseq [g (range 10)] (get! g :k))
+      (testing "only a few groups stay"
+        (is (<= (:bounded (cache/registry)) 4) (pr-str (cache/registry))))
+      (testing "the newest are the ones kept, and hit"
+        (reset! calls 0)
+        (is (= [9 :k] (get! 9 :k)))
+        (is (zero? @calls)))
+      (testing "an evicted group only recomputes, and answers the same"
+        (reset! calls 0)
+        (is (= [0 :k] (get! 0 :k)))
+        (is (= 1 @calls)))
+      (testing "a moved key still replaces, within its group"
+        (reset! calls 0)
+        (is (= [9 :k2] (get! 9 :k2)))
+        (is (= 1 @calls)))
+      (finally (cache/reset-all!)))))

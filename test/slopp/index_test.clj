@@ -10,7 +10,7 @@
   wrong one is a refusal the author cannot argue with and a missing one is a
   shell that quietly widened."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.index :as index] [slopp.index.derive :as derive] [slopp.cache :as cache] [slopp.index.analyze :as analyze]))
+            [slopp.index :as index] [slopp.index.derive :as derive] [slopp.cache :as cache] [slopp.index.analyze :as analyze] [clj-kondo.impl.hooks]))
 
 (def src
   (str "(ns demo)\n"
@@ -364,3 +364,14 @@
       (let [a (analyze/analyze imp)]
         (is (empty? (derive/external-origin-vars a nil nil)))
         (is (empty? (derive/effectful-vars a nil nil)))))))
+
+(deftest a-lint-leaves-nothing-pinned-in-kondos-hook-memo
+  ;; clj-kondo memoizes its hook lookup forever, keyed on (config ns var), and the
+  ;; var symbols' metadata pins whole parse trees: about 1GB on a server after a
+  ;; day, every entry nil, because slopp configures no hooks
+  (index/lint "(ns li.nt)\n\n(defn f [x] (and x 1))\n")
+  (let [v    #'clj-kondo.impl.hooks/hook-fn
+        memo (filter #(re-find #"memo" (.getName ^java.lang.reflect.Field %))
+                     (.getDeclaredFields (class @v)))]
+    (is (empty? memo) (pr-str (map str memo)))
+    (is (nil? (@v {} {} 'clojure.core 'and)))))
