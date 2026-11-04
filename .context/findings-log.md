@@ -3610,3 +3610,36 @@ so a mid insertion lands and the constraint is scored from the landed code.
   user's explicit request as binding and the rule as a warning. A rule that
   must hold needs a test or a gate, not only a recorded ask.
 
+## Dev server memory and external-tier speed (2026-11-03)
+
+The dev server reached a 7.1 GB footprint in a day, and thrashed at `-Xmx3g`: old
+generation full, 539 full GCs, 983 of about 2800 seconds in GC, every call timing out.
+A live histogram after a full GC said 2.8 GB, so it was held, not garbage. Measured
+in the live process over nREPL: clearing each cache and re-measuring for bytes, a
+reflective walk from every var for who reaches what (a walker that stops at closures
+or `AtomicReference` misses most of it).
+
+- clj-kondo's hook lookup, about 1 GB: memoized forever on `(config ns var)`, 3712
+  entries, every one nil because slopp configures no hooks. The var symbols' metadata
+  pins whole parse trees (one key reached 143,559 objects).
+- `:store-elements`, 762 MB: one store copy per view line, and a landed thread's line
+  is never dropped, about 190 MB each. Analysis and reference caches 300 MB and
+  rendered source 86 MB were bounded and working as intended.
+
+After replacing the hook lookup and bounding `cached-latest` at four groups: 465 MB
+live and a 1.4 GB footprint after a whole-store check, from a fresh server.
+
+The shard cap of 4 existed because a sixth shard had OOM-killed that server. Same
+head, 150 test namespaces, 14 cores and 36 GB: 6 shards 351s and 340s, 4 shards 471s,
+all green, at least 11 GB free at 6. The cap is 6 now.
+
+Per-namespace time is not stable enough to pack on, which three earlier re-weightings
+also found: across two runs `process-test` held at 80s while `rename-test` went 24s to
+77s and the worst ratio was 46x. Shard spread stays wide, `[86 106 125 130 308 331]`.
+A warm image pool had already measured no gain. What is left is fewer image boots.
+
+Unexplained: at 6 shards the external tier alone took 354s, while one `full_check` around
+it took 691s, about 340s outside the external tier; with 4 shards that remainder had been
+about 60s (531s total, 471s external). One sample. Phase timings inside `full_check` would
+settle it.
+

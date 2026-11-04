@@ -8169,7 +8169,7 @@ landed with no suite when a second session closed it. Episodes stay per agent
 for history and revert. Fixing this exposed fixtures whose writes and commit
 named different agents: they had been judged by nothing.
 
-**Known limits.** When in-image tests run a function but only an `^:external`
+**Known limits.** The red state puts back forms, not process state: a change whose effect is on a library var or other state already mutated in the image cannot go red there, and needs a waiver (kondo's hook memo was the first). When in-image tests run a function but only an `^:external`
 test proves its change, the done holds, and the exit is a waiver naming that
 test. A fresh clone has no coverage until its first suite run, so its first pull
 reports `:info` rather than judging. The `change {done ...}` close does not take
