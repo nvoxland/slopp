@@ -509,28 +509,39 @@
      :measured        {:with-cost (count costs) :of (count vs)}}))
 
 (defn verify-after
-  "The `:verify` delta a write PRODUCED: the first one at or after `at-id`,
-  since a write is immediately followed by its verification. Nil when none
-  followed.
+  "The `:verify` delta a write PRODUCED: the first one after `at-id`, before any
+  later write outside its group, since a write is followed by its own
+  verification and a group shares one. Nil when none did: a later write's verify
+  is about that write, and a merge replay or an import has none of its own.
 
   Split out because `status-after` and the per-version COST both need it, and
   asking the same question at two call sites is this codebase's Pattern 2 —
   four instances, every one found only after two surfaces had already
   disagreed about the same fact."
   [store at-id]
-  (->> (store/deltas store)
-       (drop-while #(not= at-id (:id %)))
-       (filter #(= :verify (:op %)))
-       first))
+  (let [[d & more] (drop-while #(not= at-id (:id %)) (store/deltas store))
+        same?  (fn [x] (and (:group d) (= (:group d) (:group x))))
+        write? (fn [x] (or (:form-id x) (:form-ids x)))]
+    (if (= :verify (:op d))
+      d
+      (->> more
+           (take-while #(or (not (write? %)) (same? %)))
+           (filter #(= :verify (:op %)))
+           first))))
 
 (defn status-after
-  "The verification outcome a delta PRODUCED: the first `:verify` at or after
-  `at-id` (a write is immediately followed by its verify) — :green / :red /
-  :unknown. This is 'did THIS version land green', vs `status-at`'s 'what
-  was the state standing AT this point'."
+  "The verification outcome a delta PRODUCED (see [[verify-after]]) — :green /
+  :red / :unknown. This is 'did THIS version land green', vs `status-at`'s 'what
+  was the state standing AT this point'. A verify that ran no tests graded
+  nothing, so it is :unknown. A write whose only red was a foreign test still
+  reads :red here, though the thread may have landed: this judges the write's
+  own verification, not the land."
   [store at-id]
   (if-let [r (:result (verify-after store at-id))]
-    (if (zero? (+ (:fail r 0) (:error r 0))) :green :red)
+    (cond
+      (pos? (+ (:fail r 0) (:error r 0))) :red
+      (zero? (or (:test r) (:ran r) 1))   :unknown
+      :else                               :green)
     :unknown))
 
 (defn ^:export label-ancestors
@@ -1111,17 +1122,23 @@
           :else versions)))))
 
 (defn ^:export latest-reviews
-  "`{commit-point-id {:verdict :by :at :note}}` — the LATEST `:review` marker
-  for each target in the store's delta log (the log is oldest first, so a
-  later review overwrites an earlier one). `:at` is formatted like a commit
-  point's; `:verdict` stays a keyword and `:note` is absent when none was
-  given. Pure, so the reviewer timeline can fold it without opening the db."
+  "`{commit-point-id {:verdict :by :at :note :flagged-by}}` — the LATEST `:review`
+  marker for each target in the store's delta log (the log is oldest first, so a
+  later review overwrites an earlier one), plus `:flagged-by`, who flagged it
+  before that: a later verdict does not make an objection disappear. `:at` is
+  formatted like a commit point's; `:verdict` stays a keyword; `:note` and
+  `:flagged-by` are absent when empty. Pure, so the reviewer timeline can fold it
+  without opening the db."
   [store]
   (reduce (fn [m d]
             (if (= :review (:op d))
-              (assoc m (:target d)
-                     (cond-> {:verdict (:verdict d) :by (:by d) :at (human-time (:at d))}
-                       (:note d) (assoc :note (:note d))))
+              (let [prev    (get m (:target d))
+                    flagged (cond-> (vec (:flagged-by prev))
+                              (= :flagged (:verdict prev)) (conj (:by prev)))]
+                (assoc m (:target d)
+                       (cond-> {:verdict (:verdict d) :by (:by d) :at (human-time (:at d))}
+                         (:note d)     (assoc :note (:note d))
+                         (seq flagged) (assoc :flagged-by flagged))))
               m))
           {}
           (store/deltas store)))

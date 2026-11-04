@@ -121,10 +121,13 @@
         ;; Asked with two lookups and no malli, which is what keeps it here:
         ;; whether a validator is PRESENT is http's business and what it does
         ;; is rest's.
-        unhonoured (when-not (and (:rest/decode-request ctx)
-                                  (:rest/check-response ctx))
+        unhonoured (let [contract? (and (:rest/decode-request ctx) (:rest/check-response ctx))
+                         claims?   (and (:rest/check-claims ctx) (:rest/shape-response ctx))]
                      (vec (for [row (:http/routes ctx)
-                                :when (or (:rest/request row) (:rest/response row))]
+                                :when (or (and (or (:rest/request row) (:rest/response row))
+                                               (not contract?))
+                                          (and (or (seq (:facet/claims row)) (:facet/view row))
+                                               (not claims?)))]
                             (str (str/upper-case (name (:method row :get)))
                                  " " (:path row)))))
         missing (for [row (:http/routes ctx)

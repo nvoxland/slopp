@@ -5552,3 +5552,26 @@
   (is (= {"a/f" "a refactor"} (mcp/untested-waivers {:a/f "a refactor"})))
   (is (thrown-with-msg? Exception #"a/f" (mcp/untested-waivers {"a/f" "  "})))
   (is (thrown-with-msg? Exception #"reason" (mcp/untested-waivers {"a/f" nil}))))
+
+(deftest ^:external a-tests-only-change-that-creates-a-namespace-lands-its-other-steps
+  ;; slopp-s8x.13: the 'blob WAS a namespace creation' answer fired whenever a
+  ;; creation happened and impl was empty, so every test step still waiting was
+  ;; dropped, with :ok true.
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "ld.core" :source "(ns ld.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n"})
+      (let [r (call! sess "change"
+                     {:prompt "two specs, one in a new namespace"
+                      :tests [{:ns "ld.fresh-test"
+                               :source (str "(ns ld.fresh-test (:require [clojure.test :refer [deftest is]]))\n\n"
+                                            "(deftest in-the-new-one (is (= 1 1)))\n")}
+                              {:ns "ld.fresh-test" :name "second-one"
+                               :source "(deftest second-one (is (= 2 2)))"}
+                              {:ns "ld.core" :name "beside-it"
+                               :source "(deftest beside-it (is (= 3 3)))"}]})]
+        (is (not (re-find #":error \"" r)) r)
+        (let [src (call! sess "query_source" {:targets ["ld.fresh-test/in-the-new-one"
+                                                        "ld.fresh-test/second-one"
+                                                        "ld.core/beside-it"]})]
+          (is (not (re-find #"no such form" src)) src)))
+      (finally (ops/close! sess)))))

@@ -2,7 +2,7 @@
   "A route typed by a facet, end to end through the real encoding: the port parses what arrives and the handler sees a parsed value; the port projects what leaves to the route's view, with secrets redacted; a failed check is a 400 naming the check; a value the handler broke fails at the exit."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.rest :as slopp.rest]
-            [slopp.facet :as facet] [slopp.http.dispatch :as dispatch]))
+            [slopp.facet :as facet] [slopp.http.dispatch :as dispatch] [slopp.http :as http]))
 
 (defn qty-positive?
   "A quantity is at least one; anything but `true` is failure data."
@@ -88,3 +88,17 @@
       (is (not (re-find #"not-the-owner" (pr-str r))) "and nothing of the claim's data"))
     (is (= 401 (:status (call nil))) "a claim needs an actor")
     (is (= 1 @ran) "the handler ran only for the actor the claim admitted")))
+
+(defn ^{:http/path "/api/claimed" :http/method :get :http/auth :public :facet/claims [:shop/write]} claimed-route
+  "A route declaring a claim, for the assembly check below."
+  [_]
+  {:status 200 :body "ok"})
+
+(deftest a-route-declaring-claims-is-not-served-unenforced
+  ;; slopp-s8x.7: claims and projection run through keys only slopp.rest/validating
+  ;; installs, and dispatch skips them with a when-let, so a plain context served
+  ;; a claim-declaring route with no check at all, and done passed.
+  (is (thrown-with-msg? Exception #"/api/claimed"
+                        (http/context {:http/namespaces ['slopp.rest.facet-test]})))
+  (is (some? (http/context {:http/namespaces ['slopp.rest.facet-test]
+                            :http/wrap-context slopp.rest/validating}))))

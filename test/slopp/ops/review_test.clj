@@ -15,7 +15,7 @@
   `slopp.orientation-test`, with the other orientation surfaces."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.store :as store]
-            [slopp.ops.review :as review] [slopp.read.modules :as read.modules]))
+            [slopp.ops.review :as review] [slopp.read.modules :as read.modules] [slopp.store.db :as db] [slopp.ops.engine :as engine] [slopp.rules.mutate :as mutate]))
 
 (deftest review-scan-surfaces-ns-form-lint
   ;; Lint findings INSIDE the (ns …) form — dead imports, unused requires — have
@@ -395,3 +395,17 @@
                                          :sources {fid "(deftest f-t (is (= 1 (fl.core/f 1))))"}})]
         (is (nil? (:flagged-tests (scan st2))))
         (is (not (some #{:flagged-test} (:flags (row (scan st2))))))))))
+
+(deftest a-weak-oracle-outlives-the-done-that-found-it
+  ;; slopp-s8x.9: a repeated row reaches a done's findings only as a count, so a
+  ;; survivor left the scan one done later. The mutation record is durable.
+  (let [st  (store/ingest (store/empty-store) 'wo.core "(ns wo.core)\n\n(defn f \"F.\" [x] (inc x))\n")
+        fid (:id (store/form-named st 'wo.core 'f))
+        row {:payload {:fid fid :form 'wo.core/f :sig (mutate/form-sig st fid) :status :survived}}
+        r   (with-redefs [db/measurements (constantly [row])
+                          db/reds-for (constantly [])
+                          db/line-deltas (constantly [])
+                          engine/session-line (constantly 1)]
+              (review/review-scan (atom {:store st :db :no-conn})))
+        hit (first (filter #(= 'wo.core/f (:form %)) (:top r)))]
+    (is (some #{:weak-oracle} (:flags hit)) (pr-str hit))))

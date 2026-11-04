@@ -2203,7 +2203,7 @@
                 (:error born)
                 (text! {:error (:error born) :phase (if guard :tests :create)})
 
-                (seq (:created born))
+                (and (seq (:created born)) (empty? tests))
                 ;; the blob WAS a namespace creation — create-ns! landed and
                 ;; verified it; nothing is left for the group
                 (text! {:ok true :status :green

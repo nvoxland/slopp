@@ -5528,3 +5528,24 @@
     (testing "says nothing when there is nothing to decide"
       (is (not (str/includes? none "flagged")))
       (is (not (str/includes? bare "flagged"))))))
+
+(deftest the-change-screen-says-how-wide-and-what-was-rejected
+  ;; slopp-s8x.9: the model carried both and no screen rendered them
+  (let [flat (fn [v] (str/join " " (filter string? (tree-seq coll? seq v))))
+        base {:from "c1" :to "c2" :count 3
+              :modules [{:module "m" :count 1
+                         :namespaces [{:ns "m.a" :count 1
+                                       :forms [{:form "m.a/f" :form-id "f1" :callers 0 :diff []
+                                                :rejected "a lookup table"}]}]}]}
+        wide (flat (views/change-main (assoc base :spread {:forms 9 :namespaces 5 :modules 3})))
+        tight (flat (views/change-main (assoc base :spread {:forms 2 :namespaces 1 :modules 1})))]
+    (is (str/includes? wide "9 forms across 3 modules"))
+    (is (not (str/includes? tight "across")))
+    (is (str/includes? wide "rejected: a lookup table"))))
+
+(deftest the-timeline-keeps-an-earlier-flag-beside-a-later-verdict
+  (let [flat (fn [v] (str/join " " (filter string? (tree-seq coll? seq v))))
+        row  {:commit "c1" :description "x" :status "green" :at "t"
+              :review {:verdict "endorsed" :by "bob" :at "t" :flagged-by ["alice"]}}
+        seen (flat (views/timeline-main {:commit-points [row] :unreviewed 0}))]
+    (is (str/includes? seen "reviewed: endorsed by bob, earlier flagged by alice") seen)))

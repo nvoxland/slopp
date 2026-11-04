@@ -801,7 +801,9 @@
                   (str " · " (plural n "more line")))
                 ;; absence of a review is the signal, so it is SAID in words
                 (when-let [rv (:review m)]
-                  (str " · reviewed: " (:verdict rv) " by " (:by rv)))]]))])])
+                  (str " · reviewed: " (:verdict rv) " by " (:by rv)
+                       (when (seq (:flagged-by rv))
+                         (str ", earlier flagged by " (clojure.string/join ", " (:flagged-by rv))))))]]))])])
 
 (defn spine-view
   "The path a form sits on: root caller at the top, leaf callee at the bottom.
@@ -1531,7 +1533,7 @@
   Neither shows up in the readout, because the text renders either way — and
   this screen has no fixture, so nothing has ever driven it. That is the
   second instance of a live defect behind an undriven screen."
-  [{:keys [from to modules arc absence flags] total :count}]
+  [{:keys [from to modules arc absence flags spread] total :count}]
   [:div
    ;; on an empty answer this rendered `..` as a heading and ` forms` with no
    ;; number — the same false-sentence class as `0 forms` and
@@ -1554,6 +1556,9 @@
                    " changed forms had no test observed running them"))]
         (when (and system-deltas (pos? system-deltas))
           [:p (str system-deltas " housekeeping (system) changes in this range")])]))
+   ;; how WIDE, at the width where agent work is measured to fail most
+   (when (<= 3 (or (:modules spread) 0))
+     [:p {:class "spread"} (str (plural (:forms spread) "form") " across " (:modules spread) " modules")])
    ;; the tests an agent flagged instead of editing: the one exit the
    ;; immutability guard names leads HERE, so a flag nobody can see would
    ;; be a refusal with no decision behind it
@@ -1611,6 +1616,7 @@
                             [:h4 [:a {:href (str "/store/form/" (:form-id f))}
                                   (:form f)]]
                             (when (:why f) [:p [:em (:why f)]])
+                            (when (:rejected f) [:p [:small (str "rejected: " (:rejected f))]])
                             [:pre
                              (into [:code]
                                    ;; a line is [status text] — `same`, `add`,

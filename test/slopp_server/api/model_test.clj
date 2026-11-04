@@ -1096,3 +1096,44 @@
     (is (= [{:test "fc.core-test/f-adds-one" :reason "after the range" :agent "a"}]
            (:flags (cv "c2" "c3")))
         "a flag belongs to the range it was recorded in")))
+
+(deftest a-range-that-does-not-run-forward-is-not-a-range
+  ;; slopp-s8x.8: range-deltas looks for `to` after `from`. Absent, it took every
+  ;; delta to the end of the journal, so /change/c2..c1 counted and explained
+  ;; changes outside the range.
+  (let [s0  (store/ingest (store/empty-store) 'rr.core "(ns rr.core)\n\n(defn f [x] (inc x))\n")
+        fid (:id (store/form-named s0 'rr.core 'f))
+        st  (reduce store/record-delta
+                    (assoc s0 :deltas [] :head nil :line-pos 0 :prompts {} :last-write {})
+                    [{:id "c1" :op :commit :status :green :at 1784900000000 :description "base"}
+                     {:id "d1" :op :replace :ns 'rr.core :form-id fid :prompt "f adds one"
+                      :sources {fid "(defn f [x] (+ x 1))"}}
+                     {:id "c2" :op :commit :status :green :at 1784900060000 :description "work"}])
+        cv  (fn [from to] (model/change-view (atom {:store st :test-map nil}) from to))]
+    (is (some? (cv "c1" "c2")))
+    (is (nil? (cv "c2" "c1")))
+    (is (nil? (cv "c1" "c1")))))
+
+(deftest a-change-range-shows-the-alternative-a-write-rejected
+  ;; slopp-s8x.9: :rejected was stored and only form history read it
+  (let [s0  (store/ingest (store/empty-store) 'rj.core "(ns rj.core)\n\n(defn f [x] (inc x))\n")
+        fid (:id (store/form-named s0 'rj.core 'f))
+        st  (reduce store/record-delta
+                    (assoc s0 :deltas [] :head nil :line-pos 0 :prompts {} :last-write {})
+                    [{:id "c1" :op :commit :status :green :at 1784900000000 :description "base"}
+                     {:id "d1" :op :replace :ns 'rj.core :form-id fid :prompt "f adds one"
+                      :rejected "a lookup table: nothing else uses one"
+                      :sources {fid "(defn f [x] (+ x 1))"}}
+                     {:id "c2" :op :commit :status :green :at 1784900060000 :description "work"}])
+        row (-> (model/change-view (atom {:store st :test-map nil}) "c1" "c2")
+                :modules first :namespaces first :forms first)]
+    (is (= "a lookup table: nothing else uses one" (:rejected row)) (pr-str row))))
+
+(deftest the-risk-dial-counts-what-its-label-says
+  ;; slopp-s8x.9: it counted any row with risk, so a :cljs namespace read 100%
+  ;; from :off-platform alone, a fact nobody can change.
+  (is (= '{a.core 1}
+         (model/risk-by-ns [{:form 'a.core/flagged :risk 4 :flags [:untested]}
+                            {:form 'b.client/view :risk 1 :flags [:off-platform]}
+                            {:form 'a.core/busy :risk 1 :flags []}])))
+  (is (re-find #"weak oracle" (get-in model/dials ["risk" :note]))))

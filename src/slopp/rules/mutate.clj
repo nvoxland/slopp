@@ -504,3 +504,19 @@
                       (and (:timeout r) (not-every? ran tests)) (assoc b :status :unchecked)
                       (not-any? ran tests) (assoc b :status :unprovable :why "only tests outside the image run it")
                       :else          (assoc b :status :unproven))))))))))
+
+(defn ^:export weak-forms
+  "The forms whose tests let a mutant survive: from recorded result `rows`, those
+  whose latest result for their CURRENT version is `:survived`. Read from the
+  record because a done's findings carry a repeated row only as a count, so a
+  survivor would otherwise vanish from review one done later. An edit retires it:
+  the version changed."
+  [store rows]
+  (->> rows
+       (keep :payload)
+       (filter :fid)
+       (reduce (fn [m p] (assoc m [(:fid p) (:sig p)] p)) {})
+       vals
+       (filter #(and (= :survived (:status %)) (= (:sig %) (form-sig store (:fid %)))))
+       (map :form)
+       set))

@@ -3075,3 +3075,36 @@
                  (str (ops/protected-test-refusal
                        s tmap "bot" "" [{:action :replace :ns 'a.core-test :name 'f-is-identity
                                          :source "(deftest f-is-identity (is true))"}]))))))
+
+(deftest a-test-written-on-this-unlanded-thread-survives-a-held-done
+  ;; slopp-s8x.3: a red done lands nothing, so what it judged is still this
+  ;; thread's own new work. Measured from any done, it read as pre-existing.
+  (let [[s tmap] (protected-fixture)
+        node (:node (edit/parse-form "(deftest f-increments (is (= 2 (c/f 1))))"))
+        [s _] (store/append-form s 'a.core-test node :agent "bot" :prompt "spec")
+        held  {:id "dh" :op :done :agent "bot" :findings {:episode-status :red}}
+        s     (update s :recent conj held)
+        tmap  (assoc tmap 'a.core-test/f-increments #{'a.core/f})
+        step  [{:action :replace :ns 'a.core-test :name 'f-increments
+                :source "(deftest f-increments (is (= 2 (c/f 1))) (is (= 3 (c/f 2))))"}]]
+    (is (nil? (ops/protected-test-refusal s tmap "bot" "" step)))
+    (testing "a landed done does end it: after that the test is the thread's history"
+      (let [landed (update s :recent conj {:id "dl" :op :done :agent "bot" :findings {:episode-status :green}})
+            [s2 _] (store/replace-node landed 'a.core 'f (:node (edit/parse-form "(defn f [x] (+ x 2))"))
+                                       :agent "bot" :prompt "change f again")]
+        (is (re-find #"flag_test" (str (ops/protected-test-refusal s2 tmap "bot" "" step))))))))
+
+(deftest a-held-done-does-not-turn-my-new-test-into-history
+  ;; slopp-s8x.3: write a test, a done holds, change the code again. The test
+  ;; reaches a form changed after the held done, and it has never landed, so it
+  ;; is still the author's own spec, not an oracle somebody else relies on.
+  (let [[s tmap] (protected-fixture)
+        node (:node (edit/parse-form "(deftest f-increments (is (= 2 (c/f 1))))"))
+        [s _] (store/append-form s 'a.core-test node :agent "bot" :prompt "spec")
+        s     (update s :recent conj {:id "dh" :op :done :agent "bot" :findings {:episode-status :red}})
+        [s _] (store/replace-node s 'a.core 'f (:node (edit/parse-form "(defn f [x] (+ x 2))"))
+                                  :agent "bot" :prompt "try again")
+        tmap  (assoc tmap 'a.core-test/f-increments #{'a.core/f})]
+    (is (nil? (ops/protected-test-refusal
+               s tmap "bot" "" [{:action :replace :ns 'a.core-test :name 'f-increments
+                                 :source "(deftest f-increments (is (= 3 (c/f 1))))"}])))))

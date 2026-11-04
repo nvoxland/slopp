@@ -149,6 +149,7 @@
                     [:verdict {:doc "endorsed or flagged"} :string]
                     [:by {:doc "who reviewed it"} :string]
                     [:at {:doc "when, formatted like :at"} :string]
+                    [:flagged-by {:optional true :doc "who flagged it earlier: a later verdict does not hide an objection"} [:sequential :string]]
                     [:note {:optional true :doc "why, when they said"} :string]]]]]]
    [:unreviewed {:doc "how many commit-points no human has reviewed — the absence the page says once"} :int]
    [:working {:doc (str "the work since the newest commit-point — what is written and"
@@ -218,6 +219,8 @@
                                     [:form-id {:doc "its stable address in the store"} :string]
                                     [:status {:doc "what happened to it in this range"}
                                      [:enum "added" "modified" "deleted"]]
+                                    [:rejected {:optional true
+                                                :doc "the alternative the write said it considered and did not take"} :string]
                                     [:why {:optional true
                                            :doc (str "the recorded ask behind the change."
                                                      " Absent when the write carried none")} :string]

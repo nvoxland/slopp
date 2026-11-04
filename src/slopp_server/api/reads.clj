@@ -666,10 +666,7 @@
           "churn"    (model/churn-by-ns
                       (:store @(ops/with-history session :ops (vec (conj history/content-ops :commit))))
                       5)
-          "risk"     (frequencies
-                      (for [row (:top (review/review-scan session :limit 1000000))
-                            :when (pos? (or (:risk row) 0))]
-                        (symbol (namespace (symbol (str (:form row)))))))
+          "risk"     (model/risk-by-ns (:top (review/review-scan session :limit 1000000)))
           nil)]
     (when numerators
       (model/overlay-doc st dial numerators))))

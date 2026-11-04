@@ -3837,7 +3837,8 @@
   form ADDED under a name the episode also DELETED is a relocation
   (`move-forms!` re-adds the deftest with a fresh id), not a creation, and
   keeps its protection; without that a move was a way out from under the
-  oracle (slopp-s8x.3). A test
+  oracle (slopp-s8x.3). CREATED is measured from the last LANDED done: a red
+  done lands nothing, so a test written before it is still this thread's own. A test
   whose coverage the agent did not touch is not part of the arc being graded.
   And a turn intent that NAMES the test is the human deciding — the one actor
   allowed to move an oracle; `intent` is the human's verbatim ask
@@ -3849,14 +3850,15 @@
      (let [mine     (filter #(= agent (:agent %)) (history/episode-span store agent))
            fids     (fn [d] (if (:form-id d) [(:form-id d)] (:form-ids d)))
            ;; names this episode deleted: an :add under one of them is a move
-           deleted  (into #{} (comp (filter #(= :delete (:op %))) (keep :name) (map str)) mine)
+           unlanded (filter #(= agent (:agent %)) (store/landing-span store))
+           deleted  (into #{} (comp (filter #(= :delete (:op %))) (keep :name) (map str)) unlanded)
            created  (into #{}
                           (comp (filter #(#{:add :ingest} (:op %)))
                                 (mapcat fids)
                                 (remove (fn [fid]
                                           (when-let [e (store/form-by-id store fid)]
                                             (contains? deleted (str (:name e)))))))
-                          mine)
+                          unlanded)
            same-call (into #{}
                            (keep (fn [{:keys [ns name]}]
                                    (when (and ns name (not (str/ends-with? (str ns) "-test")))

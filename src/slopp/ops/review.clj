@@ -31,7 +31,7 @@
             [slopp.index.refs :as refs]
             [slopp.index :as index]
             [slopp.store.render :as store.render]
-            [slopp.store :as store] [slopp.ops.done :as done] [slopp.store.db :as db] [slopp.rules.markers :as markers] [slopp.ops.engine :as engine]))
+            [slopp.store :as store] [slopp.ops.done :as done] [slopp.store.db :as db] [slopp.rules.markers :as markers] [slopp.ops.engine :as engine] [slopp.rules.mutate :as mutate]))
 
 (defn red-signal
   "What the red index says about one form, for a review row. `reds-by-fid` is
@@ -158,9 +158,11 @@
         ;; still passed with a mutant in place, so the tests watch the code
         ;; without constraining it. Read off the latest :done in the window;
         ;; a later done that changes the form asks again
-        weak    (into #{} (map :form)
-                      (some-> (last (filter #(= :done (:op %)) (:recent st)))
-                              :findings :mutants-survived))
+        weak    (into (into #{} (map :form)
+                            (some-> (last (filter #(= :done (:op %)) (:recent st)))
+                                    :findings :mutants-survived))
+                      (when-let [conn (:db @session)]
+                        (mutate/weak-forms st (db/measurements conn "mutation" nil))))
         ;; FLAGGED TESTS: an agent was refused an edit to a test grading its
         ;; own change and recorded an objection instead (flag_test). The
         ;; human decides, and the objection stands until the test is written

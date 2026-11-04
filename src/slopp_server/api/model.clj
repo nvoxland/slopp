@@ -964,7 +964,8 @@ gaps    (gaps-by-ns st (:test-map @session))
                           " the work has been; ranked within this store")}
    "risk"     {:kind "share" :label "risk"
                :note (str "the share of forms the review scan flags — untested, unused, high"
-                          " blast radius, large, lint, undocumented or effectful")}})
+                          " blast radius, large, lint, undocumented, effectful, never red, weak oracle,"
+                          " escape hatch or a disputed test")}})
 
 (defn overlay-doc
   "One DIAL's tint facts for the Code map: `numerators` (namespace → n) over
@@ -1056,11 +1057,13 @@ gaps    (gaps-by-ns st (:test-map @session))
 
 (defn- range-deltas
   "The deltas inside the range (`from`, `to`]: after `from`, up to and
-  including `to`, oldest first."
+  including `to`, oldest first. A point to itself holds nothing; without saying
+  so, `to` is never met and this would read to the end of the journal."
   [st from to]
-  (let [after (rest (drop-while #(not= from (:id %)) (store/deltas st)))
-        [a b] (split-with #(not= to (:id %)) after)]
-    (concat a (take 1 b))))
+  (when (not= from to)
+    (let [after (rest (drop-while #(not= from (:id %)) (store/deltas st)))
+          [a b] (split-with #(not= to (:id %)) after)]
+      (concat a (take 1 b)))))
 
 (defn- range-prompts
   "`{form-id ask}` for the asks that changed each form INSIDE the range
@@ -1076,86 +1079,6 @@ gaps    (gaps-by-ns st (:test-map @session))
                       (cond-> (vec (:form-ids d)) (:form-id d) (conj (:form-id d))))
               m))
           {} (range-deltas st from to)))
-
-(defn ^:export change-view
-  "What changed between two commit-points, grouped module → namespace → form
-  with a count at every rung so a collapsed row still says how much is
-  under it. `from`/`to` are commit-point delta ids — exactly the pair
-  `timeline` hands over in each row's `:range`.
-
-  Two rungs, not three: wave 1 made components REAL namespace prefixes, so
-  a component IS a module and `module-of` answers both.
-
-  Per form: the ask that changed it IN THIS RANGE (not its newest one, which
-  can belong to a later change), the LINE diff (never whole sources — a
-  reviewer reads changes), and how many distinct forms call it now. The
-  caller count spans every `:via` the graph records, and the graph is a
-  syntactic reader, so it is a floor rather than a census. `:flags` carries
-  the tests an agent flagged in the range instead of editing (flag_test):
-  objections a human has not decided, shown where the decision is made."
-  [session from to]
-  (let [st  (:store @session)
-        ids (into #{} (map :id) (store/deltas st))]
-    ;; a range arrives from a URL, so both ends are user input. "Nothing
-    ;; changed here" and "that is not a range" are different answers, and
-    ;; only the second one is a 404.
-    (when (and (contains? ids from) (contains? ids to))
-      (let [ch        (history/query-changes session :from from :to to)
-            by-target (refs/refs-by-target st)
-            prompts   (range-prompts st from to)
-            rds       (range-deltas st from to)
-            rows      (for [{:keys [form form-id status was now]} (:forms ch)
-                            :let [ns-sym (symbol (namespace form))]]
-                        (cond-> {:form    (str form)
-                                 :form-id form-id
-                                 ;; keyword VALUES become strings here, for the same
-                                 ;; reason `:form` is `(str form)`: a key round-trips
-                                 ;; symmetrically through JSON and a value does not.
-                                 ;; `diff-lines` keeps its keywords — it also feeds
-                                 ;; the agent-facing text renderer, and shaping for
-                                 ;; the wire is this layer's job, not its producer's.
-                                 :status  (name status)
-                                 :ns      (str ns-sym)
-                                 :module  (edit.modules/module-of ns-sym)
-                                 :diff    (mapv (fn [[k text]] [(name k) text])
-                                                (history/diff-lines was now))
-                                 :callers (count (distinct (map (juxt :from-ns :from-var)
-                                                                (get by-target form []))))}
-                          (get prompts form-id) (assoc :why (get prompts form-id))))]
-        {:from    from
-         :to      to
-         :count   (count rows)
-         :spread  (edit.modules/spread (map #(symbol (:ns %)) rows))
-         :modules (->> rows
-                       (group-by :module)
-                       (sort-by key)
-                       (mapv (fn [[m rs]]
-                               {:module     m
-                                :count      (count rs)
-                                :namespaces (->> rs
-                                                 (group-by :ns)
-                                                 (sort-by key)
-                                                 (mapv (fn [[n fs]]
-                                                         {:ns    n
-                                                          :count (count fs)
-                                                          :forms (vec (sort-by :form
-                                                                               (map #(dissoc % :ns :module) fs)))})))})))
-         :arc     (vec (:verification-arc ch))
-         ;; the tests an agent flagged in this range instead of editing them
-         ;; (flag_test): an objection a human has not decided yet
-         :flags   (vec (for [d rds :when (= :flag-test (:op d))]
-                         (cond-> {:test (str (:test d)) :reason (str (:reason d))}
-                           (:agent d) (assoc :agent (str (:agent d))))))
-         ;; what this screen did NOT see, said on the screen: a deterministic
-         ;; view that hides its gaps reads as more certain than it is
-         :absence {:changed          (count rows)
-                   :no-observed-test (when-let [tmap (:test-map @session)]
-                                       (count (remove (fn [{:keys [form status]}]
-                                                        (or (= "deleted" status)
-                                                            (some #(contains? (:via %) :observed)
-                                                                  (refs/covered-by st tmap (symbol form)))))
-                                                      rows)))
-                   :system-deltas    (count (filter :system rds))}}))))
 
 (defn- test-spec
   "`{:assertion :assertions}` for deftest `q`, read from its body in the store:
@@ -1319,3 +1242,109 @@ gaps    (gaps-by-ns st (:test-map @session))
            graph (assoc :graph graph)
            reds  (assoc :reds reds)
            true  (with-test-specs st)))))))
+
+(defn- range-rejected
+  "`{form-id alternative}` for the alternatives the writes inside the range
+  (`from`, `to`] said they rejected: the latest one naming each form."
+  [st from to]
+  (reduce (fn [m d]
+            (if (:rejected d)
+              (reduce #(assoc %1 %2 (:rejected d)) m
+                      (cond-> (vec (:form-ids d)) (:form-id d) (conj (:form-id d))))
+              m))
+          {} (range-deltas st from to)))
+
+(defn ^:export change-view
+  "What changed between two commit-points, grouped module → namespace → form
+  with a count at every rung so a collapsed row still says how much is
+  under it. `from`/`to` are commit-point delta ids — exactly the pair
+  `timeline` hands over in each row's `:range`.
+
+  Two rungs, not three: wave 1 made components REAL namespace prefixes, so
+  a component IS a module and `module-of` answers both.
+
+  Per form: the ask that changed it IN THIS RANGE (not its newest one, which
+  can belong to a later change), the LINE diff (never whole sources — a
+  reviewer reads changes), and how many distinct forms call it now. The
+  caller count spans every `:via` the graph records, and the graph is a
+  syntactic reader, so it is a floor rather than a census. `:flags` carries
+  the tests an agent flagged in the range instead of editing (flag_test):
+  objections a human has not decided, shown where the decision is made."
+  [session from to]
+  (let [st  (:store @session)
+        pos (into {} (map-indexed (fn [i d] [(:id d) i])) (store/deltas st))]
+    ;; a range arrives from a URL, so both ends are user input. "Nothing
+    ;; changed here" and "that is not a range" are different answers, and
+    ;; only the second one is a 404. A range that does not run forward is
+    ;; not one: range-deltas would read past `to` to the end of the journal.
+    (when (and (pos from) (pos to) (or (< (pos from) (pos to))
+                   (and (= from to) (not= :commit (:op (nth (store/deltas st) (pos from)))))))
+      (let [ch        (history/query-changes session :from from :to to)
+            by-target (refs/refs-by-target st)
+            prompts   (range-prompts st from to)
+            rejected  (range-rejected st from to)
+            rds       (range-deltas st from to)
+            rows      (for [{:keys [form form-id status was now]} (:forms ch)
+                            :let [ns-sym (symbol (namespace form))]]
+                        (cond-> {:form    (str form)
+                                 :form-id form-id
+                                 ;; keyword VALUES become strings here, for the same
+                                 ;; reason `:form` is `(str form)`: a key round-trips
+                                 ;; symmetrically through JSON and a value does not.
+                                 ;; `diff-lines` keeps its keywords — it also feeds
+                                 ;; the agent-facing text renderer, and shaping for
+                                 ;; the wire is this layer's job, not its producer's.
+                                 :status  (name status)
+                                 :ns      (str ns-sym)
+                                 :module  (edit.modules/module-of ns-sym)
+                                 :diff    (mapv (fn [[k text]] [(name k) text])
+                                                (history/diff-lines was now))
+                                 :callers (count (distinct (map (juxt :from-ns :from-var)
+                                                                (get by-target form []))))}
+                          (get prompts form-id) (assoc :why (get prompts form-id))
+                          (get rejected form-id) (assoc :rejected (get rejected form-id))))]
+        {:from    from
+         :to      to
+         :count   (count rows)
+         :spread  (edit.modules/spread (map #(symbol (:ns %)) rows))
+         :modules (->> rows
+                       (group-by :module)
+                       (sort-by key)
+                       (mapv (fn [[m rs]]
+                               {:module     m
+                                :count      (count rs)
+                                :namespaces (->> rs
+                                                 (group-by :ns)
+                                                 (sort-by key)
+                                                 (mapv (fn [[n fs]]
+                                                         {:ns    n
+                                                          :count (count fs)
+                                                          :forms (vec (sort-by :form
+                                                                               (map #(dissoc % :ns :module) fs)))})))})))
+         :arc     (vec (:verification-arc ch))
+         ;; the tests an agent flagged in this range instead of editing them
+         ;; (flag_test): an objection a human has not decided yet
+         :flags   (vec (for [d rds :when (= :flag-test (:op d))]
+                         (cond-> {:test (str (:test d)) :reason (str (:reason d))}
+                           (:agent d) (assoc :agent (str (:agent d))))))
+         ;; what this screen did NOT see, said on the screen: a deterministic
+         ;; view that hides its gaps reads as more certain than it is
+         :absence {:changed          (count rows)
+                   :no-observed-test (when-let [tmap (:test-map @session)]
+                                       (count (remove (fn [{:keys [form status]}]
+                                                        (or (= "deleted" status)
+                                                            (some #(contains? (:via %) :observed)
+                                                                  (refs/covered-by st tmap (symbol form)))))
+                                                      rows)))
+                   :system-deltas    (count (filter :system rds))}}))))
+
+(defn risk-by-ns
+  "The risk dial's numerators from review_scan `rows`: per namespace, the forms
+  the scan FLAGS. A row flagged only `:off-platform` is left out, since that is a
+  standing fact about a `:cljs` namespace that no change can address, and a row
+  with risk but no flag is left out because the dial's label promises flags."
+  [rows]
+  (frequencies
+   (for [row rows
+         :when (seq (remove #{:off-platform} (:flags row)))]
+     (symbol (namespace (symbol (str (:form row))))))))

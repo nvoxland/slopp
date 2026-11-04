@@ -197,3 +197,38 @@
     (let [vs (history/query-form-history sess 'hg.core 'f :green true :diff true)]
       (is (= ["one" "three"] (mapv :prompt vs)))
       (is (= ["-  (inc x))" "+  (* 2 x))"] (:diff (second vs))) "diff is green to green"))))
+
+(deftest a-versions-status-is-its-own-verify
+  ;; slopp-s8x.8: status-after scanned forward without limit, so a version with
+  ;; no verification borrowed the next one, about somebody else's write; and a
+  ;; verify that ran no tests read as green.
+  (let [v  (fn [id r] {:id id :op :verify :result r})
+        w  (fn [id & {:as m}] (merge {:id id :op :replace :form-id "f"} m))
+        st {:deltas [(w "a")                       ;; no verify of its own
+                     (w "b")
+                     (v "vb" {:test 3 :fail 0 :error 0})
+                     (w "c" :group "g")            ;; one verify for a whole group
+                     (w "d" :group "g")
+                     (v "vd" {:test 3 :fail 1 :error 0})
+                     (w "e")
+                     {:id "m" :op :read-cost}      ;; a marker between is no write
+                     (v "ve" {:test 0 :fail 0 :error 0})
+                     (w "z")]}]
+    (is (= :unknown (history/status-after st "a")) "a later write's verify is not this one's")
+    (is (= :green (history/status-after st "b")))
+    (is (= :red (history/status-after st "c")) "the group's verify is its first step's too")
+    (is (= :red (history/status-after st "d")))
+    (is (= :unknown (history/status-after st "e")) "no test ran, so nothing was graded")
+    (is (= :unknown (history/status-after st "z")))))
+
+(deftest a-later-endorsement-does-not-hide-an-earlier-flag
+  ;; slopp-s8x.8: last-wins by target, so one person's flag vanished under
+  ;; another's endorsement with no sign it had ever been raised.
+  (let [r {:op :review :target "c1" :at 1784900000000}
+        st {:deltas [(assoc r :id "r1" :verdict :flagged :by "alice")
+                     (assoc r :id "r2" :verdict :endorsed :by "bob")]}
+        row (get (history/latest-reviews st) "c1")]
+    (is (= :endorsed (:verdict row)))
+    (is (= "bob" (:by row)))
+    (is (= ["alice"] (:flagged-by row)))
+    (is (nil? (:flagged-by (get (history/latest-reviews {:deltas [(assoc r :id "r1" :verdict :endorsed :by "bob")]}) "c1"))))))

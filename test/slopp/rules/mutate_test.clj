@@ -401,3 +401,16 @@
     (is (every? #(= :restore-failed (:status %)) rs))
     (is (every? #(= 2 (get @calls %)) ids)
         (str "forms never reloaded: " (count (remove #(= 2 (get @calls %)) ids))))))
+
+(deftest a-weak-form-is-its-latest-result-for-its-current-version
+  ;; slopp-s8x.9: :weak-oracle read only the last done's findings, and a carried
+  ;; row is not in those, so a survivor vanished from review one done later.
+  (let [s   (store/ingest (store/empty-store) 'wk.core "(ns wk.core)\n\n(defn f [x] x)\n\n(defn g [x] x)\n\n(defn h [x] x)\n")
+        fid #(:id (store/form-named s 'wk.core %))
+        sig #(mutate/form-sig s (fid %))
+        row (fn [nm sg st] {:payload {:fid (fid nm) :form (symbol "wk.core" (str nm)) :sig sg :status st}})]
+    (is (= '#{wk.core/f}
+           (mutate/weak-forms s [(row 'f (sig 'f) :survived)
+                                 (row 'g (sig 'g) :survived)
+                                 (row 'g (sig 'g) :killed)
+                                 (row 'h 12345 :survived)])))))
