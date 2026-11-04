@@ -950,7 +950,7 @@
               ;; a read-only planning ask is where the withholding was first
               ;; hit.
               (swap! session #(-> %
-                                  (assoc :pending-intent prompt :last-intent prompt)
+                                  (assoc :pending-intent prompt :last-intent prompt :human-intent prompt)
                                   (update ::ask (fnil inc 0)))))
             ;; the bundle that rode in WITH this prompt: hold what the
             ;; endpoint stashed, under the ask that just opened
@@ -1635,7 +1635,7 @@
   {"deps_add"
    (fn [session a sym]
      (text! (if-let [refusal (ops/deps-allow-refusal (:store @session) (sym :lib)
-                                                    (:last-intent @session))]
+                                                    (:human-intent @session))]
               ;; the tool is the door an agent's own pick arrives through;
               ;; refused before deps-add!, which resolves and DOWNLOADS
               {:error refusal}
@@ -2184,7 +2184,7 @@
                 impl0  (stamp-rejected (wire-steps (or (:impl a) [])) (:rejected a))
                 guard  (ops/protected-test-refusal (:store @session) (:test-map @session)
                                           (or (:agent a) (:agent-id @session))
-                                          (:last-intent @session)
+                                          (:human-intent @session)
                                           (into tests0 impl0))
                 born   (if guard
                          {:error guard}

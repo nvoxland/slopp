@@ -247,7 +247,9 @@
 (deftest ^:external deps-ride-the-mcp-surface
   (let [sess (external/open!)]
     (try
-      (swap! sess assoc :last-intent "add org.clojure/data.json for the report")
+      ;; the human's word is :human-intent, set only by the prompt hook's
+      ;; mailbox (slopp-s8x.1)
+      (swap! sess assoc :human-intent "add org.clojure/data.json for the report")
       ;; a NEW library needs the human's ask to name it (the deps_add allow-list)
       (let [call (fn [tool args]
                    (get-in (slopp-server.mcp/handle!
@@ -259,7 +261,7 @@
                        (call "deps_add" {:lib "org.clojure/data.json"
                                          :version "2.5.0" :agent "a"}))))
         (testing "deps_list answers over MCP"
-          (is (re-find #"data\.json" (call "deps_list" {})))))
+          (is (re-find #"data\\.json" (call "deps_list" {})))))
       (finally (ops/close! sess)))))
 
 (deftest build-deps-edn-trace-alias

@@ -4466,8 +4466,10 @@
           (is (not (re-find #":landed \"main\"" r)) r)))
       (testing "done takes commit too"
         ;; f changed earlier this episode, so f-t is protected from the agent;
-        ;; the human's ask naming it is what lets the test move with the code
-        (swap! sess assoc :last-intent "f should triple; update f-t to expect 3")
+        ;; the human's ask naming it is what lets the test move with the code.
+        ;; That ask is :human-intent — what the prompt hook's mailbox set, never
+        ;; the agent's own turn_begin or write prompt (slopp-s8x.1).
+        (swap! sess assoc :human-intent "f should triple; update f-t to expect 3")
         (call! sess "change" {:prompt "f triples, test agrees"
                               :tests [{:ns "oc.core" :name "f-t" :source "(deftest f-t (is (= 3 (f 1))))"}]
                               :impl  [{:ns "oc.core" :name "f" :source "(defn f \"F.\" [x] (* 3 x))"}]})
@@ -5147,17 +5149,18 @@
 (deftest ^:external both-dependency-doors-ask-for-the-humans-word
   ;; slopp-6u3.2. The TOOL is the door an agent's own pick arrives through;
   ;; a git clone or import adds the dependencies a human chose to bring in,
-  ;; and calls ops/deps-add! directly.
+  ;; and calls ops/deps-add! directly. The human's word is :human-intent,
+  ;; which only the prompt hook's mailbox sets (slopp-s8x.1).
   (let [sess (external/open!)]
     (try
-      (swap! sess assoc :last-intent "make the report faster")
+      (swap! sess assoc :human-intent "make the report faster")
       (is (re-find #"deps-allow" (call! sess "deps_add" {:lib "org.example/left-pad" :version "1.0"})))
       (is (not (contains? (:deps (:store @sess)) 'org.example/left-pad))
           "refused before anything was recorded or downloaded")
       (is (re-find #"org.example/left-pad"
                    (str (:error (ops/config-file! sess "deps-allow" :key "org.example/left-pad" :value "looks fine"))))
           "the agent cannot approve its own pick")
-      (swap! sess assoc :last-intent "allow org.example/left-pad, I checked it")
+      (swap! sess assoc :human-intent "allow org.example/left-pad, I checked it")
       (is (nil? (:error (ops/config-file! sess "deps-allow" :key "org.example/left-pad" :value "the human checked it"))))
       (finally (ops/close! sess)))))
 
@@ -5459,3 +5462,42 @@
                                    :phases {:lint 4 :rest 5}})]
     (is (= 9 (:ms t)))
     (is (= {:lint 4 :rest 5} (:phases t)))))
+
+(deftest ^:external an-agents-own-turn-begin-lifts-no-guard
+  ;; slopp-s8x.1: the human's ask lifts test immutability, endorsement and
+  ;; the dependency allow-list. It was read from :last-intent, which the
+  ;; turn_begin TOOL and a write's own prompt also set — so an agent refused
+  ;; on a test or a library could name it in a turn_begin and retry. The
+  ;; human's channel is the prompt hook's mailbox alone (:human-intent).
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-human-intent-" (System/nanoTime))
+        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "harness-h"})]
+    (try
+      (call! sess "ns_create" {:ns "hi.core" :source "(ns hi.core)\n(defn f \"F.\" [x] x)\n"
+                               :prompt "the seed"})
+      (call! sess "ns_create" {:ns "hi.core-test"
+                               :source (str "(ns hi.core-test (:require [clojure.test :refer [deftest is]] [hi.core :as c]))\n"
+                                            "(deftest f-is-identity (is (= 1 (c/f 1))))\n")
+                               :prompt "the seed's test"})
+      (call! sess "done" {:label "seed"})
+      (call! sess "change" {:prompt "make f add zero"
+                            :impl [{:ns "hi.core" :name "f" :source "(defn f \"F.\" [x] (+ x 0))"}]})
+      (testing "a turn_begin whose intent names the test lifts nothing"
+        (call! sess "turn_begin" {:agent "harness-h" :intent "loosen f-is-identity"})
+        (let [r (call! sess "change" {:prompt "loosen f-is-identity"
+                                      :tests [{:ns "hi.core-test" :name "f-is-identity"
+                                               :source "(deftest f-is-identity (is true))"}]})]
+          (is (re-find #"flag_test" r) r)))
+      (testing "nor does it lift the dependency allow-list"
+        (call! sess "turn_begin" {:agent "harness-h" :intent "add org.example/left-pad"})
+        (is (re-find #"deps-allow" (call! sess "deps_add" {:lib "org.example/left-pad" :version "1.0"}))))
+      (testing "the hook's mailbox is the human's channel, and it lifts"
+        (io/make-parents (io/file dir ".slopp" "pending-intent"))
+        (spit (io/file dir ".slopp" "pending-intent")
+              "{\"session-id\":\"harness-h\",\"prompt\":\"f-is-identity should accept anything\"}")
+        (let [r (call! sess "change" {:prompt "loosen f-is-identity, as asked"
+                                      :tests [{:ns "hi.core-test" :name "f-is-identity"
+                                               :source "(deftest f-is-identity (is true))"}]})]
+          (is (= "f-is-identity should accept anything" (:human-intent @sess)))
+          (is (not (re-find #"flag_test" r)) r)))
+      (finally (ops/close! sess)
+               (sh/sh "rm" "-rf" dir)))))

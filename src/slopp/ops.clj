@@ -5307,7 +5307,7 @@
                          ;; entry the agent writes for itself would approve
                          ;; its own guess
                          "deps-allow"
-                         (when-not (names-lib? (:last-intent @session) (str key))
+                         (when-not (names-lib? (:human-intent @session) (str key))
                            (str "the deps-allow list holds libraries a human"
                                 " approved, and the human's ask does not name "
                                 key ". Ask them to name it, then write it here."))
@@ -6433,7 +6433,7 @@
         guard  (when protect-tests
                  (protected-test-refusal (:store @session) (:test-map @session)
                                          (or agent (:agent-id @session))
-                                         (:last-intent @session) steps))
+                                         (:human-intent @session) steps))
         r      (if guard {:error guard :protected-test true} (once))
         nses   (vec (distinct (map :ns steps)))
         stamps [:auto-require :auto-requires :auto-require-refused
