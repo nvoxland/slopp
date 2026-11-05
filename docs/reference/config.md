@@ -291,6 +291,7 @@ about verification.
 ```sh
 slopp server [port]      # the slopp server: one slopp for the machine — yours to start; nothing starts it for you
 slopp server stop        # stop the recorded one; `status` asks it
+slopp server token       # print the token a person pastes into the change screen to sign in
 slopp <op> [json]        # one tool call, routed to the slopp server (fails, and says so, when none answers)
 slopp --doctor           # self-check java, jar, hooks, skills, store probe (through the slopp server)
 ```

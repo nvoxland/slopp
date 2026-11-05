@@ -8092,7 +8092,7 @@ verdict, a missing `:by` or a target that is not a commit point; the endpoint
 `:http/sub`) lives in its own namespace, `slopp-server.review`, because the
 route lists in `api.endpoints` and the typed document are pinned by tests;
 the timeline rows carry `:review`, unreviewed first, and the model counts
-`:unreviewed`. **Not yet usable in a real server:** slopp's own server is
+`:unreviewed`. **Not usable in a real server until the sign-in below (2026-11-04):** slopp's own server was
 started with no `:http/auth-config`, so no request resolves an identity and
 every POST is a 401. Choosing how a person signs in to the local UI is open
 (slopp-nnt). Corrected 2026-11-04 (slopp-s8x.2): auth was not the only
@@ -8101,6 +8101,27 @@ answered 404 before any 401; the served-list test scanned the
 `slopp-server.api.` prefix and nothing else asked. It is on
 `served-namespaces` now and the test checks every entry. No page calls the
 endpoint yet either; that is slopp-nnt's to add with the sign-in.
+
+**Sign-in, decided 2026-11-04 by the user (slopp-nnt): the local token.**
+`process/auth-config` makes the server's per-boot token a `:bearer` credential
+that resolves to `user.name`. `slopp server token` prints it; the person pastes
+it into a password box on the change screen, and the page holds it in memory
+only, so a reload signs out. It is the write door's own secret, so keeping it
+out of browser storage is deliberate.
+
+**What this does not prove.** The record said "a person looked" because only an
+authenticated door writes it. A local token cannot fully deliver that: an agent
+running as the same OS user can read `server.json` and post a review. The token
+keeps out other OS accounts and makes forging a deliberate act, and the skill
+tells agents not to do it. Stronger means a credential the agent cannot read, an
+OIDC provider or an OS prompt, which was declined as more than local use needs.
+
+Two things found on the way. A jar booted with no store serves a baked route
+list and loads only the server's require closure, and the review door was in
+neither, so the s8x.2 fix reached only servers booted from a checkout. And a
+`:ready` load never refreshes, so `perform!` now drops the loads a request names
+under `:webapp/stales` when the call succeeds, which keeps the timeline honest
+after a review without a reload.
 
 ## D-holds (2026-11-03, user-directed) — parallel work is WARNED first; a hold, when built, is a table row shared across threads
 

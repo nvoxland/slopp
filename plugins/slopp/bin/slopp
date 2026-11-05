@@ -50,13 +50,15 @@ fi
 TOOL=""; ARGSFILE=""
 case "${1:-}" in
   server)
-    # `slopp server stop` / `status`: the server records itself in
+    # `slopp server stop` / `status` / `token`: the server records itself in
     # ~/.slopp/server.json; stop sends SIGTERM to that pid and clears the
-    # file, status prints /api/status. Everything else is a start.
-    if [ "${2:-}" = "stop" ] || [ "${2:-}" = "status" ]; then
+    # file, status prints /api/status, token prints the secret a person pastes
+    # into the change screen to sign in. Everything else is a start.
+    if [ "${2:-}" = "stop" ] || [ "${2:-}" = "status" ] || [ "${2:-}" = "token" ]; then
       server_file
       if [ ! -f "$SERVER_FILE" ]; then echo "slopp server: none recorded (no $SERVER_FILE)"; exit 1; fi
       read_server_file
+      if [ "$2" = "token" ]; then echo "$DTOKEN"; exit 0; fi
       if kill -0 "$DPID" 2>/dev/null; then alive=1; else alive=0; fi
       if [ "$2" = "status" ]; then
         if body="$(curl -sS -m 3 "$DURL/status" 2>&1)"; then
