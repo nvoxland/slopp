@@ -158,7 +158,11 @@ evidence the change was needed. If none fails, or no test runs the function, the
 done does not land, and `:unproven-change` names the function; a later done does
 not get past it. The agent can write code and tests in any order, spikes
 included. Going back together matters: a fix spread over two functions passes
-with either half alone. Docstring edits and renames are not checked. A refactor
+with either half alone. When several changed functions share a failing test,
+each must then show its own effect on it, so a change that only rode along with
+a real fix does not borrow its proof. A changed `deftype`, `defrecord`,
+`extend-type` or `extend-protocol` cannot be put back safely in a running image,
+so `done` reports it as unjudged. Docstring edits and renames are not checked. A refactor
 that keeps behaviour is waived on the done call, `done {untested {"ns/name"
 "why"}}`, for that exact version, and a function no in-image test can watch
 carries `^{:untested-ok "why"}`. Both reasons show in review. A function that
@@ -183,8 +187,11 @@ over different code, so that is a direction and not a measured effect.
 
 **The test grading a change is not the agent's to edit.** A write that changes
 an existing test whose traced coverage reaches code the agent changed in this
-episode -- or is changing in the same call -- is refused. The agent records its
-objection with `flag_test`, and the person decides.
+episode -- or is changing in the same call -- is refused. So is a change to a
+helper or fixture in a test namespace that such a test runs, and a new
+`use-fixtures` over it, because a helper that always answers true silences the
+assertion just as well. The agent records its objection with `flag_test`, and
+the person decides.
 
 **A test a person endorsed is the readable spec.** `^{:endorsed "who: what it
 pins"}` on a test says a human read it and agreed. No agent edits it or adds

@@ -484,8 +484,9 @@ The main `slopp` skill has the mechanics; these are the shapes worth writing.
   assertion to make it pass. **Enforced:** a write that edits a test whose
   observed coverage reaches a form you changed this episode is refused; record
   the objection with `flag_test {ns name reason}` and tell the human in your
-  reply. A test you created this episode stays yours, and an ask that names the
-  test lifts the guard.
+  reply. A helper or fixture in a test namespace that such a test runs is guarded
+  the same way, and so is a new `use-fixtures` over it. A test you created this
+  episode stays yours, and an ask that names the test or helper lifts the guard.
 
 - **A test a human endorsed is the readable spec.** One behaviour per test,
   named as a sentence, small enough for the person who asked to read and say

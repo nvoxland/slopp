@@ -131,7 +131,11 @@ elsewhere without moving (`help {topic "threads"}`).
   version together, and a new function becomes a stub that throws), runs the
   tests that cover them, then puts your code back. A function none of whose
   tests failed in that state, or that no in-image test runs, does not land
-  (`:unproven-change`), and a later done does not get past it. Docstring edits
+  (`:unproven-change`), and a later done does not get past it. When several
+  changed functions share a failing test, each must show its own effect on it,
+  so a change that only rode along with a real fix does not land either. A
+  changed `deftype`, `defrecord`, `extend-type` or `extend-protocol` is reported
+  as unjudged, not proven, so check those by hand. Docstring edits
   and renames are not checked. Two exits, both visible in review: for a change
   that keeps behaviour (a refactor), `done {untested {"ns/name" "why"}}`, which
   covers that exact version until you edit it again and is refused with no
@@ -159,8 +163,12 @@ elsewhere without moving (`help {topic "threads"}`).
 - **A test grading your change is not yours to edit.** Changing a test whose
   traced coverage reaches a form you changed this episode is refused. If you
   believe it is wrong, `flag_test {ns name reason}` records that for the human
-  (the `edit` family) — then say so in your reply. Tests you wrote this
-  episode stay editable; an ask that names the test lifts the guard.
+  (the `edit` family) — then say so in your reply. The same holds for a helper
+  or fixture in a test namespace that such a test runs, and for a new
+  `use-fixtures` over it, since a helper that answers true silences the
+  assertion. Tests and helpers you wrote this episode stay editable, and a new
+  helper is always open; an ask that names the test or the helper lifts the
+  guard.
 - **An endorsed test is the human's.** `^{:endorsed "who: what it pins"}` on
   a deftest says a human read it and said yes. No agent edits or deletes it,
   whatever its coverage, and no agent adds or changes the marker: both need an

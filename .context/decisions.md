@@ -7934,6 +7934,17 @@ version guarded nobody because of it. Also worth knowing: the actionless wire
 step slipped past `(#{… nil} action)` — a set lookup of nil is nil even when nil
 is a member; use `contains?`.
 
+**Widened 2026-11-05 (slopp-lu6): helpers and fixtures.** Probed first: the guard
+refused an edit to a deftest and let through an edit making the helper it calls
+answer true. A form in a test namespace (`-test`, or nested under it) is now
+guarded when a traced test that grades the change runs it. The trace map records
+production forms only, so `tests-running` walks static references, through other
+helpers; a reference with no var (`use-fixtures`) counts for the whole namespace.
+A new `use-fixtures` over a grading test is refused too, and a new helper is not,
+because a new test has to be able to have one. Limits: a helper reached only by
+data, such as a symbol resolved at run time, is not seen; and an ask names a test
+by substring, so a very short name is lifted by almost any sentence.
+
 ## D-mutation-at-done (2026-11-02, user-directed) — every done mutation-tests the changed functions under a wall-time budget, and what the budget did not reach is owed, not dropped
 
 **Decision.** `done` runs `:mutants-survived` (advisory) over the episode's
@@ -8257,6 +8268,31 @@ test proves its change, the done holds, and the exit is a waiver naming that
 test. A fresh clone has no coverage until its first suite run, so its first pull
 reports `:info` rather than judging. The `change {done ...}` close does not take
 the waiver yet; `done` does.
+
+
+**Narrowed 2026-11-05 (slopp-b08): a shared red test credits only what it needs.**
+One red state cannot say which of several changed functions a test needs, so a
+change that rode along with a real fix borrowed its proof. Each function sharing a
+red test now shows its own effect, in up to two more states of the failing tests
+only: with only it old, the test still fails (it is needed), or with only the others
+old, the test passes (its new version is enough, which is the fix either half can
+make). Neither means `:unproven`. Compared with reverting one at a time, this keeps
+the case that shape could not prove. Limit: a changed `def` stays old in these
+states, so a red a `def` caused is still credited to the functions sharing that
+test. Changing that would mark a refactor beside a changed `def` as unproven, and
+the test that pins the current behaviour (`a-change-is-proven-by-a-test-that-fails-on-its-old-version`)
+is the human's call. These runs share the rule's 10-second budget; a rerun that runs
+out reports `:unchecked`, never a hold.
+
+**Scoped 2026-11-05 (slopp-2sw): what shapes are judged, measured on this store.**
+Production here is 1,913 functions, 0 macros (the dialect refuses `defmacro`), 2
+`deftype`, 0 `defrecord`, and 1 `reify`, inside a `defn` and so already part of its
+body. A `def` of a `reify` is now a body like a `def` of a `fn`. Types stay out on
+purpose: an old `deftype` in a running image is a new class, code already compiled
+keeps the current one, and the false red would be worse than the gap. A changed
+`deftype`, `defrecord`, `extend-type` or `extend-protocol` now reports as unjudged at
+done, so it no longer passes in silence, but it is not proven. Closing that needs a throwaway
+image per judgement, which has not been built.
 
 ## D-deps-allow (2026-11-02) — a new dependency needs the human's word
 
