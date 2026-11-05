@@ -168,7 +168,10 @@ that keeps behaviour is waived on the done call, `done {untested {"ns/name"
 carries `^{:untested-ok "why"}`. Both reasons show in review. A function that
 only `^:external` tests reach is reported but not held, because the image cannot
 run those tests. A test that only names a function does not count as reaching it. A pull skips the check for what its incoming commits brought
-when slopp stamped all of them as passing.
+when slopp stamped all of them as passing. When there is also no local work, the
+tree after the pull is one that already passed, so the pull skips the test suite
+too and its answer says `:suite-trusted`. The stamp is a claim and not a
+signature. The rules still run, and the suite runs at your next `done`.
 
 **It breaks the code on purpose.** Each function the episode changed gets up
 to five small faults -- `<` becomes `<=`, `and` becomes `or`, `10` becomes

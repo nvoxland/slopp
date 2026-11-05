@@ -45,6 +45,8 @@ they do not ship.
   it"}`, which takes the program and its arguments as a vector. Everything else
   calls that form, or takes it as a parameter so a test can pass a fake. Never
   build one shell string: `(sh "sh" "-c" (str ...))` is command injection.
+  An `.exec` on any receiver that might be a `Runtime` counts, so a method of
+  that name on another class needs a type hint on its receiver: `(.exec ^Worker w)`.
 - `ObjectInputStream` runs code chosen by whoever wrote the bytes. Read data
   as data with `clojure.edn/read-string` or a JSON reader. No marker discharges
   this one; a store that truly must accept it turns the rule off in its rules

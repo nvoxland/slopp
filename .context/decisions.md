@@ -8284,6 +8284,18 @@ the test that pins the current behaviour (`a-change-is-proven-by-a-test-that-fai
 is the human's call. These runs share the rule's 10-second budget; a rerun that runs
 out reports `:unchecked`, never a hold.
 
+**Extended 2026-11-05 (slopp-vjq): a pull onto no local work skips the suite.**
+The user's point: a pull from our own projection is known correct. It applies when
+every incoming commit is stamped green (`git/proven-range?`), our projected tip is
+the merge base, and this line's newest entry is a commit point. Those last two rule
+out the two ways local work can differ: a diverged history, and work landed since the
+last commit point, which a projected tip does not show. The result is then
+exactly a tree that passed. A red stamp, or any local work, runs the suite as before,
+and a line whose newest entry is not a commit point falls back to it, so a doubt
+costs time and not safety. What this gives up: the stamp is a claim and not a signature, so
+a remote that hand-writes it skips the suite too. The rules still judge what arrives,
+the suite runs at the next done, and the answer carries `:suite-trusted`.
+
 **Scoped 2026-11-05 (slopp-2sw): what shapes are judged, measured on this store.**
 Production here is 1,913 functions, 0 macros (the dialect refuses `defmacro`), 2
 `deftype`, 0 `defrecord`, and 1 `reify`, inside a `defn` and so already part of its
