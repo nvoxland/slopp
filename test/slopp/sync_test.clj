@@ -11,7 +11,7 @@
             [slopp.store.db :as db]
             [slopp.git :as git]
             [slopp.store :as store]
-            [slopp.sync :as sync] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history] [clojure.edn :as edn] [slopp.project.capabilities :as capabilities] [slopp.project.dev :as dev] [slopp.kernel.boot :as boot])
+            [slopp.sync :as sync] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.read.history :as history] [clojure.edn :as edn] [slopp.project.capabilities :as capabilities] [slopp.project.dev :as dev] [slopp.kernel.boot :as boot] [rewrite-clj.node :as n])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]
            [org.eclipse.jgit.api Git]
@@ -1273,6 +1273,66 @@
         (is (some #(re-find #"hz.core/runs" %) (:security-hazards c)) (pr-str c)))
       (finally
         (ops/close! sess)
+        (rm-rf! dir-a)
+        (rm-rf! (.getParentFile (io/file dir-b)))
+        (rm-rf! (.getParentFile (io/file bare)))))))
+
+(deftest ^:external a-pull-onto-no-local-work-of-stamped-green-commits-skips-the-suite
+  (let [dir-a  (temp-dir)
+        dir-b  (str (temp-dir) "/clone")
+        bare   (bare-repo! (str (temp-dir) "/remote.git"))
+        canary (io/file (temp-dir) "suite-ran")
+        sa     (external/open! {:slopp.ops/dir dir-a})
+        pull   (fn [s] (io/delete-file canary true)
+                 (sync/pull! s :agent "bob"))
+        publish! (fn [v src]
+                   (ops/edit-replace! sa 'sk.core 'f src :prompt v :agent "alice")
+                   (swap! sa assoc :untested-waivers {"sk.core/f" "same behaviour"})
+                   (is (= :green (:status (external/commit-point! sa v :agent "alice"))))
+                   (swap! sa dissoc :untested-waivers)
+                   (is (nil? (:error (sync/push! dir-a)))))]
+    (try
+      (ops/ingest! sa 'sk.core "(ns sk.core \"S.\")\n(defn f \"F.\" [x] (+ x x))\n")
+      (ops/ingest! sa 'sk.core-test (str "(ns sk.core-test \"T.\" (:require [clojure.test :refer [deftest is]] [sk.core :as c]))\n"
+                                         "(deftest f-t (is (= 4 (c/f 2))))\n"
+                                         "(deftest canary-t (spit " (pr-str (str canary)) " \"ran\") (is true))\n"))
+      (is (= :green (:status (external/commit-point! sa "v1" :agent "alice"))))
+      (is (nil? (:error (sync/push! dir-a :url bare))))
+      (is (nil? (:error (sync/clone! bare dir-b :agent "bob"))))
+      (let [sb (external/open! {:slopp.ops/dir dir-b})]
+        (try
+          (publish! "v2" "(defn f \"F.\" [x] (* 2 x))")
+          (is (string? (:marker (pull sb))) "the first pull leaves this line on a commit point")
+          (testing "nothing local, every commit stamped green: nothing new could be red"
+            (publish! "v3" "(defn f \"F.\" [x] (* x 2))")
+            (let [r (pull sb)]
+              (is (string? (:marker r)) (pr-str r))
+              (is (not (.exists canary)) "the suite did not run")
+              (is (true? (:suite-trusted r)) "and the answer says so")
+              (is (re-find #"\* x 2" (n/string (:node (store/form-named (:store @sb) 'sk.core 'f))))
+                  "and the code arrived")))
+          (testing "a commit marked red earned nothing"
+            (ops/edit-replace! sa 'sk.core 'f "(defn f \"F.\" [x] (+ 0 (* x 2)))" :prompt "unproven" :agent "alice")
+            (is (= :red (:status (external/commit-point! sa "v4" :agent "alice" :force true))))
+            (is (nil? (:error (sync/push! dir-a))))
+            (let [r (pull sb)]
+              (is (.exists canary) (pr-str r))
+              (is (nil? (:suite-trusted r)) (pr-str r))))
+          (finally (ops/close! sb))))
+      (let [dir-c (str (temp-dir) "/clone2")]
+        (is (nil? (:error (sync/clone! bare dir-c :agent "carol"))))
+        (let [sc (external/open! {:slopp.ops/dir dir-c})]
+          (try
+            (ops/ingest! sc 'sk.local "(ns sk.local \"L.\")\n(defn g \"G.\" [x] x)\n")
+            (publish! "v5" "(defn f \"F.\" [x] (* 2 x))")
+            (testing "local work could combine badly with what arrives, so the suite runs"
+              (let [r (pull sc)]
+                (is (.exists canary) (pr-str r))
+                (is (nil? (:suite-trusted r)) (pr-str r))))
+            (finally (ops/close! sc)
+                     (rm-rf! (.getParentFile (io/file dir-c)))))))
+      (finally
+        (ops/close! sa)
         (rm-rf! dir-a)
         (rm-rf! (.getParentFile (io/file dir-b)))
         (rm-rf! (.getParentFile (io/file bare)))))))

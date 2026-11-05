@@ -549,29 +549,31 @@
   When every incoming commit says slopp minted it from a passing done
   (`git/proven-range?`), the session is lent that text as `:proof-trusted` for
   this one pull: those functions proved their changes where they were written.
-  It is the text and not a yes/no so that a local edit made alongside the pull
-  is still judged.
+  
 
   This is the git ADAPTER, and it is deliberately this thin: `tree-at` twice
   and a label. Everything import actually does is below it and touches no
   repository."
-  [session ctx url mb tip agent]
+  [session ctx url ours mb tip agent]
   (let [repo   (:slopp.git/repo ctx)
         theirs (git/tree-at repo tip)
         text   (when (git/proven-range? repo mb tip)
-                 (apply str (filter string? (vals theirs))))]
+                 (apply str (filter string? (vals theirs))))
+        trust? (and text (= ours mb) (external/on-commit-point? session))]
     (when text (swap! session assoc :proof-trusted text))
+    (when trust? (swap! session assoc :suite-trusted true))
     (try
-      (assoc (apply-trees! session
-                           (git/tree-at repo mb)
-                           theirs
-                           {:agent  agent
-                            :origin tip
-                            :label  (str "pull " (subs tip 0 8) " from " url)
-                            :extra  {:git-sha tip}
-                            :retry  "git_pull"})
-             :base tip)
-      (finally (swap! session dissoc :proof-trusted)))))
+      (cond-> (assoc (apply-trees! session
+                                   (git/tree-at repo mb)
+                                   theirs
+                                   {:agent  agent
+                                    :origin tip
+                                    :label  (str "pull " (subs tip 0 8) " from " url)
+                                    :extra  {:git-sha tip}
+                                    :retry  "git_pull"})
+                     :base tip)
+        trust? (assoc :suite-trusted true))
+      (finally (swap! session dissoc :proof-trusted :suite-trusted)))))
 
 (defn pull!
   "Absorb the remote's changes since the last common point into the LIVE
@@ -604,7 +606,7 @@
                     (cond
                       (nil? mb)  {:error "unrelated histories — was the remote rewritten? re-clone"}
                       (= mb tip) {:up-to-date true}
-                      :else      (apply-pull! session ctx url mb tip agent)))))))
+                      :else      (apply-pull! session ctx url ours mb tip agent)))))))
           (finally (git/close-ctx! ctx)))))))
 
 (defn import-dir!

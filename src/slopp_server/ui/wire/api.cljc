@@ -231,3 +231,12 @@
    :http/params   #{:q :bare :key :limit}
    :rest/request  slopp-server.ui.wire.contracts/data-request
    :rest/response slopp-server.ui.wire.contracts/data-response})
+
+(def ^{:http/external-path "a route on the slopp server, published in its contract; hand-owned since 2026-09-23, see the ns doc"} ^:export review
+  "POST /api/projects/:slug/review — a person endorses or flags a commit point. Measured from the origin, because this route is the server's own and names its project in the path."
+  {:http/method   :post
+   :http/path     "/api/projects/:slug/review"
+   :http/params   #{:note :slug :target :verdict}
+   :webapp/base   ""
+   :rest/request  slopp-server.ui.wire.contracts/review-request
+   :rest/response slopp-server.ui.wire.contracts/review-response})

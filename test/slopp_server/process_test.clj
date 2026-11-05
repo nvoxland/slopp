@@ -583,8 +583,7 @@
   ;; <resource>` routes are declared by `slopp-server.api.endpoints` and served
   ;; from this one context. The write/MCP doors are slug-free — one door each
   ;; at `/api/{mcp,call,cli,hook}`, addressed by `X-Slopp-Dir`.
-  (let [declared (routes/from-namespaces ['slopp-server.process 'slopp-server.ui.shell 'slopp-server.ui.styles
-                                          'slopp-server.api.endpoints 'slopp-server.api.reads])
+  (let [declared (routes/from-namespaces process/baked-namespaces)
         served   (:http/routes (process/context))
         mounted  (filter #(str/starts-with? (:path %) "/assets/") served)]
     (is (= #{"/api/projects" "/api/status"
@@ -595,7 +594,7 @@
              "/api/projects/:slug/form/:id" "/api/projects/:slug/source/:ns/:name"
              "/api/projects/:slug/modules" "/api/projects/:slug/module/:m"
              "/api/projects/:slug/search" "/api/projects/:slug/bundle"
-             "/api/projects/:slug/cost" "/api/projects/:slug/rest/paths"
+             "/api/projects/:slug/cost" "/api/projects/:slug/review" "/api/projects/:slug/rest/paths"
              "/api/projects/:slug/http/paths" "/api/projects/:slug/webapp/paths"
              "/api/projects/:slug/config" "/api/projects/:slug/entries" "/api/projects/:slug/form/:id/sequence"
              "/api/projects/:slug/flow" "/api/projects/:slug/overlay/:dial" "/api/projects/:slug/data" "/api/projects/:slug/story/:grain/:subject"
@@ -1195,3 +1194,70 @@
           (Thread/sleep 1500)
           (is (nil? ((:app-booting-since @a))) "cleared once the boot returned")))
       (finally (process/reset-all!)))))
+
+(deftest ^:external a-person-signs-in-with-the-servers-token-and-the-review-lands
+  ;; The whole door, over the context the listener serves: every earlier test
+  ;; of the review endpoint handed it a ready-made :http/identity, which is how
+  ;; a server that could resolve no identity at all still looked finished.
+  (let [d        (tmp-dir!)
+        ctx      (process/context)
+        post     (fn [sid msg]
+                   (slopp.http/handle! ctx {:request-method :post
+                                            :uri "/api/mcp"
+                                            :headers (cond-> {"x-slopp-dir" d}
+                                                       sid (assoc "mcp-session-id" sid))
+                                            :body msg}))
+        tool!    (fn [sid id nm args]
+                   (post sid {:jsonrpc "2.0" :id id :method "tools/call"
+                              :params {:name nm :arguments args}}))
+        review!  (fn [slug bearer body]
+                   (slopp.http/handle! ctx (cond-> {:request-method :post
+                                                    :uri (str "/api/projects/" slug "/review")
+                                                    :body body}
+                                             bearer (assoc :headers {"authorization" (str "Bearer " bearer)}))))
+        timeline (fn [slug]
+                   (:body (slopp.http/handle! ctx {:request-method :get
+                                                   :uri (str "/api/projects/" slug "/timeline")})))
+        me       (System/getProperty "user.name")]
+    (try
+      (let [r    (post nil {:jsonrpc "2.0" :id 1 :method "initialize"
+                            :params {:protocolVersion "2025-03-26" :capabilities {}
+                                     :clientInfo {:name "t" :version "0"}}})
+            sid  (get-in r [:headers "Mcp-Session-Id"])
+            slug (:slug (first (projects! ctx)))]
+        (tool! sid 2 "ns_create" {:ns "rv.core" :thread "t-rev" :prompt "review fixture"
+                                  :source "(ns rv.core)\n"})
+        (tool! sid 3 "commit_point" {:label "a commit point to review" :thread "t-rev"})
+        (let [target (:commit (first (:commit-points (timeline slug))))]
+          (is (string? target) (pr-str (timeline slug)))
+          (testing "no token is a 401"
+            (is (= 401 (:status (review! slug nil {:target target :verdict "endorsed"})))))
+          (testing "a wrong token is a 401"
+            (is (= 401 (:status (review! slug "not-the-token" {:target target :verdict "endorsed"})))))
+          (testing "the server's token signs in as the OS user, and the review reaches the timeline"
+            (let [r   (review! slug (process/token) {:target target :verdict "endorsed" :note "read it"})
+                  row (first (filter #(= target (:commit %)) (:commit-points (timeline slug))))]
+              (is (= 200 (:status r)) (pr-str r))
+              (is (= me (:by (:body r))) (pr-str r))
+              (is (= "endorsed" (get-in row [:review :verdict])) (pr-str row))
+              (is (= me (get-in row [:review :by])) (pr-str row))))))
+      (finally (process/reset-all!)))))
+
+(deftest ^:external a-boot-with-no-store-still-serves-the-review-door
+  ;; A released jar boots from a neutral dir, so it serves the BAKED list and
+  ;; loads only the server's require closure. Adding a namespace to the
+  ;; store-derived list alone leaves it answering 404 on every released server.
+  (let [closure (store/ns-closure (external/built-store) 'slopp-server.process)]
+    (is (contains? closure 'slopp-server.review)
+        "slopp-server.process does not require the review door")
+    (is (some #{'slopp-server.review} process/baked-namespaces)
+        "the review door is missing from the list a storeless boot serves")))
+
+(deftest the-served-context-signs-a-person-in-with-the-servers-token
+  (let [user (System/getProperty "user.name")
+        auth (:http/auth-config (#'process/serving-opts))]
+    (is (= [:bearer] (:auth/providers auth)))
+    (is (= (process/token) (get-in auth [:auth/bearer user :secret]))
+        "the secret is this boot's token, under the account that started the server")
+    (is (= {:auth/providers [:bearer] :auth/bearer {"ann" {:secret "tok"}}}
+           (process/auth-config "tok" "ann")))))

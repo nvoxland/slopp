@@ -219,11 +219,9 @@
 
 (defn defn-source?
   "True when `src` holds a function body a test can be asked to notice: a
-  `defn`/`defn-`, a `defmethod`, or a `def` whose value is a `fn` or `#()`
+  
   (reader metadata on the whole form allowed). Data defs are not: they have no
-  body to run. Logic in a shape this misses is outside red-proof and mutation,
-  so a `defrecord`/`deftype`/`reify` method or a custom defn-like macro is a
-  known limit."
+  body to run. "
   [src]
   (let [top  (try (z/of-string src) (catch Exception _ nil))
         root (if (and top (= :meta (z/tag top))) (-> top z/down z/rightmost) top)
@@ -234,7 +232,7 @@
           (or (contains? '#{defn defn- defmethod} h)
               (and (= 'def h)
                    (let [v (try (last (z/sexpr root)) (catch Exception _ nil))]
-                     (and (seq? v) (contains? '#{fn fn*} (first v))))))))))
+                     (and (seq? v) (contains? '#{fn fn* reify} (first v))))))))))
 
 (defn ^:export targets
   "The mutation targets among form ids `fids`: each production function (see
@@ -452,6 +450,57 @@
                    (catch Throwable _ nil))]
       (if st' (hotload/hot-load-form! image st' fid) "it does not parse"))))
 
+(defn ^:export weak-forms
+  "The forms whose tests let a mutant survive: from recorded result `rows`, those
+  whose latest result for their CURRENT version is `:survived`. Read from the
+  record because a done's findings carry a repeated row only as a count, so a
+  survivor would otherwise vanish from review one done later. An edit retires it:
+  the version changed."
+  [store rows]
+  (->> rows
+       (keep :payload)
+       (filter :fid)
+       (reduce (fn [m p] (assoc m [(:fid p) (:sig p)] p)) {})
+       vals
+       (filter #(and (= :survived (:status %)) (= (:sig %) (form-sig store (:fid %)))))
+       (map :form)
+       set))
+
+(defn- run-state!
+  "Run `tests` with `targets` and `also-old` back at their old versions, then
+  restore them. `{:r <the run's answer> :back <why a restore failed, or nil>}`."
+  [image store targets also-old tests budget-ms]
+  (doseq [{:keys [fid form old]} targets] (load-old! image store fid form old))
+  (doseq [[fid src] also-old] (load-old! image store fid nil src))
+  (let [r (try (first (repl/eval! image (run-all-string tests budget-ms)))
+               (catch Throwable t (str t)))]
+    {:r r
+     :back (first (into [] (keep #(hotload/hot-load-form! image store %))
+                        (concat (map :fid targets) (keys also-old))))}))
+
+(defn- own-effect!
+  "Whether target `t`'s own change matters to `failing`, tests that went red with
+  `t` and `sharers` all at their old versions, so that red alone cannot say which
+  of them caused it. Two states ask. With only `t` old, a test still failing means
+  `t` is needed. With only the sharers old, a test passing means `t`'s new version
+  is enough to fix it, which is the fix either half can make alone. A change that
+  answers neither only rode along. A changed `def` stays old in both, so a red a
+  `def` caused is still credited to the functions sharing that test.
+
+  Returns the status part of a [[prove!]] result."
+  [image store t sharers also-old failing budget-left]
+  (let [state (fn [targets] (run-state! image store targets also-old failing (budget-left)))
+        alone (state [t])
+        kept  (when-not (seq (:failed (:r alone))) (state sharers))
+        runs  (remove nil? [alone kept])
+        by    (or (first (:failed (:r alone))) (first (:passed (:r kept))))
+        back  (some :back runs)]
+    (cond
+      back {:status :restore-failed :error back}
+      by   {:status :proven :by by}
+      (some #(or (not (map? (:r %))) (:timeout (:r %))) runs) {:status :unchecked}
+      :else {:status :unproven})))
+
 (defn ^:export prove!
   "Check that each changed function's tests NEED the change, by building the
   state before it. A target is `{:fid :form :tests :old}`, where `:old` is the
@@ -462,7 +511,7 @@
 
   One state rather than one function at a time, because a change is usually more
   than one function: a fix spread over two passes with either half alone, and a
-  new function can only go red if it is absent. Statuses:
+  
 
   - `:proven` (with `:by`, the test) — one of its tests failed in that state.
   - `:unproven` — its tests all passed in that state.
@@ -473,6 +522,8 @@
   - `:restore-failed` — the image may still hold an old version."
   [image store targets & {:keys [budget-ms also-old] :or {budget-ms 10000}}]
   (let [base   #(select-keys % [:form :fid :tests])
+        deadline (+ (System/currentTimeMillis) budget-ms)
+        budget-left #(max 0 (- deadline (System/currentTimeMillis)))
         {none true some-tests false} (group-by (comp empty? :tests) targets)
         nope   (mapv #(assoc (base %) :status :uncovered) none)]
     (if (<= budget-ms 0)
@@ -499,24 +550,28 @@
                       (errs fid)     (assoc b :status :unprovable
                                             :why (str "its version from the last done no longer loads (" (errs fid) ")"))
                       (not (map? r)) (assoc b :status :unprovable :why (str r))
-                      by             (assoc b :status :proven :by by)
+                      by             (let [failing (filterv failed tests)
+                                           sharers (filterv #(and (not= fid (:fid %)) (some (set failing) (:tests %))) loaded)]
+                                       (merge b (if (seq sharers)
+                                                  (own-effect! image store t sharers also-old failing budget-left)
+                                                  {:status :proven :by by})))
                       
                       (and (:timeout r) (not-every? ran tests)) (assoc b :status :unchecked)
                       (not-any? ran tests) (assoc b :status :unprovable :why "only tests outside the image run it")
                       :else          (assoc b :status :unproven))))))))))
 
-(defn ^:export weak-forms
-  "The forms whose tests let a mutant survive: from recorded result `rows`, those
-  whose latest result for their CURRENT version is `:survived`. Read from the
-  record because a done's findings carry a repeated row only as a count, so a
-  survivor would otherwise vanish from review one done later. An edit retires it:
-  the version changed."
-  [store rows]
-  (->> rows
-       (keep :payload)
-       (filter :fid)
-       (reduce (fn [m p] (assoc m [(:fid p) (:sig p)] p)) {})
-       vals
-       (filter #(and (= :survived (:status %)) (= (:sig %) (form-sig store (:fid %)))))
-       (map :form)
-       set))
+(defn ^:export type-source?
+  "True when `src` defines methods on a class: a `deftype`, `defrecord`,
+  `extend-type` or `extend-protocol`. These stay outside red-proof and mutation,
+  because putting an old version into a running image makes a new class, and code
+  already compiled against the current one keeps it, so `instance?` and field
+  access go wrong for reasons that have nothing to do with the change. A false
+  red there is worse than an honest 'could not judge'."
+  [src]
+  (let [top  (try (z/of-string src) (catch Exception _ nil))
+        root (if (and top (= :meta (z/tag top))) (-> top z/down z/rightmost) top)
+        head (some-> root z/down)]
+    (boolean
+     (and head (= :list (z/tag root))
+          (contains? '#{deftype defrecord extend-type extend-protocol}
+                     (try (z/sexpr head) (catch Exception _ nil)))))))

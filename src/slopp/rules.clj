@@ -1329,16 +1329,29 @@
                                   (or (nil? o) (mutate/behaviour-change? o s)))]
                    (assoc t :old o))
         named    (filterv #(contains? untested-waivers (str (:form %))) cands)
-        ts       (vec (remove waived? cands))]
+        ts       (vec (remove waived? cands))
+        types    (vec (for [fid fids
+                            :let [e (store/form-by-id st* fid)
+                                  ns-sym (store/ns-of-form-id st* fid)
+                                  s (when e (n/string (:node e)))
+                                  o (get old fid)]
+                            :when (and e ns-sym (mutate/type-source? s)
+                                       (not (str/ends-with? (str ns-sym) "-test"))
+                                       (not (:untested-ok (store/form-name-meta e)))
+                                       (or (nil? o) (mutate/behaviour-change? o s)))]
+                        {:form (symbol (str ns-sym) (str (or (:name e) (:id e)))) :fid fid
+                         :status :unprovable
+                         :why "putting its old version in a running image would leave code compiled against the current class"}))]
     (cond
-      (and (empty? ts) (empty? named)) []
-      (nil? image) [{:severity :info :unjudged (mapv :form ts)
+      (and (empty? ts) (empty? named) (empty? types)) []
+      (nil? image) [{:severity :info :unjudged (mapv :form (concat ts types))
                      :teach "no image was running, so nothing shows these changes were needed"}]
       :else
       (into (mutate/proof-findings
              (let [outside? (fn [t] (and (empty? (:tests t)) (outside-image? st* t)))
                    [ext own] ((juxt filter remove) outside? ts)]
-               (concat (for [t ext]
+               (concat types
+                       (for [t ext]
                          (assoc (select-keys t [:form :fid]) :status :unprovable
                                 :why "only tests outside the image reach it"))
                        (when (seq own)

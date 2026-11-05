@@ -1729,3 +1729,33 @@
                                      [(:id (store/form-named st 'ni.core 'f))])]
     (is (= '[ni.core/f] (mapcat :unjudged rows)) (pr-str rows))
     (is (every? #(= :info (:severity %)) rows) "it cannot say, so it does not hold")))
+
+(deftest a-changed-type-is-reported-as-unjudged-not-passed-in-silence
+  (let [check (fn [old new-src]
+                (let [st0 (store/ingest (store/empty-store) 'ty.core (str "(ns ty.core)\n\n" new-src "\n"))
+                      e   (last (store/forms st0 'ty.core))
+                      st  (assoc st0 :baselines [{:sources (if old {(:id e) old} {})}])]
+                  (rules/red-proof-check! (atom {:image :fake}) st [(:id e)])))
+        rec "(defrecord R [a] Object (toString [_] (str a)))"]
+    (testing "a changed type names itself and says why"
+      (let [[row :as rows] (check "(defrecord R [a] Object (toString [_] \"x\"))" rec)]
+        (is (= 1 (count rows)) (pr-str rows))
+        (is (= :info (:severity row)))
+        (is (= '[ty.core/R] (:unjudged row)))
+        (is (re-find #"compiled against" (:teach row)))))
+    (testing "every shape that defines methods on a class"
+      (is (= 1 (count (check "(deftype T [a] Object (toString [_] \"x\"))" "(deftype T [a] Object (toString [_] (str a)))"))))
+      (is (= 1 (count (check "(extend-type String clojure.lang.IDeref (deref [_] 1))" "(extend-type String clojure.lang.IDeref (deref [_] 2))"))))
+      (is (= 1 (count (check "(extend-protocol clojure.lang.IDeref String (deref [_] 1))" "(extend-protocol clojure.lang.IDeref String (deref [_] 2))")))))
+    (testing "a new type is a change too"
+      (is (= 1 (count (check nil rec)))))
+    (testing "one that did not change says nothing"
+      (is (= [] (check rec rec))))
+    (testing "the stated exit applies"
+      (is (= [] (check "(defrecord ^{:untested-ok \"data only\"} R [a] Object (toString [_] \"x\"))"
+                       "(defrecord ^{:untested-ok \"data only\"} R [a] Object (toString [_] (str a)))"))))
+    (testing "with no image it still says so"
+      (let [st0 (store/ingest (store/empty-store) 'ty.core (str "(ns ty.core)\n\n" rec "\n"))
+            e   (last (store/forms st0 'ty.core))]
+        (is (= '[ty.core/R]
+               (:unjudged (first (rules/red-proof-check! (atom {}) (assoc st0 :baselines [{:sources {}}]) [(:id e)])))))))))

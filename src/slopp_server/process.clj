@@ -21,7 +21,7 @@
             ;; the stylesheet (the v0.3.0 jar answered 404 everywhere).
             [slopp-server.ui.pages]
             [slopp-server.ui.shell]
-            [slopp-server.ui.styles] [slopp-server.process.hooks :as hooks] [slopp.read.history :as history] [slopp.ops.engine :as engine] [clojure.java.io :as io] [slopp.rules.http :as rules.http] [slopp.rules.webapp :as rules.webapp] [slopp.project.capabilities :as capabilities] [slopp-server.api.reads :as api.reads] [slopp.webdev.live :as live] [slopp.http.client :as http.client]))
+            [slopp-server.ui.styles] [slopp-server.process.hooks :as hooks] [slopp.read.history :as history] [slopp.ops.engine :as engine] [clojure.java.io :as io] [slopp.rules.http :as rules.http] [slopp.rules.webapp :as rules.webapp] [slopp.project.capabilities :as capabilities] [slopp-server.api.reads :as api.reads] [slopp.webdev.live :as live] [slopp.http.client :as http.client] [slopp-server.review]))
 
 (defonce ^:private state
   ;; `:projects` {dir {:slug :dir :opened-at :sessions #{sid}
@@ -732,53 +732,6 @@
         (when (contains? (:namespaces st) 'slopp-server.process)
           st)))))
 
-(defn- serving-opts
-  "Everything the server serves, as the opts `slopp.http/context` and
-  `slopp.http/serve!` both take — ONE assembly for the whole server: the
-  server's management endpoints, the UI shell, AND every project's typed read
-  API, which is now first-class here rather than delegated into a per-project
-  context. A db-scoped endpoint carries `:http/resolve {:session
-  [:project/reader [:path-params :slug]]}`, and the `:open-reader` fn in the
-  perform-ctx is what turns that slug into a reader — so
-  `/api/projects/<slug>/<resource>` is a normal route, not a mount.
-
-  The namespaces are `serving-namespaces` over slopp's own store (the union of
-  everything that declares an endpoint and every read/effect performer); the
-  mount, bundle url, page routes and whether contracts are validated all DERIVE
-  from slopp's own capabilities the way `slopp.webdev.live/serve-plan` derives
-  them for every managed dev instance.
-
-  Reads slopp's own store when it booted from a checkout ([[own-store!]]); falls
-  back to the BAKED surface — spelled namespaces (the server, the UI, and the
-  read API), the classpath mount, the image page scan — for the storeless
-  neutral-dir boot a released jar makes.
-
-  One map for the listener and for a test driving the context without a port,
-  so the two cannot disagree."
-  []
-  (if-let [st (own-store!)]
-    {:http/namespaces   (rules.http/serving-namespaces st)
-     :http/routes       (static/mount-routes (rules.http/static-mounts st) (asset-reader))
-     :webapp/bundle     (rules.http/bundle-url st)
-     :webapp/base       ""
-     :webapp/routes     (mapv (juxt :path :page) (rules.webapp/page-routes st))
-     :http/perform-ctx  {:open-reader (fn [slug] (some-> (project-by-slug slug) :dir api! :reader))}
-     :http/wrap-context (when (capabilities/enabled? st "rest") slopp.rest/validating)}
-    {:http/namespaces   ['slopp-server.process 'slopp-server.ui.shell 'slopp-server.ui.styles
-                         'slopp-server.api.endpoints 'slopp-server.api.reads]
-     :http/routes       (static/mount-routes asset-mounts (asset-reader))
-     :webapp/bundle     bundle-url
-     :webapp/base       ""
-     :webapp/routes     (cljnx/marked-pages)
-     :http/perform-ctx  {:open-reader (fn [slug] (some-> (project-by-slug slug) :dir api! :reader))}
-     :http/wrap-context slopp.rest/validating}))
-
-(defn ^:export context
-  "The assembled dispatch context for every route under `/api/` — what the
-  listener serves, and what a test drives without a port."
-  []
-  (slopp.http/context (serving-opts)))
-
 (defn- configured-port!
   "slopp's own listen port from the `http.port` capability — read from its store
   when this server booted from a slopp checkout ([[own-store!]]), else the baked
@@ -1137,105 +1090,6 @@
   [req]
   (mcp.http/endpoint (mcp-doors) req))
 
-(defn ^:export start!
-  "Bind the server's listener on `port` (loopback; nil = [[default-port]])
-  and answer immediately: `{:url :port :token}`. Nothing is loaded until
-  something attaches — binding first is what fits a client's startup
-  window, which a JVM that opened a store before listening would miss. Two
-  background loops start beside it: the idle reaper, and the app refresher
-  ([[refresh-served-apps!]]) that keeps every managed dev instance current
-  with landings by ANY writer on the shared store. A taken port throws with
-  the bind diagnosis leading, as every slopp listener does."
-  [port]
-  (locking state
-    (when (:server @state)
-      (throw (ex-info "this process already runs a server" {:port (:port (:server @state))})))
-    (let [srv    (slopp.http/serve! (assoc (serving-opts)
-                                           :http/host "127.0.0.1"
-                                           :http/port (or port default-port)))
-          reaper (doto (Thread. ^Runnable
-                               (fn []
-                                 (while (:server @state)
-                                   (Thread/sleep 60000)
-                                   (try (reap-idle! (System/currentTimeMillis))
-                                        (catch Throwable _ nil))))
-                               "slopp-server-reaper")
-                   (.setDaemon true))
-          refresher (doto (Thread. ^Runnable
-                                  (fn []
-                                    (while (:server @state)
-                                      (Thread/sleep 250)
-                                      (try (refresh-served-apps!)
-                                           (catch Throwable _ nil))))
-                                  "slopp-server-refresh")
-                      (.setDaemon true))]
-      (swap! state assoc :server srv :reaper reaper :refresher refresher)
-      (.start reaper)
-      (.start refresher)
-      {:url (str "http://127.0.0.1:" (:port srv) "/api/") :port (:port srv) :token (token)})))
-
-^:unsafe (defn -main
-  "Run the server: `slopp server [port]`. Normally its own code ships in the
-  JAR and the directory it is launched in is a NEUTRAL working directory
-  (`~/.slopp`, no project store): it serves whatever projects ATTACH, each
-  with its own store, and holds no project of its own. (The self-host loop
-  passes a checkout dir with `--live`, and then that store IS the code.) It
-  records its address, pid and the write door's token in [[server-file]] —
-  `~/.slopp/server.json`, or `server-<port>.json` for a non-default port —
-  owner-readable only, and blocks.
-
-  The port rests at slopp's own `http.port` capability ([[configured-port]]);
-  a `slopp server [port]` argument, `SLOPP_PORT`, or the manager's
-  `slopp.app-port` (for slopp's own dev instance) override it, in that order.
-
-  slopp's own DEV instance is this same fn on another port (7358), declared in
-  its store's dev config and run from the store by the machinery every
-  project's dev instance gets: booted in a child image on first attach,
-  refreshed at every done, replaced by `restart {app true}`. It records itself
-  under its own file and leaves the machine's alone.
-
-  A second server on the port refuses and names the live one from that
-  file — after asking the OS whether that pid still runs, because a server
-  that did not exit cleanly leaves its file behind, and naming a dead pid
-  as the holder sends someone to kill the wrong thing."
-  [& [port]]
-  (let [{p :port err :error} (server-port port (System/getenv "SLOPP_PORT")
-                                       (System/getProperty "slopp.app-port")
-                                       (configured-port!))]
-    (if err
-      (do (.println System/err (str "slopp server: " err))
-          (System/exit 2))
-      (let [f (server-file p)]
-        (try
-          (let [r (start! p)]
-            (spit-private! f (json/generate-string
-                              {:url (:url r) :port (:port r) :token (:token r)
-                               :pid (.pid (java.lang.ProcessHandle/current))
-                               :started (System/currentTimeMillis)}))
-            (.println System/err (str "slopp server: " (:url r)
-                                      " (pid " (.pid (java.lang.ProcessHandle/current)) ")"
-                                      " — address + token in " (str f)))
-            @(promise))
-          (catch clojure.lang.ExceptionInfo e
-            (let [live   (try (json/parse-string (slurp f) true) (catch Exception _ nil))
-                  alive? (when-let [pid (:pid live)]
-                           (let [h (java.lang.ProcessHandle/of (long pid))]
-                             (and (.isPresent h) (.isAlive (.get h)))))]
-              (.println System/err
-                        (str "slopp server: cannot bind port " p " — "
-                             (cond
-                               alive?
-                               (str "a server is already live at " (:url live)
-                                    " (pid " (:pid live) ")")
-
-                               live
-                               (str (ex-message e) ". " (str f) " names pid " (:pid live)
-                                    ", which is not running — a server that did not exit"
-                                    " cleanly — so something else holds the port")
-
-                               :else (ex-message e))))
-              (System/exit 1))))))))
-
 (defn- session-agent
   "The harness session id MCP session record `rec` belongs to, or nil while
   nobody has identified it: the `X-Slopp-Agent` header its attach carried,
@@ -1335,3 +1189,172 @@
             (text 200 "")))
 
       :else (text 200 ""))))
+
+(def baked-namespaces
+  "What a boot with no readable store serves, spelled out: the released jar's
+  neutral-dir boot has no store to derive this from. A namespace named here must
+  also be in this namespace's require closure, because that boot loads nothing
+  else."
+  ['slopp-server.process 'slopp-server.ui.shell 'slopp-server.ui.styles
+   'slopp-server.api.endpoints 'slopp-server.api.reads 'slopp-server.review])
+
+(defn auth-config
+  "How a person signs in to this server: `Authorization: Bearer <token>`, with
+  the same per-boot token [[server-file]] records, resolving to `user`, the OS
+  account that started the server. One account and one secret, because the
+  server listens on loopback and belongs to the one person who started it.
+
+  This names the person; it does not prove a person is at the keyboard. An
+  agent running as the same OS user can read that file, so a review recorded
+  through this door shows that someone with the owner's token chose to record
+  it. The file's owner-only mode keeps out other accounts."
+  [token user]
+  {:auth/providers [:bearer]
+   :auth/bearer    {user {:secret token}}})
+
+(defn- serving-opts
+  "Everything the server serves, as the opts `slopp.http/context` and
+  `slopp.http/serve!` both take — ONE assembly for the whole server: the
+  server's management endpoints, the UI shell, AND every project's typed read
+  API, which is now first-class here rather than delegated into a per-project
+  context. A db-scoped endpoint carries `:http/resolve {:session
+  [:project/reader [:path-params :slug]]}`, and the `:open-reader` fn in the
+  perform-ctx is what turns that slug into a reader — so
+  `/api/projects/<slug>/<resource>` is a normal route, not a mount.
+
+  The namespaces are `serving-namespaces` over slopp's own store (the union of
+  everything that declares an endpoint and every read/effect performer); the
+  mount, bundle url, page routes and whether contracts are validated all DERIVE
+  from slopp's own capabilities the way `slopp.webdev.live/serve-plan` derives
+  them for every managed dev instance.
+
+  Reads slopp's own store when it booted from a checkout ([[own-store!]]); falls
+  back to the BAKED surface — spelled namespaces (the server, the UI, and the
+  read API), the classpath mount, the image page scan — for the storeless
+  neutral-dir boot a released jar makes.
+
+  One map for the listener and for a test driving the context without a port,
+  so the two cannot disagree."
+  []
+  (if-let [st (own-store!)]
+    {:http/namespaces   (rules.http/serving-namespaces st)
+     :http/routes       (static/mount-routes (rules.http/static-mounts st) (asset-reader))
+     :webapp/bundle     (rules.http/bundle-url st)
+     :webapp/base       ""
+     :webapp/routes     (mapv (juxt :path :page) (rules.webapp/page-routes st))
+     :http/perform-ctx  {:open-reader (fn [slug] (some-> (project-by-slug slug) :dir api! :reader))}
+     :http/auth-config  (auth-config (token) (System/getProperty "user.name"))
+     :http/wrap-context (when (capabilities/enabled? st "rest") slopp.rest/validating)}
+    {:http/namespaces   baked-namespaces
+     :http/routes       (static/mount-routes asset-mounts (asset-reader))
+     :webapp/bundle     bundle-url
+     :webapp/base       ""
+     :webapp/routes     (cljnx/marked-pages)
+     :http/perform-ctx  {:open-reader (fn [slug] (some-> (project-by-slug slug) :dir api! :reader))}
+     :http/auth-config  (auth-config (token) (System/getProperty "user.name"))
+     :http/wrap-context slopp.rest/validating}))
+
+(defn ^:export context
+  "The assembled dispatch context for every route under `/api/` — what the
+  listener serves, and what a test drives without a port."
+  []
+  (slopp.http/context (serving-opts)))
+
+(defn ^:export start!
+  "Bind the server's listener on `port` (loopback; nil = [[default-port]])
+  and answer immediately: `{:url :port :token}`. Nothing is loaded until
+  something attaches — binding first is what fits a client's startup
+  window, which a JVM that opened a store before listening would miss. Two
+  background loops start beside it: the idle reaper, and the app refresher
+  ([[refresh-served-apps!]]) that keeps every managed dev instance current
+  with landings by ANY writer on the shared store. A taken port throws with
+  the bind diagnosis leading, as every slopp listener does."
+  [port]
+  (locking state
+    (when (:server @state)
+      (throw (ex-info "this process already runs a server" {:port (:port (:server @state))})))
+    (let [srv    (slopp.http/serve! (assoc (serving-opts)
+                                           :http/host "127.0.0.1"
+                                           :http/port (or port default-port)))
+          reaper (doto (Thread. ^Runnable
+                               (fn []
+                                 (while (:server @state)
+                                   (Thread/sleep 60000)
+                                   (try (reap-idle! (System/currentTimeMillis))
+                                        (catch Throwable _ nil))))
+                               "slopp-server-reaper")
+                   (.setDaemon true))
+          refresher (doto (Thread. ^Runnable
+                                  (fn []
+                                    (while (:server @state)
+                                      (Thread/sleep 250)
+                                      (try (refresh-served-apps!)
+                                           (catch Throwable _ nil))))
+                                  "slopp-server-refresh")
+                      (.setDaemon true))]
+      (swap! state assoc :server srv :reaper reaper :refresher refresher)
+      (.start reaper)
+      (.start refresher)
+      {:url (str "http://127.0.0.1:" (:port srv) "/api/") :port (:port srv) :token (token)})))
+
+^:unsafe (defn -main
+  "Run the server: `slopp server [port]`. Normally its own code ships in the
+  JAR and the directory it is launched in is a NEUTRAL working directory
+  (`~/.slopp`, no project store): it serves whatever projects ATTACH, each
+  with its own store, and holds no project of its own. (The self-host loop
+  passes a checkout dir with `--live`, and then that store IS the code.) It
+  records its address, pid and the write door's token in [[server-file]] —
+  `~/.slopp/server.json`, or `server-<port>.json` for a non-default port —
+  owner-readable only, and blocks.
+
+  The port rests at slopp's own `http.port` capability ([[configured-port]]);
+  a `slopp server [port]` argument, `SLOPP_PORT`, or the manager's
+  `slopp.app-port` (for slopp's own dev instance) override it, in that order.
+
+  slopp's own DEV instance is this same fn on another port (7358), declared in
+  its store's dev config and run from the store by the machinery every
+  project's dev instance gets: booted in a child image on first attach,
+  refreshed at every done, replaced by `restart {app true}`. It records itself
+  under its own file and leaves the machine's alone.
+
+  A second server on the port refuses and names the live one from that
+  file — after asking the OS whether that pid still runs, because a server
+  that did not exit cleanly leaves its file behind, and naming a dead pid
+  as the holder sends someone to kill the wrong thing."
+  [& [port]]
+  (let [{p :port err :error} (server-port port (System/getenv "SLOPP_PORT")
+                                       (System/getProperty "slopp.app-port")
+                                       (configured-port!))]
+    (if err
+      (do (.println System/err (str "slopp server: " err))
+          (System/exit 2))
+      (let [f (server-file p)]
+        (try
+          (let [r (start! p)]
+            (spit-private! f (json/generate-string
+                              {:url (:url r) :port (:port r) :token (:token r)
+                               :pid (.pid (java.lang.ProcessHandle/current))
+                               :started (System/currentTimeMillis)}))
+            (.println System/err (str "slopp server: " (:url r)
+                                      " (pid " (.pid (java.lang.ProcessHandle/current)) ")"
+                                      " — address + token in " (str f)))
+            @(promise))
+          (catch clojure.lang.ExceptionInfo e
+            (let [live   (try (json/parse-string (slurp f) true) (catch Exception _ nil))
+                  alive? (when-let [pid (:pid live)]
+                           (let [h (java.lang.ProcessHandle/of (long pid))]
+                             (and (.isPresent h) (.isAlive (.get h)))))]
+              (.println System/err
+                        (str "slopp server: cannot bind port " p " — "
+                             (cond
+                               alive?
+                               (str "a server is already live at " (:url live)
+                                    " (pid " (:pid live) ")")
+
+                               live
+                               (str (ex-message e) ". " (str f) " names pid " (:pid live)
+                                    ", which is not running — a server that did not exit"
+                                    " cleanly — so something else holds the port")
+
+                               :else (ex-message e))))
+              (System/exit 1))))))))

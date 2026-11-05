@@ -5575,3 +5575,44 @@
                                                         "ld.core/beside-it"]})]
           (is (not (re-find #"no such form" src)) src)))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-change-that-closes-its-unit-can-state-the-waiver
+  (let [sess (external/open!)]
+    (try
+      (call! sess "ns_create" {:ns "wc.core" :source "(ns wc.core)\n(defn twice \"T.\" [x] (* 2 x))\n"})
+      (call! sess "ns_create" {:ns "wc.core-test" :source "(ns wc.core-test (:require [clojure.test :refer [deftest is]] [wc.core :as c]))\n(deftest twice-t (is (= 4 (c/twice 2))))\n"})
+      (call! sess "done" {:label "baseline"})
+      (let [r (call! sess "change" {:prompt "same result, written as addition"
+                                    :impl [{:ns "wc.core" :name "twice" :source "(defn twice \"T.\" [x] (+ x x))"}]
+                                    :done "refactor"
+                                    :untested {"wc.core/twice" "addition and doubling agree"}})]
+        (testing "the waived change lands in the same call"
+          (is (re-find #":landed \"main\"" r) r)))
+      (testing "the waiver was for that close only"
+        (is (nil? (:untested-waivers @sess))))
+      (finally (ops/close! sess)))))
+
+(deftest a-held-done-names-only-the-forms-holding-it
+  (let [out (#'mcp/terse-done {:done "d1"
+                               :findings {:episode-status :red :test-status :red
+                                          :unproven-change [{:form 'a/held :teach "t"}]
+                                          :mutants-survived [{:form 'a/weak :teach "t"}]
+                                          :assertions-never-red [{:form 'a/quiet :teach "t"}]}})]
+    (is (= '[a/held] (:held-by out)) "advice is advice, even on a done something else holds")))
+
+(deftest waivers-are-in-force-for-one-done-only
+  (let [sess (atom {})
+        seen (atom nil)]
+    (with-redefs [external/done! (fn [s & args] (reset! seen {:waivers (:untested-waivers @s) :args args}) :the-done)]
+      (testing "the done runs under them, and answers as it would"
+        (is (= :the-done (#'mcp/done-with-waivers! sess {"a/b" "why"} :label "l")))
+        (is (= {:waivers {"a/b" "why"} :args [:label "l"]} @seen)))
+      (testing "then they are gone"
+        (is (nil? (:untested-waivers @sess))))
+      (testing "no waiver means none in force"
+        (#'mcp/done-with-waivers! sess nil :label "l")
+        (is (nil? (:waivers @seen)))))
+    (with-redefs [external/done! (fn [& _] (throw (ex-info "boom" {})))]
+      (testing "a done that throws does not leave them behind"
+        (is (thrown? Exception (#'mcp/done-with-waivers! sess {"a/b" "why"} :label "l")))
+        (is (nil? (:untested-waivers @sess)))))))

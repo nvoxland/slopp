@@ -802,6 +802,157 @@
       (assoc request :http/url (prefixed base p))
       request)))
 
+(defn- fetch!
+  "Run `request` as load `key`, applying `spec`'s `:check` and `:derive` — or
+  nothing at all when the request is nil.
+
+  **One producer, because there are two callers and they must not differ.**
+  [[navigate!]] runs a screen's `:main` load and [[start!]] runs each declared
+  session load, and the machinery between them — address the path, perform
+  through `:webapp/call`, check and derive inside the freshness guard — is the
+  same machinery or it is two that drift. The first version of this capability
+  had a session load outside the loop entirely, and [[load!]] records the three
+  defects that produced.
+
+  A nil request DECLINES and is not an error: a screen with nothing to ask for
+  and a session load that is not armed yet — no token, nothing selected — are
+  the same statement, and both leave the load `:absent`, which is the true one."
+  [{:webapp/keys [base call] :as app} key spec request]
+  (when request
+    (load! app key
+           (fn [ok err] (call (addressed base request) ok err))
+           ;; the DESCRIPTOR's own contract is the default check. `endpoint/request`
+           ;; copies `:rest/response` onto the request, and this used to pass
+           ;; only `spec`'s — so the response half of an endpoint travelled to
+           ;; the door and was discarded, leaving validation with no hook at all
+           ;; on the page path. A caller's explicit `:check` still wins.
+           ;; the DESCRIPTOR's own contract is checked when somebody SUPPLIED a
+           ;; checker. `endpoint/request` copies `:rest/response` onto the
+           ;; request and this used to pass only `spec`'s, so the response half
+           ;; of an endpoint travelled to the door and was discarded.
+           ;;
+           ;; The checker is not built here, and that is a bundle decision
+           ;; rather than a layering one. Validating means CALLING malli, and
+           ;; this namespace is `:cljc` — measured, that put 555 KB into every
+           ;; browser bundle, including apps that declare no contract, for a
+           ;; promise the server already keeps before the bytes leave
+           ;; (`http.dispatch` checks every response under `rest/validating`).
+           ;;
+           ;; So `slopp.cljnx/driver-for` installs it for a HEADLESS drive,
+           ;; where malli is already on the classpath and free — and where it
+           ;; catches the case a browser check never sees: a canned FIXTURE
+           ;; that has drifted from the contract it claims to exercise. A
+           ;; browser app talking to a THIRD-PARTY api, which nothing
+           ;; slopp-side validates, supplies its own `:check`.
+           {:xform (:derive spec)
+            :check (or (:check spec)
+                       (when-let [schema (:rest/response request)]
+                         (when-let [f (:webapp/check-response app)]
+                           (fn [value] (f schema value)))))})))
+
+(defn- begin!
+  "Boot the app, returning the state that leaves.
+
+  Answers the question a page load and a headless drive must answer
+  identically, so it is one function and not two.
+
+  **Two callers and they must not differ.** [[start!]] is what the browser entry
+  runs; `(:boot (driver app))` is what `slopp.cljnx/open!` runs. When only the
+  first did something, a declaration that worked in a page was invisible to
+  every headless drive — which is the ONE difference this capability exists to
+  prevent. The app that met it found sixteen driven screens rendering an empty
+  nav rail and reverted the declaration rather than paper over it.
+
+  Third instance of the shape in a fortnight, after a throwing `:derive` and an
+  unprefixed `:action`, so the rule is worth having explicitly: **anything a
+  page load does before routing, a headless drive does too, out of one
+  producer.** That rule is why this stays a function rather than being inlined
+  into `start!` now that boot is all it does.
+
+  **It used to start every declared `:webapp/session-loads` entry as well**, and
+  that half is gone with the declaration: a page ASKS for what it needs while
+  rendering, and [[ask!]] is start-if-absent, so a load belonging to no screen
+  is asked for by every page that shows it and found already there after the
+  first.
+
+  Read-call-write, never inside `swap!`: boot is the app's own code, `swap!`
+  demands a pure function and may retry, and an entry point is neither."
+  [{:webapp/keys [state boot]} _path]
+  (reset! state (boot @state))
+  @state)
+
+(defn ^:export
+  ^{:malli/schema [:=> {:throws []}
+                   [:cat [:map [:webapp/state :any] [:webapp/boot :any]]
+                    [:maybe :string] [:maybe :string]]
+                   :any]}
+  start!
+  "Everything a browser entry does when the bundle runs: let the app put what
+  it needs in place, then show the url the reader arrived at.
+
+  Two steps, and the ORDER is the decision.
+
+  1. **`:webapp/boot`** — a pure `(fn [state] state)` for whatever the app wants
+     in place before anything else. A token read from the document, a
+     preference, a default filter.
+  2. **The url the reader arrived at.**
+
+  Boot FIRST, because the first page rendered may read what boot established —
+  an authenticated request carries a token boot put there, and reversing these
+  two sends it without one.
+
+  **There is no third step any more, and its absence is the point.** It used to
+  start every declared `:webapp/session-loads` entry, which existed because a
+  screen's data was started BY the navigation: anything belonging to no screen
+  needed somewhere else to begin. A page ASKS for what it needs while it
+  renders, so a nav pane is asked for by every page that shows one — found
+  already loaded after the first, because [[ask!]] is start-if-absent. The
+  declaration, the scope rule in [[arrive]], and the escape an app reached for
+  when the scope rule pushed a load out of the building all go together.
+
+  **Read-call-write, never inside `swap!`**, matching `slopp.cljnx/open!`
+  exactly. Boot is the app's own code; `swap!` demands a pure function and may
+  retry, and an entry point is neither.
+
+  This is the `:cljc` half of the browser entry, which is the point: the shim
+  reads two properties off `location` and calls this. A page load is the one
+  moment an app has no reader to notice it went wrong, so it is the last place
+  a decision should live somewhere nothing can check."
+  [app pathname search]
+  (begin! app (app-path (:webapp/base app) pathname search))
+  (navigate-url! app pathname search false))
+
+(defn ^:export load-key
+  "The key a request loads under — `[method url]`, where the url is the one a
+  browser will actually FETCH.
+
+  **A request IS its own identity.** Two asks for the same address are the
+  same load, and that is what makes calling [[ask!]] during a render safe: a
+  page is re-run each time a load resolves, so a key derived from anything else
+  would either start a second fetch or collapse two genuinely different ones.
+
+  **The address is RESOLVED here**, through [[addressed]], and that is the
+  whole of it: `:webapp/base` says WHICH UPSTREAM a path belongs to, so a key
+  taken before the base is applied says two projects' `/api/modules` are one
+  load. Measured on the only app that fronts more than one upstream —
+  navigating to the second project asked for nothing and rendered the first
+  one's data under its name. (There used to be a 1-arity that keyed on the
+  request's own url; it was removed rather than kept, because there is no
+  arity here that is right without the base.)
+
+  **A cache hit is silent by construction**, which is why this belongs to the
+  load model rather than to an app. No screen can show one, and no assertion
+  about a rendered screen can catch it; it was found by reading a recorded
+  list of urls. A collision here is not a bug an app can defend against.
+
+  Not the DESCRIPTOR, which is a generated map: two regenerations produce
+  equal maps, so it would work, but it is the url that actually distinguishes
+  one fetch from another — a descriptor plus different params is a different
+  request and must be a different load."
+  [base request]
+  (let [r (addressed base request)]
+    [(:http/method r :get) (:http/url r)]))
+
 (defn ^:export
   ^{:malli/schema [:=> {:throws []}
                    [:cat [:map [:webapp/state :any] [:webapp/call :any]] :any]
@@ -837,6 +988,10 @@
   replacing its entry is correct there and wrong here. Caught by slopp-ui
   reading the first version.
 
+  **`:webapp/stales` on the request names the loads a success makes wrong**, as
+  built requests: [[ask!]] answers from a `:ready` load until something drops
+  it, and the app is what knows which list a mutation changes.
+
   **No freshness token, unlike a navigation, and the difference is real rather
   than an omission.** A navigation can be superseded by another navigation; this
   is triggered by a press. Two presses in flight resolve in whatever order they
@@ -853,7 +1008,12 @@
           record! (fn [m] (swap! state update :call merge m) (render @state))]
       (record! {:status :running :request request})
       (call request
-            (fn [response] (record! {:status :done :request request :response response}))
+            (fn [response]
+              ;; only a success makes a listing wrong, so only a success drops it
+              (when-let [stales (seq (:webapp/stales request))]
+                (swap! state update :loads
+                       #(apply dissoc % (map (partial load-key base) stales))))
+              (record! {:status :done :request request :response response}))
             (fn [message]  (record! {:status :failed :request request :error message}))))))
 
 (defn ^:export
@@ -944,85 +1104,6 @@
                            " catch")
                       {:webapp/missing-key :webapp/act :action action})))))
 
-(defn- fetch!
-  "Run `request` as load `key`, applying `spec`'s `:check` and `:derive` — or
-  nothing at all when the request is nil.
-
-  **One producer, because there are two callers and they must not differ.**
-  [[navigate!]] runs a screen's `:main` load and [[start!]] runs each declared
-  session load, and the machinery between them — address the path, perform
-  through `:webapp/call`, check and derive inside the freshness guard — is the
-  same machinery or it is two that drift. The first version of this capability
-  had a session load outside the loop entirely, and [[load!]] records the three
-  defects that produced.
-
-  A nil request DECLINES and is not an error: a screen with nothing to ask for
-  and a session load that is not armed yet — no token, nothing selected — are
-  the same statement, and both leave the load `:absent`, which is the true one."
-  [{:webapp/keys [base call] :as app} key spec request]
-  (when request
-    (load! app key
-           (fn [ok err] (call (addressed base request) ok err))
-           ;; the DESCRIPTOR's own contract is the default check. `endpoint/request`
-           ;; copies `:rest/response` onto the request, and this used to pass
-           ;; only `spec`'s — so the response half of an endpoint travelled to
-           ;; the door and was discarded, leaving validation with no hook at all
-           ;; on the page path. A caller's explicit `:check` still wins.
-           ;; the DESCRIPTOR's own contract is checked when somebody SUPPLIED a
-           ;; checker. `endpoint/request` copies `:rest/response` onto the
-           ;; request and this used to pass only `spec`'s, so the response half
-           ;; of an endpoint travelled to the door and was discarded.
-           ;;
-           ;; The checker is not built here, and that is a bundle decision
-           ;; rather than a layering one. Validating means CALLING malli, and
-           ;; this namespace is `:cljc` — measured, that put 555 KB into every
-           ;; browser bundle, including apps that declare no contract, for a
-           ;; promise the server already keeps before the bytes leave
-           ;; (`http.dispatch` checks every response under `rest/validating`).
-           ;;
-           ;; So `slopp.cljnx/driver-for` installs it for a HEADLESS drive,
-           ;; where malli is already on the classpath and free — and where it
-           ;; catches the case a browser check never sees: a canned FIXTURE
-           ;; that has drifted from the contract it claims to exercise. A
-           ;; browser app talking to a THIRD-PARTY api, which nothing
-           ;; slopp-side validates, supplies its own `:check`.
-           {:xform (:derive spec)
-            :check (or (:check spec)
-                       (when-let [schema (:rest/response request)]
-                         (when-let [f (:webapp/check-response app)]
-                           (fn [value] (f schema value)))))})))
-
-(defn- begin!
-  "Boot the app, returning the state that leaves.
-
-  Answers the question a page load and a headless drive must answer
-  identically, so it is one function and not two.
-
-  **Two callers and they must not differ.** [[start!]] is what the browser entry
-  runs; `(:boot (driver app))` is what `slopp.cljnx/open!` runs. When only the
-  first did something, a declaration that worked in a page was invisible to
-  every headless drive — which is the ONE difference this capability exists to
-  prevent. The app that met it found sixteen driven screens rendering an empty
-  nav rail and reverted the declaration rather than paper over it.
-
-  Third instance of the shape in a fortnight, after a throwing `:derive` and an
-  unprefixed `:action`, so the rule is worth having explicitly: **anything a
-  page load does before routing, a headless drive does too, out of one
-  producer.** That rule is why this stays a function rather than being inlined
-  into `start!` now that boot is all it does.
-
-  **It used to start every declared `:webapp/session-loads` entry as well**, and
-  that half is gone with the declaration: a page ASKS for what it needs while
-  rendering, and [[ask!]] is start-if-absent, so a load belonging to no screen
-  is asked for by every page that shows it and found already there after the
-  first.
-
-  Read-call-write, never inside `swap!`: boot is the app's own code, `swap!`
-  demands a pure function and may retry, and an entry point is neither."
-  [{:webapp/keys [state boot]} _path]
-  (reset! state (boot @state))
-  @state)
-
 (defn ^:export
   ^{:malli/schema [:=> {:throws []}
                    [:cat [:map [:webapp/state :any] [:webapp/view :any]]]
@@ -1085,78 +1166,6 @@
      ;; read it from
      :boot     (fn [_state url] (begin! app (app-path (:webapp/base app) url nil)))
      :location (fn [] (some->> (:path @state) (prefixed base)))}))
-
-(defn ^:export
-  ^{:malli/schema [:=> {:throws []}
-                   [:cat [:map [:webapp/state :any] [:webapp/boot :any]]
-                    [:maybe :string] [:maybe :string]]
-                   :any]}
-  start!
-  "Everything a browser entry does when the bundle runs: let the app put what
-  it needs in place, then show the url the reader arrived at.
-
-  Two steps, and the ORDER is the decision.
-
-  1. **`:webapp/boot`** — a pure `(fn [state] state)` for whatever the app wants
-     in place before anything else. A token read from the document, a
-     preference, a default filter.
-  2. **The url the reader arrived at.**
-
-  Boot FIRST, because the first page rendered may read what boot established —
-  an authenticated request carries a token boot put there, and reversing these
-  two sends it without one.
-
-  **There is no third step any more, and its absence is the point.** It used to
-  start every declared `:webapp/session-loads` entry, which existed because a
-  screen's data was started BY the navigation: anything belonging to no screen
-  needed somewhere else to begin. A page ASKS for what it needs while it
-  renders, so a nav pane is asked for by every page that shows one — found
-  already loaded after the first, because [[ask!]] is start-if-absent. The
-  declaration, the scope rule in [[arrive]], and the escape an app reached for
-  when the scope rule pushed a load out of the building all go together.
-
-  **Read-call-write, never inside `swap!`**, matching `slopp.cljnx/open!`
-  exactly. Boot is the app's own code; `swap!` demands a pure function and may
-  retry, and an entry point is neither.
-
-  This is the `:cljc` half of the browser entry, which is the point: the shim
-  reads two properties off `location` and calls this. A page load is the one
-  moment an app has no reader to notice it went wrong, so it is the last place
-  a decision should live somewhere nothing can check."
-  [app pathname search]
-  (begin! app (app-path (:webapp/base app) pathname search))
-  (navigate-url! app pathname search false))
-
-(defn ^:export load-key
-  "The key a request loads under — `[method url]`, where the url is the one a
-  browser will actually FETCH.
-
-  **A request IS its own identity.** Two asks for the same address are the
-  same load, and that is what makes calling [[ask!]] during a render safe: a
-  page is re-run each time a load resolves, so a key derived from anything else
-  would either start a second fetch or collapse two genuinely different ones.
-
-  **The address is RESOLVED here**, through [[addressed]], and that is the
-  whole of it: `:webapp/base` says WHICH UPSTREAM a path belongs to, so a key
-  taken before the base is applied says two projects' `/api/modules` are one
-  load. Measured on the only app that fronts more than one upstream —
-  navigating to the second project asked for nothing and rendered the first
-  one's data under its name. (There used to be a 1-arity that keyed on the
-  request's own url; it was removed rather than kept, because there is no
-  arity here that is right without the base.)
-
-  **A cache hit is silent by construction**, which is why this belongs to the
-  load model rather than to an app. No screen can show one, and no assertion
-  about a rendered screen can catch it; it was found by reading a recorded
-  list of urls. A collision here is not a bug an app can defend against.
-
-  Not the DESCRIPTOR, which is a generated map: two regenerations produce
-  equal maps, so it would work, but it is the url that actually distinguishes
-  one fetch from another — a descriptor plus different params is a different
-  request and must be a different load."
-  [base request]
-  (let [r (addressed base request)]
-    [(:http/method r :get) (:http/url r)]))
 
 (defn ^:export ask!
   "The load for `descriptor` with `params` — STARTED if nothing has asked for

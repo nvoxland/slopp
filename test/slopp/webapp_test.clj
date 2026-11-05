@@ -1758,3 +1758,27 @@
         (is (str/includes? (cljnx/of (cljnx/tree s)) "project y") (cljnx/text s))
         (is (= "/m/p/y" (cljnx/url s))
             "a browser's address bar shows where the reader ENDED UP")))))
+
+(deftest a-successful-effect-drops-the-loads-its-request-names
+  ;; ask! answers from a :ready load forever, so a screen that records
+  ;; something and then shows a list of those things would show the old list.
+  ;; The request names what it stales, so the app decides and the framework acts
+  ;; once the call has succeeded.
+  (let [listing {:http/method :get :http/url "/api/things"}
+        run     (fn [answer]
+                  (let [state (atom {:loads {[:get "/api/things"] {:status :ready :value [1]}
+                                             [:get "/api/other"]  {:status :ready :value [2]}}})]
+                    (webapp/perform! {:webapp/state  state
+                                      :webapp/base   ""
+                                      :webapp/render (fn [_])
+                                      :webapp/call   answer}
+                                     {:http/method :post :http/url "/api/things"
+                                      :webapp/stales [listing]})
+                    @state))]
+    (testing "a success drops the named load and leaves the rest"
+      (let [s (run (fn [_ ok _] (ok {:done true})))]
+        (is (nil? (get-in s [:loads [:get "/api/things"]])))
+        (is (= [2] (get-in s [:loads [:get "/api/other"] :value])))))
+    (testing "a failure changes nothing the list could have shown"
+      (let [s (run (fn [_ _ err] (err "HTTP 401")))]
+        (is (= [1] (get-in s [:loads [:get "/api/things"] :value])))))))

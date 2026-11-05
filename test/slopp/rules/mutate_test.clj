@@ -414,3 +414,88 @@
                                  (row 'g (sig 'g) :survived)
                                  (row 'g (sig 'g) :killed)
                                  (row 'h 12345 :survived)])))))
+
+(deftest ^:external one-red-test-proves-only-the-changes-it-needs
+  (let [src (str "(ns demo.ride)\n\n"
+                 "(defn real \"R.\" [x] (inc x))\n\n"
+                 "(defn rider \"Same behaviour, new spelling.\" [x] (+ x 1))\n\n"
+                 "(defn both-a \"Needs both.\" [x] (inc x))\n\n"
+                 "(defn both-b \"Needs both.\" [x] (inc x))\n\n"
+                 "(defn either-a \"Either is enough.\" [x] (max x 5))\n\n"
+                 "(defn either-b \"Either is enough.\" [x] (max x 5))\n")
+        s   (store/ingest (store/empty-store) 'demo.ride src)
+        fid #(:id (store/form-named s 'demo.ride %))
+        h   (repl/start!)
+        t   (fn [nm tests old] {:fid (fid nm) :form (symbol "demo.ride" (str nm)) :tests tests :old old})]
+    (try
+      (repl/eval! h (str src
+                         "(ns demo.ride-test (:require [clojure.test :refer [deftest is]] [demo.ride :as p]))\n"
+                         "(deftest shared-t (is (= 3 (p/rider (p/real 1)))))\n"
+                         "(deftest both-t (is (= 2 (+ (p/both-a 0) (p/both-b 0)))))\n"
+                         "(deftest either-t (is (= 5 (max (p/either-a 0) (p/either-b 0)))))\n"
+                         "(in-ns 'user)"))
+      (let [rs (mutate/prove! h s [(t 'real '[demo.ride-test/shared-t] "(defn real \"R.\" [x] x)")
+                                   (t 'rider '[demo.ride-test/shared-t] "(defn rider \"Old spelling.\" [x] (inc x))")
+                                   (t 'both-a '[demo.ride-test/both-t] "(defn both-a \"Needs both.\" [x] x)")
+                                   (t 'both-b '[demo.ride-test/both-t] "(defn both-b \"Needs both.\" [x] x)")
+                                   (t 'either-a '[demo.ride-test/either-t] "(defn either-a \"Either is enough.\" [x] x)")
+                                   (t 'either-b '[demo.ride-test/either-t] "(defn either-b \"Either is enough.\" [x] x)")]
+                           :budget-ms 30000)
+            by (into {} (map (juxt :form :status)) rs)]
+        (testing "the change the test needs is proven"
+          (is (= :proven (by 'demo.ride/real))))
+        (testing "a change that only rode along in the same red test is not"
+          (is (= :unproven (by 'demo.ride/rider))))
+        (testing "a fix that needs both halves proves both"
+          (is (= :proven (by 'demo.ride/both-a)))
+          (is (= :proven (by 'demo.ride/both-b))))
+        (testing "a fix either half is enough for proves both"
+          (is (= :proven (by 'demo.ride/either-a)))
+          (is (= :proven (by 'demo.ride/either-b))))
+        (testing "the current code is back afterwards"
+          (is (= [3] (repl/eval! h "(demo.ride/rider (demo.ride/real 1))")))))
+      (finally (repl/stop! h)))))
+
+(deftest a-shared-red-test-credits-only-the-functions-with-an-effect-on-it
+  ;; A fake image: its one test is red according to which functions are at
+  ;; their old version, so the crediting logic runs at every done. The real
+  ;; image's version is one-red-test-proves-only-the-changes-it-needs.
+  (let [s      (store/ingest (store/empty-store) 'demo.fake
+                             "(ns demo.fake)\n\n(defn a \"A.\" [x] (inc x))\n\n(defn b \"B.\" [x] (inc x))\n")
+        fid    #(:id (store/form-named s 'demo.fake %))
+        target (fn [nm tests] {:fid (fid nm) :form (symbol "demo.fake" (str nm)) :tests tests
+                               :old (str "(defn " nm " \"Old.\" [x] x)")})
+        prove  (fn [red? targets]
+                 (let [old (atom #{})]
+                   (with-redefs [hotload/hot-load-form! (fn [_ st id]
+                                                          (if (identical? st s) (swap! old disj id) (swap! old conj id))
+                                                          nil)
+                                 repl/eval! (fn [_ _]
+                                              (let [r (red? (into #{} (map #(if (= % (fid 'a)) :a :b)) @old))]
+                                                (cond
+                                                  (= r :timeout) [{:failed [] :passed [] :timeout true}]
+                                                  r              [{:failed '[t] :passed []}]
+                                                  :else          [{:failed [] :passed '[t]}])))]
+                     (into {} (map (juxt (comp keyword name :form) :status))
+                           (mutate/prove! :fake s targets :budget-ms 5000)))))
+        both   [(target 'a '[t]) (target 'b '[t])]]
+    (testing "only `a` matters to the test, so `b` rode along"
+      (is (= {:a :proven :b :unproven} (prove :a both))))
+    (testing "the test needs both halves"
+      (is (= {:a :proven :b :proven} (prove seq both))))
+    (testing "either half is enough to fix it"
+      (is (= {:a :proven :b :proven} (prove #(= #{:a :b} %) both))))
+    (testing "a test only one changed function runs needs no second look"
+      (is (= {:a :proven} (prove :a [(target 'a '[t])]))))
+    (testing "a function with a different test is not a sharer of this one"
+      (is (= {:a :proven :b :unprovable}
+             (prove :a [(target 'a '[t]) (target 'b '[other])]))))
+    (testing "a rerun that times out could not judge it, which is not the same as unproven"
+      (is (= :unchecked (:b (prove #(cond (= #{:a :b} %) true :else :timeout) both)))))))
+
+(deftest a-reify-held-in-a-def-is-a-body-a-test-can-notice
+  (let [src "(def counter (reify clojure.lang.IDeref (deref [_] (inc 1))))"]
+    (is (mutate/defn-source? src))
+    (is (some #{"inc → dec"} (map :mutation (mutate/mutants src 50)))))
+  (testing "plain data is still not one"
+    (is (not (mutate/defn-source? "(def k 2)")))))

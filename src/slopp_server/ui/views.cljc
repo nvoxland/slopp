@@ -4238,3 +4238,50 @@
              [:tr
               [:td [:a {:href (str "/store/data?key=" kw)} kw]]
               [:td (str modules)] [:td (str namespaces)] [:td (str forms)] [:td (str destructured)]]))]))
+
+(defn review-panel
+  "A person's verdict on the commit point this screen shows. `state` is the page
+  state: the token [[slopp-server.ui.app/act]] keeps, and `:call`, where the
+  note and the outcome live.
+
+  The verdict buttons stay on screen and disabled while signed out, so the page
+  still shows what signing in is for. The token box is a password field, because
+  this token is also the server's write door."
+  [{:keys [review-token call]}]
+  (let [{:keys [note status error response]} call
+        signed-out? (nil? review-token)]
+    [:section {:class "try-panel"}
+     [:h2 "your review"]
+     [:p "Endorse or flag this commit point under your name. To sign in, run "
+      [:code "slopp server token"]
+      " in a terminal and paste what it prints. This page holds the token until you reload it."]
+     [:div {:class "try-fields"}
+      [:div {:class "try-field"}
+       [:label {:for "review-token"} [:span {:class "field"} "server token"]]
+       [:input {:type "password" :id "review-token" :name "review-token"
+                :autocomplete "off" :value (or review-token "")
+                :aria-label "server token"
+                :on {:input [:review/token]}}]]
+      [:div {:class "try-field"}
+       [:label {:for "review-note"} [:span {:class "field"} "note"] " · " [:small "optional"]]
+       [:input {:type "text" :id "review-note" :name "review-note"
+                :value (or note "") :aria-label "review note"
+                :on {:input [:review/note]}}]]]
+     [:button {:type "button" :disabled signed-out?
+               :on {:click [:review/send "endorsed"]}} "endorse"]
+     " "
+     [:button {:type "button" :disabled signed-out?
+               :on {:click [:review/send "flagged"]}} "flag"]
+     (case status
+       :running [:p "recording…"]
+       :failed  [:p {:class "try-error"} (str "not recorded: " error)]
+       :done    [:p (str "recorded: " (:verdict response) " by " (:by response))]
+       nil)]))
+
+(defn change-screen
+  "The change page's pane: the change, then a person's verdict on it. A person
+  decides after reading, so the verdict comes after the diffs. An empty answer
+  names no commit point, so it offers nothing to review."
+  [{:keys [from to] :as change} state]
+  (cond-> (change-main change)
+    (and from to) (conj (review-panel state))))

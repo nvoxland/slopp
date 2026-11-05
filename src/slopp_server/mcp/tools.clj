@@ -247,6 +247,8 @@
                                         :description "tests (ns/name) whose literal expectations this change is MEANT to move — their :proposed updates are applied and re-verified in this same call (:finisher)"}
                                :done {:type "string"
                                       :description "this change FINISHES the unit: close it in the same call under this label — done, landed, the suite, the whole-store verdict when cheap (:closed); a red change closes nothing"}
+                               :untested {:type "object"
+                                          :description "with done or commit: {\"ns/name\" \"why\"} — changed functions whose change keeps behaviour (a refactor); waived for that close only, and reported"}
                                :commit {:type ["boolean" "string"]
                                         :description "and take a commit point (true, or its label) — the write that finishes an ask is one turn"}
                                

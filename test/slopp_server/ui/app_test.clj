@@ -1952,3 +1952,53 @@
     (is (= "/store/form/f1" (where s)))
     (is (re-find #"order/total" (cljnx/text s "main" {:detail :prose}))
         "and the form page names the keys it touches")))
+
+(deftest a-review-request-carries-the-token-and-names-the-commit-point
+  (let [st     {:params {:slug "demo" :range "c1..c2"}}
+        signed (app/act st [:review/token] "  tok-1\n")]
+    (testing "with no token there is nothing to send"
+      (is (nil? (app/review-request st "endorsed"))))
+    (testing "a pasted token loses the whitespace that came with it"
+      (is (= "tok-1" (:review-token signed))))
+    (testing "clearing the box signs out"
+      (is (nil? (:review-token (app/act signed [:review/token] "  ")))))
+    (testing "the request names the end of the range and carries the token as a header"
+      (let [r (app/review-request (app/act signed [:review/note] "read it") "flagged")]
+        (is (= :post (:http/method r)))
+        (is (= "/api/projects/demo/review" (:http/url r)))
+        (is (= {:target "c2" :verdict "flagged" :note "read it"} (:http/body r)))
+        (is (= "Bearer tok-1" (get-in r [:http/headers "Authorization"])))))
+    (testing "a blank note is left out, because the contract's note is a sentence or nothing"
+      (is (= {:target "c2" :verdict "endorsed"}
+             (:http/body (app/review-request signed "endorsed")))))
+    (testing "a screen with no range has no commit point to review"
+      (is (nil? (app/review-request {:params {:slug "demo"} :review-token "t"} "endorsed"))))))
+
+(deftest pressing-review-sends-it-and-the-timeline-goes-stale
+  (let [sent  (atom nil)
+        tl    (webapp/load-key "" (endpoint/request (views/at-project {:slug "demo"} api/timeline) {}))
+        state (atom {:params {:slug "demo" :range "c1..c2"}
+                     :review-token "tok-1"
+                     :loads {tl {:status :ready :value {:commit-points []}}}})
+        a     (assoc (app/wiring {:state state
+                                  :call (fn [req ok _]
+                                          (reset! sent req)
+                                          (ok {:target "c2" :verdict "endorsed" :by "nathan"}))
+                                  :render (fn [_])})
+                     :webapp/routes (cljnx/marked-pages))]
+    (webapp/dispatch! a [:review/send "endorsed"] nil)
+    (is (= "/api/projects/demo/review" (:http/url @sent)))
+    (is (= :done (get-in @state [:call :status])))
+    (is (= "nathan" (get-in @state [:call :response :by])))
+    (is (nil? (get-in @state [:loads tl])) "the timeline would still say nobody reviewed it")
+    (testing "the token survives moving to another page, and the outcome does not"
+      (webapp/navigate! a "/p/demo/change/c2..c3" false)
+      (is (= "tok-1" (:review-token @state)))
+      (is (nil? (:call @state))))))
+
+(deftest the-change-page-itself-draws-the-review-panel
+  ;; The panel's own test hands it state directly, which would pass with no
+  ;; page ever calling it.
+  (let [s (cljnx/open! (cljnx/driver-for (page/page)))]
+    (cljnx/visit! s (at "/change/d3300..d3457"))
+    (is (re-find #"slopp server token" (cljnx/text s "main" {:detail :prose})))))

@@ -146,3 +146,17 @@
 
 (def data-response
   [:map [:keys {:doc "the keys"} [:sequential [:map [:kw {:doc "the key's name, without its colon"} :string] [:modules {:doc "how many modules touch it"} :int] [:namespaces {:doc "how many namespaces"} :int] [:forms {:doc "how many forms"} :int] [:destructured {:doc "how many forms destructure it — demonstrably READ it"} :int]]]] [:total {:doc "matched before the limit"} :int] [:shown {:doc "in :keys"} :int] [:key {:optional true :doc "one key's users"} [:map [:kw {:doc "the key's name, without its colon"} :string] [:modules {:doc "the production modules whose forms touch it"} [:sequential [:map [:module {:doc "the module"} :string] [:forms {:doc "its forms that touch the key"} [:sequential [:map [:form {:doc "ns/name"} :string] [:form-id {:doc "its stable address"} :string] [:via {:doc "how: literal names it, destructuring reads it"} [:sequential :string]]]]]]]] [:tests {:doc "how many test namespaces touch it — counted, not listed"} :int]]]])
+
+(def review-request
+  [:map
+   [:slug {:doc "the project slug — interpolated into the PATH"} :string]
+   [:target {:doc "the commit point's delta id, as the timeline's :commit lists it"} :string]
+   [:verdict {:doc "endorsed (a person read it and agrees) or flagged (a person read it and objects)"}
+    [:enum "endorsed" "flagged"]]
+   [:note {:optional true :doc "why, in a sentence"} :string]])
+
+(def review-response
+  [:map
+   [:target {:doc "the commit point reviewed"} :string]
+   [:verdict {:doc "endorsed or flagged"} :string]
+   [:by {:doc "the reviewer, from the request's identity"} :string]])

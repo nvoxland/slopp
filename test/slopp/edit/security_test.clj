@@ -56,3 +56,18 @@
                            "(ns app.core-test (:require [clojure.java.shell :as sh]))\n(defn f [] (sh/sh \"rm\" \"-rf\" \"x\"))\n")
              'app.core-test))
       "a test namespace is not scanned"))
+
+(deftest dot-exec-is-only-a-launch-when-the-receiver-could-be-a-runtime
+  (let [launch (fn [body] (security/process-launch
+                           (store/ingest (store/empty-store) 'app.core (str "(ns app.core)\n" body))
+                           'app.core 'f))]
+    (testing "a receiver hinted as another type is not a process"
+      (is (nil? (launch "(defn f [^java.sql.Statement st] (.exec ^java.sql.Statement st))")))
+      (is (nil? (launch "(defn f [st] (.exec ^Worker st 1))"))))
+    (testing "what the receiver's arguments do is still looked at"
+      (is (some? (launch "(defn f [st] (.exec ^Worker st (.exec (Runtime/getRuntime) \"ls\")))"))))
+    (testing "an unknown receiver could be a Runtime, and the refusal says how to say it is not"
+      (is (re-find #"type hint" (str (launch "(defn f [rt] (.exec rt \"ls\"))")))))
+    (testing "a Runtime hint does not get past it"
+      (is (some? (launch "(defn f [^Runtime rt] (.exec ^Runtime rt \"ls\"))")))
+      (is (some? (launch "(defn f [rt] (.exec ^java.lang.Runtime rt \"ls\"))"))))))

@@ -407,11 +407,11 @@
 
 (defn ^{:webapp/path "/p/:slug/change/:range" :unused-ok "runtime-resolved entry — see landing-page"} change-page
   "One range of change — what moved, and whether it went red on the way."
-  [{:keys [params] :as page}]
+  [{:keys [params state] :as page}]
   (let [answer (webapp/ask! page (views/at-project params api/change)
                             (select-keys params [:range]))]
     (chrome page :change answer
-            (answered answer #(views/change-main (:value answer))))))
+            (answered answer #(views/change-screen (:value answer) state)))))
 
 (defn ^{:webapp/path "/p/:slug/store/form/:id/through/:through" :unused-ok "runtime-resolved entry — see landing-page"} form-through-page
   "One form with a second form beside it — the same page as [[form-page]], seen

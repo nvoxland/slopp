@@ -5549,3 +5549,42 @@
               :review {:verdict "endorsed" :by "bob" :at "t" :flagged-by ["alice"]}}
         seen (flat (views/timeline-main {:commit-points [row] :unreviewed 0}))]
     (is (str/includes? seen "reviewed: endorsed by bob, earlier flagged by alice") seen)))
+
+(deftest the-change-screen-offers-a-review-and-says-how-to-sign-in
+  (let [prose (fn [v] (str/join "\n" (cljnx/lines v {:detail :prose})))
+        panel views/review-panel
+        emitted (fn [v] (->> (tree-seq coll? seq v) (filter map?) (keep :on)
+                             (mapcat vals) (map first) set))
+        buttons (fn [v] (->> (tree-seq coll? seq v)
+                             (filter #(and (vector? %) (= :button (first %))))
+                             (map second)))]
+    (testing "signed out: it says where the token comes from, and the verdicts cannot fire"
+      (let [v (panel {})]
+        (is (re-find #"slopp server token" (prose v)) (prose v))
+        (is (= [true true] (map :disabled (buttons v))))))
+    (testing "signed in: the verdicts can fire, and the token is not shown as text"
+      (let [v (panel {:review-token "secret-tok"})]
+        (is (= [false false] (map :disabled (buttons v))))
+        (is (not (re-find #"secret-tok" (prose v))) (prose v))
+        (is (= "password" (->> (tree-seq coll? seq v) (filter map?)
+                               (filter #(= "review-token" (:id %))) first :type)))))
+    (testing "every control dispatches a word the vocabulary declares"
+      (let [kinds (emitted (panel {}))]
+        (is (= #{:review/token :review/note :review/send} kinds))
+        (is (every? #(contains? app/actions %) kinds))))
+    (testing "the outcome is said in words"
+      (is (re-find #"recorded: endorsed by nathan"
+                   (prose (panel {:call {:status :done :response {:verdict "endorsed" :by "nathan"}}}))))
+      (is (re-find #"not recorded: HTTP 401"
+                   (prose (panel {:call {:status :failed :error "HTTP 401"}})))))
+    (testing "the screen draws the panel when it is handed the page state, for a range that has an end"
+      (is (re-find #"your review" (prose (views/change-screen {:from "c1" :to "c2" :count 0 :modules []} {}))))
+      (is (not (re-find #"your review" (prose (views/change-screen {} {})))))
+      (is (not (re-find #"your review" (prose (views/change-screen {:from "c1" :count 0 :modules []} {})))) "a range with no end names no commit point"))
+    (testing "the boxes show what was typed, and are empty when nothing was"
+      (let [value-of (fn [v id] (->> (tree-seq coll? seq v) (filter map?)
+                                     (filter #(= id (:id %))) first :value))]
+        (is (= "tok" (value-of (panel {:review-token "tok"}) "review-token")))
+        (is (= "" (value-of (panel {}) "review-token")))
+        (is (= "why" (value-of (panel {:call {:note "why"}}) "review-note")))
+        (is (= "" (value-of (panel {}) "review-note")))))))

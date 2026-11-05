@@ -14,7 +14,7 @@
   cache, history, deps, queries — have their own test namespaces under
   `slopp.api`; what lands here is what needs the whole thing running."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.ops :as ops] [slopp.ops.testrun :as testrun] [clojure.java.io :as io] [clojure.edn :as edn] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store :as store] [clojure.java.shell] [slopp.image.repl :as repl] [slopp.store.artifacts :as artifacts] [slopp.kernel.boot :as boot] [clojure.string :as str] [slopp.image :as image] [slopp.ops.engine :as engine] [slopp.project.capabilities :as capabilities] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.cljs :as cljs] [slopp.rules.webapp :as rules.webapp] [slopp.store.render :as store.render] [slopp.read.telemetry :as telemetry] [slopp.store.db :as db] [slopp.project.dev :as dev] [slopp.index.refs :as refs] [next.jdbc :as jdbc] [slopp.edit :as edit])
+            [slopp.ops :as ops] [slopp.ops.testrun :as testrun] [clojure.java.io :as io] [clojure.edn :as edn] [slopp.read.query :as query] [slopp.ops.external :as external] [slopp.store :as store] [clojure.java.shell] [slopp.image.repl :as repl] [slopp.store.artifacts :as artifacts] [slopp.kernel.boot :as boot] [clojure.string :as str] [slopp.image :as image] [slopp.ops.engine :as engine] [slopp.project.capabilities :as capabilities] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.cljs :as cljs] [slopp.rules.webapp :as rules.webapp] [slopp.store.render :as store.render] [slopp.read.telemetry :as telemetry] [slopp.store.db :as db] [slopp.project.dev :as dev] [slopp.index.refs :as refs] [next.jdbc :as jdbc] [slopp.edit :as edit] [rewrite-clj.parser :as p])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
 
@@ -3108,3 +3108,55 @@
     (is (nil? (ops/protected-test-refusal
                s tmap "bot" "" [{:action :replace :ns 'a.core-test :name 'f-increments
                                  :source "(deftest f-increments (is (= 3 (c/f 1))))"}])))))
+
+(deftest a-helper-or-fixture-of-the-grading-test-is-guarded-like-the-test
+  ;; An assertion can be silenced without touching its deftest: make the
+  ;; helper it calls answer true, or wrap it in a fixture.
+  (let [s0 (store/ingest (store/empty-store) 'pg.core "(ns pg.core)\n\n(defn f \"F.\" [x] x)\n\n(defn g \"G.\" [x] x)\n")
+        s1 (store/ingest s0 'pg.core-test.support "(ns pg.core-test.support)\n\n(defn close? [a b] (= a b))\n")
+        s2 (store/ingest s1 'pg.core-test
+                         (str "(ns pg.core-test (:require [clojure.test :refer [deftest is use-fixtures]] [pg.core :as c] [pg.core-test.support :as support]))\n\n"
+                              "(defn fix [f] (f))\n\n"
+                              "(use-fixtures :each fix)\n\n"
+                              "(defn same? [a b] (support/close? a b))\n\n"
+                              "(defn deep? [a b] (same? a b))\n\n"
+                              "(deftest grades-f (is (deep? 1 (c/f 1))))\n"))
+        s3 (store/ingest s2 'pg.other-test
+                         (str "(ns pg.other-test (:require [clojure.test :refer [deftest is]] [pg.core :as c]))\n\n"
+                              "(defn unrelated? [a] (some? a))\n\n"
+                              "(deftest u (is (unrelated? (c/g 1))))\n"))
+        fid (:id (store/form-named s3 'pg.core 'f))
+        st  (first (store/replace-node s3 'pg.core fid (p/parse-string "(defn f \"F.\" [x] (+ x 0))") :agent "a"))
+        tm  {'pg.core-test/grades-f #{'pg.core/f} 'pg.other-test/u #{'pg.core/g}}
+        ask (fn [intent step] (ops/protected-test-refusal st tm "a" intent [step]))
+        edit (fn [ns nm] {:ns ns :name nm :source (str "(defn " nm " [& _] true)")})]
+    (testing "a helper the test calls"
+      (is (string? (ask nil (edit "pg.core-test" "deep?")))))
+    (testing "a helper it reaches through another helper"
+      (is (string? (ask nil (edit "pg.core-test" "same?")))))
+    (testing "a helper in another test namespace"
+      (is (string? (ask nil (edit "pg.core-test.support" "close?")))))
+    (testing "a fixture the namespace uses"
+      (is (string? (ask nil (edit "pg.core-test" "fix")))))
+    (testing "deleting one is the same move"
+      (is (string? (ask nil {:action "delete" :ns "pg.core-test" :name "deep?"}))))
+    (testing "a new fixture over the grading test"
+      (is (string? (ask nil {:action "add" :ns "pg.core-test" :source "(use-fixtures :once fix)"})))
+      (is (string? (ask nil {:action "add" :ns "pg.core-test" :source "(clojure.test/use-fixtures :each fix)"}))))
+    (testing "the refusal names the test to flag, since a helper cannot be flagged"
+      (let [why (ask nil (edit "pg.core-test" "deep?"))]
+        (is (re-find #"pg\.core-test/deep\?" why) why)
+        (is (re-find #"pg\.core/f" why) why)
+        (is (re-find #"name \"grades-f\"" why) why)))
+    (testing "the human naming the helper or the test lifts it"
+      (is (nil? (ask "please change deep? to round" (edit "pg.core-test" "deep?"))))
+      (is (nil? (ask "grades-f is wrong, fix what it calls" (edit "pg.core-test" "deep?"))))
+      (is (string? (ask "please tidy things" (edit "pg.core-test" "deep?")))))
+    (testing "a helper of a test that grades nothing you changed stays open"
+      (is (nil? (ask nil (edit "pg.other-test" "unrelated?")))))
+    (testing "a new fixture in a namespace with no grading test stays open"
+      (is (nil? (ask nil {:action "add" :ns "pg.other-test" :source "(clojure.test/use-fixtures :each identity)"}))))
+    (testing "a new helper stays open, so a new test can have one"
+      (is (nil? (ask nil {:action "add" :ns "pg.core-test" :name "new-help" :source "(defn new-help [] 1)"}))))
+    (testing "production code is not a helper"
+      (is (nil? (ask nil (edit "pg.core" "g")))))))

@@ -4,17 +4,6 @@
             [rewrite-clj.node :as n]
             [clojure.string :as str] [slopp.store.render :as store.render]))
 
-(defn- symbols-outside-quotes
-  "Every symbol in sexpr `x` except those under a quote: a quoted name is data
-  (`slopp.index.derive/external-leaves` names `clojure.java.shell/sh` in a
-  quoted set), and to run a call you have to write it unquoted."
-  [x]
-  (cond
-    (and (seq? x) (= 'quote (first x))) []
-    (symbol? x) [x]
-    (coll? x) (mapcat symbols-outside-quotes x)
-    :else []))
-
 (defn- hazard
   "`:process` when `sym` starts a process, `:deserialize` when it builds a
   Java object reader, else nil. `aliases` is the namespace's {alias lib} map,
@@ -34,6 +23,25 @@
       (#{"ProcessBuilder" "java.lang.ProcessBuilder"} nsp) :process
       (and (nil? nsp) (#{"ObjectInputStream." "java.io.ObjectInputStream."} nm)) :deserialize
       :else nil)))
+
+(defn- other-type?
+  "True when `receiver`, the first argument of an `.exec` call, carries a type
+  hint that says it is not a `java.lang.Runtime`."
+  [receiver]
+  (let [tag (:tag (meta receiver))]
+    (and (some? tag) (not (contains? '#{Runtime java.lang.Runtime} tag)))))
+
+(defn- symbols-outside-quotes
+  "Every symbol in sexpr `x` except those under a quote: a quoted name is data
+  (`slopp.index.derive/external-leaves` names `clojure.java.shell/sh` in a
+  quoted set), "
+  [x]
+  (cond
+    (and (seq? x) (= 'quote (first x))) []
+    (and (seq? x) (= '.exec (first x)) (other-type? (second x))) (mapcat symbols-outside-quotes (rest x))
+    (symbol? x) [x]
+    (coll? x) (mapcat symbols-outside-quotes x)
+    :else []))
 
 (defn- hazards-of
   "[entry {hazard first-symbol}] for the form `ns-sym`/`form-name` in `store`,
@@ -75,7 +83,9 @@
                " that takes the program and its arguments as a VECTOR, and have"
                " the rest of the code call that form, or take it as a parameter so"
                " a test passes a fake. Build arguments as data, never as one shell"
-               " string: (sh \"sh\" \"-c\" (str …)) is command injection."))))))
+               " string: (sh \"sh\" \"-c\" (str …)) is command injection."
+               (when (= '.exec hit)
+                 " If this receiver is not a java.lang.Runtime, say so with a type hint on it: (.exec ^YourType x).")))))))
 
 (defn ^:export ^{:rule/applies-to :production} java-deserialization
   "Write gate: shipped code does not read Java-serialized objects.

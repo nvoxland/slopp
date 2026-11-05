@@ -20,7 +20,7 @@
   other direction, and it is what makes
   `app-test/the-whole-app-can-be-driven-headless-and-read-as-text` a test of
   the app rather than of a resemblance."
-  (:require [slopp-server.ui.views :as views] [slopp-server.ui.schema :as schema] [slopp.webapp :as webapp] [slopp.http.endpoint :as endpoint] [slopp-server.ui.wire.api :as api]))
+  (:require [slopp-server.ui.views :as views] [slopp-server.ui.schema :as schema] [slopp.webapp :as webapp] [slopp.http.endpoint :as endpoint] [slopp-server.ui.wire.api :as api] [clojure.string :as str]))
 
 (def actions
   "Every action a control in this app can dispatch, with a runnable example.
@@ -69,6 +69,13 @@
    :try/execute {:what "actually send the ad-hoc call"
                  :example [:try/execute]
                  :effectful? true}
+   :review/token {:what "paste the server's token, which signs the reader in"
+                  :example [:review/token] :value "a-token"}
+   :review/note  {:what "type the note a review carries"
+                  :example [:review/note] :value "read the diff"}
+   :review/send  {:what "record a verdict on the commit point this screen shows"
+                  :example [:review/send "endorsed"]
+                  :effectful? true}
    ;; **`:leaves?`, the third kind.** Not `:effectful?` — that makes a REQUEST
    ;; and stays on the page. This hands the page back to the browser through
    ;; `:webapp/leave!`, which is what switching project is: every pane is
@@ -84,7 +91,7 @@
                   :leaves? true}
    })
 
-(defn act
+(defn ^{:equivalent-mutants {"first → last" ":docs/all, :docs/one and :try/set each carry exactly one argument, so the first of them is also the last"}} act
   "State after dispatching `action`, where `value` is the typed/selected text
   the view could not know — everything else rides in the action itself.
 
@@ -103,6 +110,7 @@
   outlive the vocabulary that generated its markup, and a stale handler should
   do nothing rather than white-screen the app; the pairing test is what stops
   an action being unrecognised in the first place."
+  
   [state [kind & args] value]
   (case kind
     :docs/all    (update state :show views/toggle-all-docs (first args))
@@ -126,6 +134,14 @@
     ;; `:effectful?` is the only thing that can say which endpoints deserve
     ;; the second press, and it is a fact no other API browser has.
     :try/arm     (assoc-in state [:call :armed?] true)
+    ;; the token sits outside `:call` so it outlives the route: a reviewer
+    ;; reads several commit points in one sitting. The note is the call's input
+    ;; and dies with the route.
+    :review/token (let [t (str/trim (str value))]
+                    (if (seq t)
+                      (assoc state :review-token t)
+                      (dissoc state :review-token)))
+    :review/note  (assoc-in state [:call :note] value)
 
     state))
 
@@ -201,6 +217,22 @@
             ;; /api/…, which the server does not serve
             (schema/request-for ep (get-in state [:call :params] {})
                                 #(views/at-project params %))))))))
+
+(defn review-request
+  "The review `state` describes, as data, or nil when there is nothing to send:
+  no token, or a screen whose range has no end. The target is the range's end,
+  which is the commit point the timeline linked here from; anything else is
+  refused by the server in words. A success makes the timeline wrong, so the
+  request names it as stale."
+  [{:keys [params review-token call]} verdict]
+  (let [target (second (re-matches #".+\.\.(.+)" (str (:range params))))
+        note   (:note call)]
+    (when (and review-token target)
+      (-> (endpoint/request api/review
+                            (cond-> {:slug (:slug params) :target target :verdict verdict}
+                              (seq (str/trim (str note))) (assoc :note note)))
+          (assoc :http/headers {"Authorization" (str "Bearer " review-token)}
+                 :webapp/stales [(endpoint/request (views/at-project params api/timeline) {})])))))
 
 (defn ^{:http/external-path
         "the PROJECT serves `/api/modules`, not the server. This app is the
@@ -282,14 +314,17 @@
    :webapp/boot      (or boot identity)
    :webapp/act       act
    :webapp/actions   actions
-   ;; `:effectful?` actions come here for their request. The action is ignored
-   ;; because every judgement about WHAT to send is already in [[try-request]],
-   ;; derived from state — which is what makes the request assertable without
-   ;; performing anything.
+   ;; `:effectful?` actions come here for their request. Every judgement about
+   ;; WHAT to send is already in [[try-request]] or [[review-request]], derived
+   ;; from state, which is what makes the request assertable without performing
+   ;; anything; the action only says which of the two it is, and the verdict.
    ;; the app's own base goes with it: `load-key` resolves an address before
    ;; keying, and the key `try-request` looks under must be the one `ask!`
    ;; minted from the same base.
-   :webapp/request-for (fn [st _action] (try-request st (or base "")))
+   :webapp/request-for (fn [st action]
+                         (if (= :review/send (first action))
+                           (review-request st (second action))
+                           (try-request st (or base ""))))
    ;; `:leaves?` actions come here for their DESTINATION, the way effectful
    ;; ones come to `:webapp/request-for` for their request. One action uses it
    ;; — the project switcher — and the address is built HERE rather than

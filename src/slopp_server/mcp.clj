@@ -2067,13 +2067,14 @@
 
 (defn- with-verdict
   "A done that is not plainly green, with its verdict at the top level: `:status`,
-  `:landed`, and `:held-by`, the forms findings name that are not `:info`. Its
+   Its
   report is large and the wire trims the largest key first, so `:findings` alone
   can vanish, and with it the only sign that nothing landed."
   [r]
   (let [f     (:findings r)
-        forms (vec (distinct (for [[_ rows] f
-                                   :when (and (sequential? rows) (= :red (:episode-status f)))
+        advice (into #{} (comp (filter #(= :advisory (:severity %))) (map :key)) rules/done-advisories)
+        forms (vec (distinct (for [[k rows] f
+                                   :when (and (sequential? rows) (= :red (:episode-status f)) (not (advice k)))
                                    row rows
                                    :when (and (map? row) (:form row) (not= :info (:severity row)))]
                                (:form row))))]
@@ -2136,6 +2137,15 @@
           (seq advisory)                 (assoc :advisories advisory)
           (:app-note r)                  (assoc :app-note (:app-note r)))))))
 
+(defn- done-with-waivers!
+  "`external/done!` under `untested`, the waiver argument a done or a closing
+  change carries. The waivers are in force for this one done only."
+  [session untested & done-args]
+  (let [w (untested-waivers untested)]
+    (when w (swap! session assoc :untested-waivers w))
+    (try (apply external/done! session done-args)
+         (finally (swap! session dissoc :untested-waivers)))))
+
 (defn- close-unit-after-write!
   "Threaded after a change's result `ri`: when the call carried `done` (a
   label) or `commit` and the write is GREEN (`red?` says), close the unit
@@ -2160,7 +2170,7 @@
       (let [lbl (or (and (string? (:done a)) (:done a))
                     (and (string? (:commit a)) (:commit a))
                     (:prompt a))
-            d   (external/done! session :label lbl :agent (:agent a))
+            d   (done-with-waivers! session (:untested a) :label lbl :agent (:agent a))
             app (deref (future (refresh-app! session)) 20000 ::refresh-timed-out)
             td  (terse-done (if-let [note (app-note-for app)]
                               (assoc d :app-note note)
@@ -3176,10 +3186,7 @@
                                                   :prompt (:prompt a))
                                     (select-keys tools/wire-keys)
                                     (summarize (:verbose a))))))
-      "done" (let [r (let [w (untested-waivers (:untested a))]
-                             (when w (swap! session assoc :untested-waivers w))
-                             (try (external/done! session :label (:label a) :agent (:agent a))
-                                  (finally (swap! session dissoc :untested-waivers))))
+      "done" (let [r (done-with-waivers! session (:untested a) :label (:label a) :agent (:agent a))
                    ;; the app server catches up to the store at DONE grain. A
                    ;; red done still refreshes: done REPORTS rather than
                    ;; refuses and a red one STANDS, so \"finished\" and \"green\"

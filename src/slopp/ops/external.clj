@@ -1769,13 +1769,17 @@ client-deps (merge (:client-deps st) (:client provided))
                                             (keys (:namespaces st*)))))
                 ;; nil affected => every test in main-ns; :edited still powers
                 ;; the red :implicated correlation
-                s        (engine/run-verification! session main-ns nil
+                s        (if (:suite-trusted @session)
+                           ;; a pull of commits that each passed this suite,
+                           ;; onto no local work: nothing new could be red
+                           {:test 0 :pass 0 :fail 0 :error 0 :type :summary :suite-trusted true}
+                           (engine/run-verification! session main-ns nil
                                             ;; against the whole THREAD's edits, not this
                                             ;; episode's: the land is the thread, and a
                                             ;; red from an earlier episode here is mine
                                             :edited (thread-edited session st* qsyms)
                                             :include-integration? true
-                                            :boundary? true)]  ; M5
+                                            :boundary? true))]  ; M5
             (engine/commit-appended! session
                               #(store/record-verification % main-ns s) [])
             s))
@@ -1789,7 +1793,7 @@ client-deps (merge (:client-deps st) (:client provided))
         ;; 2026-07-17) — it never narrowed, it just always blew the cap, so 84.6%
         ;; of changes deferred and the tier effectively never ran here. The
         ;; evidence was already computed a few lines up and thrown away.
-        iso (when (and external? (seq changed))
+        iso (when (and external? (seq changed) (not (:suite-trusted @session)))
               (let [st*      (:store @session)
                     iso-only (engine/impacted-external session st* changed)]
                 ;; #132: impacted-external is never silent — an untraced form expands
@@ -2769,3 +2773,10 @@ client-deps (merge (:client-deps st) (:client provided))
                                   " whole-store check over this same content; this is"
                                   " ITS verdict, recorded on your line so it stands here"
                                   " too. Nothing was run twice."))))))))))
+
+(defn ^:export on-commit-point?
+  "True when the newest entry on this session's line is a commit point, which
+  means no work has been recorded here since one: nothing on its thread, and
+  nothing landed that no commit point covers."
+  [session]
+  (= :commit (:op (db/head-delta (:db @session) (engine/session-line session)))))

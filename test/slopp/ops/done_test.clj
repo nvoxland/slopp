@@ -4,7 +4,7 @@
    through a real session in slopp.ops-test."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.store :as store]
-            [slopp.ops.done :as done] [slopp.ops.external :as external] [slopp.kernel.boot :as boot] [slopp.ops :as ops]))
+            [slopp.ops.done :as done] [slopp.ops.external :as external] [slopp.kernel.boot :as boot] [slopp.ops :as ops] [slopp.store.db :as db] [slopp.ops.engine :as engine]))
 
 (defn- store-with-requires []
   (store/ingest (store/empty-store) 'du.core
@@ -188,3 +188,13 @@
         "a was read, d was written this episode, the test form is not production: b is the blind spot")
     (is (= {} (done/unread-callees st [(fid 'ur.core 'c)] (map #(fid 'ur.core %) '[a b d])))
         "every callee read")))
+
+(deftest a-line-is-on-a-commit-point-only-when-that-is-its-newest-entry
+  (let [on? (fn [newest]
+              (with-redefs [db/head-delta (fn [conn line] (is (= [:conn :line] [conn line])) newest)
+                            engine/session-line (fn [_] :line)]
+                (external/on-commit-point? (atom {:db :conn}))))]
+    (is (true? (on? {:op :commit})))
+    (is (false? (on? {:op :replace})))
+    (is (false? (on? {:op :done})))
+    (is (false? (on? nil)) "an empty line has no commit point to stand on")))

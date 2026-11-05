@@ -819,8 +819,7 @@
   `Slopp-Status: red`, which a forced commit point writes. A stamped commit's
   production changes earned their proof where they were written, so a pull need
   not earn it again. This is an honest statement about the producer, not a
-  signature: a remote that hand-writes the trailer can claim it, and the suite
-  a pull runs still judges what arrives."
+  "
   [^Repository repo base tip]
   (with-open [rw (RevWalk. repo)]
     (.markStart rw (.parseCommit rw (ObjectId/fromString tip)))
