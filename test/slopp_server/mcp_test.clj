@@ -5616,3 +5616,139 @@
       (testing "a done that throws does not leave them behind"
         (is (thrown? Exception (#'mcp/done-with-waivers! sess {"a/b" "why"} :label "l")))
         (is (nil? (:untested-waivers @sess)))))))
+
+(deftest a-green-done-keeps-its-time-breakdown-off-the-line
+  (let [line (#'mcp/terse-done {:done "d1"
+                                :findings {:episode-status :green :test-status :green :lint-errors 0
+                                           :phases {:in-image 1} :rule-ms {:key-typos 200}}})]
+    (is (= {:done "d1" :status :green} line) (pr-str line))))
+
+(deftest ^:external a-turn-no-human-asked-for-says-so
+  (let [dir   (str (System/getProperty "java.io.tmpdir") "/slopp-no-ask-" (System/nanoTime))
+        sess  (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "harness-n"})
+        begin (fn [] (last (filter #(= :turn-begin (:op %)) (ops/journal sess))))
+        noted #(count (re-seq #"no human ask reached this session" %))]
+    (try
+      (swap! sess assoc :require-turns? true)
+      (let [first-write (call! sess "ns_create" {:ns "na.core" :source "(ns na.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n"
+                                                 :prompt "my own words"})
+            next-read   (call! sess "query_source" {:ns "na.core"})]
+        (testing "the turn is marked as the agent's words"
+          (is (= "my own words" (:intent (begin))))
+          (is (true? (:agent-worded (begin)))))
+        (testing "and the agent is told once"
+          (is (= 1 (+ (noted first-write) (noted next-read))) (str first-write next-read))))
+      (call! sess "done" {:label "close"})
+      (call! sess "turn_end" {})
+      (testing "a later self-opened turn does not repeat it"
+        (is (zero? (noted (str (call! sess "change" {:prompt "more of my words"
+                                                     :impl [{:ns "na.core" :name "f" :source "(defn ^:unused-ok f \"F.\" [x] (+ x 0))"}]})
+                               (call! sess "query_source" {:ns "na.core"}))))))
+      (call! sess "done" {:label "close again"})
+      (call! sess "turn_end" {})
+      (io/make-parents (io/file dir ".slopp" "pending-intent"))
+      (spit (io/file dir ".slopp" "pending-intent")
+            "{\"session-id\":\"harness-n\",\"prompt\":\"the human's ask\"}")
+      (call! sess "change" {:prompt "as asked"
+                            :impl [{:ns "na.core" :name "f" :source "(defn ^:unused-ok f \"F.\" [x] (+ x 1))"}]})
+      (testing "a delivered ask opens an unmarked turn"
+        (is (= "the human's ask" (:intent (begin))))
+        (is (not (:agent-worded (begin)))))
+      (call! sess "done" {:label "close a third time"})
+      (call! sess "turn_end" {})
+      (testing "and a gap after a delivered ask is told again"
+        (is (= 1 (noted (str (call! sess "change" {:prompt "on my own again"
+                                                   :impl [{:ns "na.core" :name "f" :source "(defn ^:unused-ok f \"F.\" [x] (+ x 2))"}]})
+                             (call! sess "query_source" {:ns "na.core"}))))))
+      (finally (ops/close! sess)
+               (sh/sh "rm" "-rf" dir)))))
+
+(deftest ^:external a-slow-call-hands-back-a-run-id-and-run-status-collects-it
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-run-id-" (System/nanoTime))
+        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "harness-r"})]
+    (try
+      (call! sess "ns_create" {:ns "rn.core" :source "(ns rn.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n" :prompt "seed"})
+      (swap! sess assoc :answer-within-ms 100)
+      (let [r  (edn/read-string (call! sess "query_eval" {:code "(do (Thread/sleep 1500) (+ 40 2))"}))
+            id (:running r)]
+        (is (string? id) (pr-str r))
+        (is (re-find #"query_detail" (:note r)))
+        (testing "a read is served while it runs"
+          (is (re-find #"rn.core" (call! sess "query_source" {:ns "rn.core"}))))
+        (swap! sess assoc :answer-within-ms 50000)
+        (testing "query_detail waits for it and returns the call's own answer"
+          (is (re-find #"42" (call! sess "query_detail" {:id id}))))
+        (testing "an unknown run is named as one"
+          (is (re-find #"no run" (call! sess "query_detail" {:id "run-999"})))))
+      (finally (ops/close! sess)
+               (sh/sh "rm" "-rf" dir)))))
+
+(deftest ^:external a-reconnect-of-the-same-harness-session-keeps-its-episode
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-reconnect-" (System/nanoTime))
+        mail (fn [prompt]
+               (io/make-parents (io/file dir ".slopp" "pending-intent"))
+               (spit (io/file dir ".slopp" "pending-intent")
+                     (str "{\"session-id\":\"claude-1\",\"prompt\":\"" prompt "\"}")))
+        a    (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "mcp-aaaa1111"})]
+    (try
+      (mail "set it up")
+      (call! a "ns_create" {:ns "rc.core" :source "(ns rc.core)\n(defn f \"F.\" [x] x)\n"})
+      (call! a "ns_create" {:ns "rc.core-test"
+                            :source (str "(ns rc.core-test (:require [clojure.test :refer [deftest is]] [rc.core :as c]))\n"
+                                         "(deftest f-is-identity (is (= 1 (c/f 1))))\n")})
+      (call! a "done" {:label "seed"})
+      (testing "the harness's session id is the identity, not the connection's label"
+        (is (= "claude-1" (:agent-id @a))))
+      (call! a "change" {:prompt "make f add zero"
+                         :impl [{:ns "rc.core" :name "f" :source "(defn f \"F.\" [x] (+ x 0))"}]})
+      (ops/close! a)
+      (let [b (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "mcp-bbbb2222"})]
+        (try
+          (mail "carry on")
+          (testing "the same session over a new connection is still refused the test it changed code under"
+            (let [r (call! b "change" {:prompt "loosen the test"
+                                       :tests [{:ns "rc.core-test" :name "f-is-identity"
+                                                :source "(deftest f-is-identity (is true))"}]})]
+              (is (re-find #"flag_test" r) r)))
+          (finally (ops/close! b))))
+      (finally (sh/sh "rm" "-rf" dir)))))
+
+(deftest a-wide-form-names-five-unread-callees-and-counts-the-rest
+  (let [base {:done "d1" :findings {:episode-status :green :test-status :green}}
+        wide (mapv #(symbol "u.core" (str "c" %)) (range 8))
+        out  (:unread-callees (#'mcp/terse-done (assoc base :unread-callees {'u.core/f wide 'u.core/g '[u.core/a]})))]
+    (is (= (conj (subvec wide 0 5) 'and-3-more) (get out 'u.core/f)))
+    (is (= '[u.core/a] (get out 'u.core/g)) "a short list is left as it is")
+    (testing "a red done is capped the same way"
+      (let [red {:done "d2" :findings {:episode-status :red :test-status :red} :unread-callees {'u.core/f wide}}]
+        (is (= 6 (count (get-in (#'mcp/terse-done red) [:unread-callees 'u.core/f]))))))))
+
+(deftest ^:external a-change-that-only-deletes-tests-gets-no-note-about-specs
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-del-note-" (System/nanoTime))
+        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "harness-d"})]
+    (try
+      (call! sess "ns_create" {:ns "dn.core-test"
+                               :source (str "(ns dn.core-test (:require [clojure.test :refer [deftest is]]))\n"
+                                            "(deftest a (is true))\n(deftest b (is true))\n")
+                               :prompt "seed"})
+      (let [deleted (call! sess "change" {:prompt "a is gone" :tests [{:action "delete" :ns "dn.core-test" :name "a"}]})
+            kept    (call! sess "change" {:prompt "a green test" :tests [{:action "add" :ns "dn.core-test" :source "(deftest c (is true))"}]})]
+        (is (not (re-find #"landed GREEN" deleted)) deleted)
+        (is (re-find #"landed GREEN" kept) kept))
+      (finally (ops/close! sess)
+               (sh/sh "rm" "-rf" dir)))))
+
+(deftest the-shapes-this-store-keeps-refusing-are-repaired
+  (testing "a form named two ways"
+    (is (= {:name "query_source" :arguments {:targets ["a.b/c"]} :repaired {:routed "query_source"}}
+           (tools/remap-arguments "query_source" {:ns "a.b" :name "c"})))
+    (is (= {:name "query_source" :arguments {:targets ["a.b/c"]} :repaired {:routed "query_source"}}
+           (tools/remap-arguments "query_brief" {:targets ["a.b/c"]}))))
+  (testing "query_brief with its own arguments is left alone"
+    (is (= {:name "query_brief" :arguments {:ns "a.b" :name "c"}}
+           (select-keys (tools/remap-arguments "query_brief" {:ns "a.b" :name "c"}) [:name :arguments]))))
+  (testing "a sibling op's key is dropped"
+    (is (= {:name "session_brief" :arguments {} :repaired {:dropped [:tokens]}}
+           (tools/remap-arguments "session_brief" {:tokens 900})))
+    (is (= {:name "query_changes" :arguments {:from "x"} :repaired {:dropped [:limit]}}
+           (tools/remap-arguments "query_changes" {:from "x" :limit 5})))))

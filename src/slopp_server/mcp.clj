@@ -12,7 +12,7 @@
             [clojure.string :as str]
             [cheshire.core :as json]
             [slopp.ops :as ops]
-            [slopp.store.db :as db] [slopp.sync :as sync] [clojure.edn :as edn] [slopp-server.mcp.tools :as tools] [slopp-server.mcp.smells :as smells] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [slopp.webdev.cljs :as cljs] [slopp.rules :as rules] [slopp-server.api.server :as server] [slopp.rules.doctor :as doctor] [slopp.webdev.live :as live] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.screen :as webdev.screen] [slopp.ops.engine :as engine] [slopp.read.orient :as orient] [slopp.store :as store] [rewrite-clj.node :as n] [slopp.edit :as edit] [slopp.read.anticipate :as anticipate] [slopp-server.api.model :as model]))
+            [slopp.store.db :as db] [slopp.sync :as sync] [clojure.edn :as edn] [slopp-server.mcp.tools :as tools] [slopp-server.mcp.smells :as smells] [slopp.ops.branch :as branch] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [slopp.webdev.cljs :as cljs] [slopp.rules :as rules] [slopp-server.api.server :as server] [slopp.rules.doctor :as doctor] [slopp.webdev.live :as live] [slopp.read.history :as history] [slopp.read.graph :as graph] [slopp.webdev.screen :as webdev.screen] [slopp.ops.engine :as engine] [slopp.read.orient :as orient] [slopp.store :as store] [rewrite-clj.node :as n] [slopp.edit :as edit] [slopp.read.anticipate :as anticipate] [slopp-server.api.model :as model] [slopp-server.mcp.runs :as runs]))
 
 ^{:auto-declare "mutual recursion: call-op!, call-op-1!, call-tool!, handle!, http-call!"}
 (declare call-op! call-op-1! call-tool! handle! http-call!)
@@ -931,7 +931,13 @@
           (when-not (and sid claimed (not= sid claimed))
             (.delete f)
             (when sid (swap! session assoc :intent-sid sid))
-            (when (and sid (not (:pinned-agent? @session)))
+            (when (and sid
+                       (not= sid (:agent-id @session))
+                       (or (not (:pinned-agent? @session))
+                           ;; the server's label names a connection, not an agent:
+                           ;; a restart or reconnect gets a new one, and the
+                           ;; guards that ask what THIS agent changed would forget
+                           (str/starts-with? (str (:agent-id @session)) "mcp-")))
               (swap! session assoc :agent-id sid)
               ;; identity settled → the session takes THIS agent's thread.
               ;; It is the first moment it can: the session opened before the
@@ -951,6 +957,7 @@
               ;; hit.
               (swap! session #(-> %
                                   (assoc :pending-intent prompt :last-intent prompt :human-intent prompt)
+                                  (dissoc :no-ask-noted)
                                   (update ::ask (fnil inc 0)))))
             ;; the bundle that rode in WITH this prompt: hold what the
             ;; endpoint stashed, under the ask that just opened
@@ -2090,7 +2097,13 @@
   one; a red done keeps the full report, because there the findings are the
   answer, with its verdict at the top level ([[with-verdict]])."
   [r]
-  (let [f (:findings r)]
+  (let [cap (fn [cs]
+              (if (< 5 (count cs))
+                (conj (vec (take 5 cs)) (symbol (str "and-" (- (count cs) 5) "-more")))
+                cs))
+        r   (cond-> r
+              (:unread-callees r) (update :unread-callees update-vals cap))
+        f   (:findings r)]
     (if-not (and (= :green (:episode-status f))
                  (= :green (:test-status f))
                  (zero? (:lint-errors f 0))
@@ -2109,7 +2122,7 @@
                            (remove (fn [[k v]]
                                      (or (#{:episode-status :test-status :lint-errors :ms :failures
                                             :unloadable-namespaces :external-pending :host-stale
-                                            :http-dangling-route-refs :red-attribution :scope} k)
+                                            :http-dangling-route-refs :red-attribution :scope :phases :rule-ms} k)
                                          (and (coll? v) (empty? v))
                                          (nil? v))))
                            f)
@@ -2250,6 +2263,8 @@
                                                  " fail proves nothing"))}
                                    ;; a tests-only change carrying done/commit closes
                                    ;; too — an expectation fix is often the last write
+                                   (cond-> (every? #(= "delete" (some-> (:action %) clojure.core/name)) tests)
+                                     (dissoc :note))
                                    (close-unit-after-write! session a (boolean (seq went-red))))))))
                   (text! {:error (str "change needs :impl steps — a question is explore;"
                                       " a test you are writing to FIND something out is"
@@ -2442,10 +2457,20 @@
                           ;; that shape a response know those, and none of them
                           ;; is on the path back to here.
                           *response-facts* facts]
-                  (try (with-write-notes! session #(call-tool! session params))
-                       (catch Exception e
-                         (assoc (text! (str "error: " (ex-message e)))
-                                :isError true))))
+                  (let [outcome (runs/in-time!
+                                 session [(:name params) (:arguments params)]
+                                 (fn []
+                                   (try (with-write-notes! session #(call-tool! session params))
+                                        (catch Exception e
+                                          (assoc (text! (str "error: " (ex-message e)))
+                                                 :isError true)))))]
+                    (if-let [run (:running outcome)]
+                      (text! {:running run :tool (:name params)
+                              :note (str "still running here, and nothing is lost: it is not"
+                                         " a failure and it will finish. read {op query_detail id"
+                                         " \"" run "\"} waits for it and returns its answer;"
+                                         " sending the same call again joins this run.")})
+                      (:answer outcome))))
           why   (refusal-text r)
           ;; the EVENTS queued since the last answer — what landed under this
           ;; session, what another session landed on its project — as one
@@ -2717,7 +2742,7 @@
           ;; the plugin's prompt hook captured the user's verbatim ask —
           ;; the turn opens itself (zero-ceremony turns)
           (do (swap! session dissoc :pending-intent)
-              (ops/turn-begin! session :agent ag :intent intent))
+              (ops/turn-begin! session :agent ag :intent intent :human true))
           ;; NAME THE CAUSE. \"no open turn\" alone reads as \"the turn did not
           ;; take\", which sends you to look at turns; the usual real cause is
           ;; that no ask ever arrived FOR THIS STORE. The plugin's prompt hook
@@ -2731,7 +2756,8 @@
           ;; every first write used to be refused and the agent paid two turns
           ;; to open a turn by hand with the same words it had just sent.
           (if-let [p (not-empty (str (:prompt arguments)))]
-            (ops/turn-begin! session :agent ag :intent p)
+            (do (ops/note-no-ask! session)
+                (ops/turn-begin! session :agent ag :intent p))
             (throw (ex-info (str "no open turn for agent " ag
                                  " — a write carrying `prompt` opens its own turn;"
                                  " otherwise call turn_begin {intent: <the user's"
@@ -2809,7 +2835,8 @@
                                         (query/query-project session :since (:since a)
                                                           :detail (:detail a))))
       "query_search" (text! (query/query-search session (:pattern a)
-                                                  :limit (or (:limit a) 30)))
+                                                  :limit (or (:limit a) 30)
+                                                  :ns (:ns a)))
       ("query_batch" "explore")
       ;; several READ questions, one call — THE question verb (explore;
       ;; query_batch is its compat alias). Measured on every eval cell of
@@ -2894,12 +2921,24 @@
                            ;; withholding was paid for twice, and the tool that
                            ;; minted this id is the one it should be charged to
                            (note-response! {:detail-asked (:id a)})
-                           (if-let [full (get-in @session [::spool :entries (:id a)])]
-                             ;; the retrieval path must NOT re-trim its own payload
-                             {:content [{:type "text" :text full}]}
-                             (text! {:error (str "no spooled response " (:id a)
-                                                 " — the spool keeps the last "
-                                                 spool-cap " trimmed responses")})))
+                           (if (str/starts-with? (str (:id a)) "run-")
+                             ;; a call that outran the wire's wait: its answer is a
+                             ;; withheld response like any other
+                             (let [o (runs/status session (:id a) 40000)]
+                               (cond
+                                 (nil? o)     (text! {:error (str "no run " (:id a) " on this session: a run"
+                                                                  " lives on the session that started it, and only"
+                                                                  " the newest finished ones are kept. history"
+                                                                  " {op query_changes} says what landed.")})
+                                 (:running o) (text! {:running (:running o)
+                                                      :note "still running; query_detail again"})
+                                 :else        (:answer o)))
+                             (if-let [full (get-in @session [::spool :entries (:id a)])]
+                               ;; the retrieval path must NOT re-trim its own payload
+                               {:content [{:type "text" :text full}]}
+                               (text! {:error (str "no spooled response " (:id a)
+                                                   " — the spool keeps the last "
+                                                   spool-cap " trimmed responses")}))))
       "query_brief" (text! (told! session name a (query/query-brief session (sym :ns) (sym :name))))
       "orient" (text! (told! session name a
                             (orient/orient-map session

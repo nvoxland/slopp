@@ -767,7 +767,11 @@
   compaction, a background summary). Reported rather than distributed: they
   were paid for, and handing them to a neighbouring ask would be a guess
   dressed as a measurement. `:undated` counts requests carrying no timestamp
-  at all, which no rule can place. Both are absent when there are none."
+  at all, which no rule can place. Both are absent when there are none.
+
+  `:telemetry` says how many asks came after the last request the store has, and
+  when that was. The harness posts requests, so an exporter that stopped leaves
+  every later ask reading 0 requests, which looks like a measurement of nothing."
   [store & {:keys [since otel limit] :or {limit 20}}]
   (let [deltas  (:deltas store)
         window  (if since (rest (drop-while #(not= since (:id %)) deltas)) deltas)
@@ -824,7 +828,15 @@
                             (:ms a) (assoc :ms (- (:ms a) (:at a)))
                             (seq rs) (merge (dissoc (block rs) :requests)))))
                       asks)
-        left    (mapv second (get by-ask nil []))]
+        left    (mapv second (get by-ask nil []))
+        last-at (when (seq dated) (apply max (map first dated)))
+        silent  (filterv #(or (nil? last-at) (> (:at %) last-at)) asks)]
     (cond-> {:by :ask :rows (vec (take limit (reverse rows)))}
       (seq left)     (assoc :unattributed (block left))
+      (seq silent)   (assoc :telemetry
+                            (cond-> {:asks-after (count silent)
+                                     :note (str (count silent) " ask(s) came after the last request"
+                                                " this store received, so their 0 requests mean"
+                                                " telemetry stopped, not that they cost nothing")}
+                              last-at (assoc :last-request-at last-at)))
       (pos? undated) (assoc :undated undated))))

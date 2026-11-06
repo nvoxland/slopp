@@ -628,7 +628,7 @@
     {:namespaces         (count (:namespaces (:store @reader)))
      :last-commit        (:description (first (db/newest-commit-markers conn line 1)))
      :sid                sid
-     :recent-asks        (keep :intent (db/recent-markers conn line :turn-begin 8))
+     :recent-asks        (hooks/human-asks (db/recent-markers conn line :turn-begin 8))
      :standing-verdict   (when st (or (#{:red :green} (:status st)) :recorded))
      :last-done-failures (get-in (db/last-marker conn line :done) [:findings :failures])}))
 

@@ -182,3 +182,12 @@
       (is (= 3 (count (:rows (query/query-turn-cost session :by "ask")))))
       (is (= 1 (count (:rows (query/query-turn-cost session :by "ask" :limit 1))))
           "the default of 20 was the only page anyone could ask for"))))
+
+(deftest search-narrows-to-one-namespace
+  (let [st   (-> (store/empty-store)
+                 (store/ingest 'sr.a "(ns sr.a)\n(defn f [x] (inc x))")
+                 (store/ingest 'sr.b "(ns sr.b)\n(defn g [x] (inc x))"))
+        sess (atom {:store st})]
+    (is (= '[sr.a sr.b] (mapv :ns (query/query-search sess "inc x"))))
+    (is (= '[sr.b] (mapv :ns (query/query-search sess "inc x" :ns "sr.b"))))
+    (is (= '[sr.a] (mapv :ns (query/query-search sess "inc x" :ns 'sr.a))))))

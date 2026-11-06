@@ -827,3 +827,21 @@
     (testing "and a handed-in batch on its own is unaffected"
       (let [r (telemetry/cost-by-model {:deltas []} :otel [batch])]
         (is (= 2 (:requests (first (:rows r)))) (pr-str r))))))
+
+(deftest cost-by-ask-says-when-telemetry-stopped
+  (let [req   (fn [ms] {:at-ns (str (* 1000000 ms)) :prompt "p" :input 1 :output 1
+                        :cache-read 0 :cache-creation 0 :context 1 :cost-usd 0.1})
+        store {:deltas [{:op :turn-begin :id "d1" :at 1000 :agent "a" :intent "measured"}
+                        {:op :turn-begin :id "d2" :at 3000 :agent "a" :intent "after"}
+                        {:op :turn-begin :id "d3" :at 4000 :agent "a" :intent "also after"}]}]
+    (testing "asks past the last request are counted and the time is named"
+      (let [{:keys [telemetry]} (telemetry/cost-by-ask store :otel [{:requests [(req 1500)]}])]
+        (is (= 2 (:asks-after telemetry)) (pr-str telemetry))
+        (is (= 1500 (:last-request-at telemetry)) (pr-str telemetry))
+        (is (re-find #"not that they cost nothing" (:note telemetry)))))
+    (testing "no telemetry at all covers every ask"
+      (let [{:keys [telemetry]} (telemetry/cost-by-ask store)]
+        (is (= 3 (:asks-after telemetry)))
+        (is (nil? (:last-request-at telemetry)))))
+    (testing "telemetry reaching the newest ask says nothing"
+      (is (nil? (:telemetry (telemetry/cost-by-ask store :otel [{:requests [(req 4500)]}])))))))

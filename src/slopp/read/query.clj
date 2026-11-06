@@ -78,11 +78,11 @@
   read the form to learn WHAT, and eval10 measured 6–7 searches per lifetime
   cell each followed by a `query_source` of the forms the hits named. The
   card answers the usual next question in the same call."
-  [session pattern & {:keys [limit] :or {limit 30}}]
+  [session pattern & {:keys [limit ns] :or {limit 30}}]
   (try
     (let [re (re-pattern pattern)
           st (:store @session)]
-      (->> (for [ns-sym (sort (keys (:namespaces st)))
+      (->> (for [ns-sym (if ns [(symbol (str ns))] (sort (keys (:namespaces st))))
                  e      (store/forms st ns-sym)
                  :let   [lines (filter #(re-find re %)
                                        (str/split-lines (n/string (:node e))))]
@@ -432,7 +432,12 @@
     (if (:error parsed)
       {:error (str "query_store takes ONE (fn [store] ...) form — "
                    (:error parsed))}
-      (let [sx (try (n/sexpr (:node parsed)) (catch Exception _ nil))]
+      (let [sx (let [form (try (n/sexpr (:node parsed)) (catch Exception _ nil))]
+                 ;; a bare expression naming `store` admits one reading
+                 (if (and (not (and (seq? form) (contains? #{'fn 'fn*} (first form))))
+                          (some #{'store} (tree-seq coll? seq form)))
+                   (list 'fn '[store] form)
+                   form))]
         (cond
           (not (and (seq? sx) (contains? #{'fn 'fn*} (first sx))))
           {:error "query_store takes ONE (fn [store] ...) form — got something else"}

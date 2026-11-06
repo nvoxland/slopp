@@ -743,10 +743,15 @@
   [st* {:keys [key severity]}]
   (not= :off (gates/rule-severity st* key severity)))
 
-(defn- run-checks
+(defn- run-checks!
   "Run `entries`' `:check`s over `changed` and return `{:key findings}` for the
   ones that FIRED (non-empty), each filtered through its declared `:applies-to`
-  (`in-scope`).
+  (`in-scope`). Rules that took 100 ms or more are left on the session under
+  `::rule-ms` (`{key millis}`), so a slow done can name the rule that made it so.
+
+  A check held as a var whose name has no `!` only reads the store value, so
+  those run at the same time; a `!` check uses the image or writes, and those
+  and any bare fn run one at a time, afterwards.
 
   The whole difference between the episode run and the whole-store sweep is
   WHICH entries and WHICH form ids; every other decision — scope filtering,
@@ -755,11 +760,21 @@
   `:sweep` for the sweep), because which rules ran is something each of them
   has to REPORT and not merely apply."
   [session st* changed entries]
-  (into {}
-        (keep (fn [{:keys [key check applies-to]}]
-                (let [r (in-scope (or applies-to :both) (check session st* changed))]
-                  (when (seq r) [key r]))))
-        entries))
+  (let [run-one (fn [{:keys [key check applies-to]}]
+                  (let [t0 (System/currentTimeMillis)
+                        r  (in-scope (or applies-to :both) (check session st* changed))]
+                    {:key key :found r :ms (- (System/currentTimeMillis) t0)}))
+        reads?  (fn [{:keys [check]}]
+                  (and (var? check) (not (str/ends-with? (str (:name (meta check))) "!"))))
+        runs    (into (try (vec (pmap run-one (filter reads? entries)))
+                           (catch java.util.concurrent.ExecutionException e (throw (.getCause e))))
+                      (mapv run-one (remove reads? entries)))]
+    (when session
+      (swap! session assoc ::rule-ms
+             (into {} (for [{:keys [key ms]} runs :when (<= 100 ms)] [key ms]))))
+    (into {}
+          (keep (fn [{:keys [key found]}] (when (seq found) [key found])))
+          runs)))
 
 (defn stored-name-check
   "Done-advisory: a form's STORED `:name` disagrees with the name its own
@@ -1843,7 +1858,7 @@
                                       :sources (db/sources-at conn line (:id d) changed)})
                              (db/recent-markers conn line :done 13)))
                 st*)]
-    (run-checks session st* changed (filter #(enabled? st* %) done-advisories))))
+    (run-checks! session st* changed (filter #(enabled? st* %) done-advisories))))
 
 (defn status-affecting-fired?
   "True when an advisory whose EFFECTIVE severity is `:error` produced a
@@ -2034,4 +2049,4 @@
                     (sort (keys (:namespaces st*))))]
     (assoc plan
            :forms    (count ids)
-           :findings (run-checks session st* ids run))))
+           :findings (run-checks! session st* ids run))))

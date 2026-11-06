@@ -1118,6 +1118,12 @@
      [:requests {:doc "how many requests could not be attributed"} :int]
      [:prompts {:doc "their prompt ids, so they can be chased"} [:sequential :string]]
      [:model {:doc "what they cost, folded the same way a by=model row is"} cost-model-block]]]
+   [:telemetry {:optional true
+                :doc "by=ask only: asks past the last request this store received, whose 0 means not measured"}
+    [:map
+     [:asks-after {:doc "how many asks came after it"} :int]
+     [:last-request-at {:optional true :doc "when the last request was, ms; absent when none ever arrived"} :int]
+     [:note {:doc "the same, in a sentence"} :string]]]
    [:undated {:optional true
               :doc (str "by=ask only: HOW MANY requests carried no timestamp at all,"
                         " which no rule can place in a bracket. A count rather than a"

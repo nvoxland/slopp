@@ -198,3 +198,23 @@
     (is (false? (on? {:op :replace})))
     (is (false? (on? {:op :done})))
     (is (false? (on? nil)) "an empty line has no commit point to stand on")))
+
+(deftest ^:external done-runs-the-suite-and-the-external-slice-at-the-same-time
+  (let [sess    (external/open!)
+        started (promise)
+        seen    (atom nil)
+        verify  engine/run-verification!]
+    (try
+      (ops/ingest! sess 'dpar.core
+                   (str "(ns dpar.core (:require [clojure.test :refer [deftest is]]))\n"
+                        "(defn f \"F.\" [] 1)\n"
+                        "(deftest f-t (is (= 1 (f))))\n"))
+      (with-redefs [engine/impacted-external (fn [_ _ _] ['dpar.core/f-t])
+                    external/external-test-run! (fn [_ & _] (deliver started true) {:status :green :ran 1 :failures 0 :errors 0})
+                    engine/run-verification! (fn [& args]
+                                               (reset! seen (deref started 20000 :not-started))
+                                               (apply verify args))]
+        (let [r (external/done! sess :label "both" :agent "a")]
+          (is (true? @seen) "the external slice was running while the in-image suite ran")
+          (is (= :green (:status (:external r))) (pr-str (:external r)))))
+      (finally (ops/close! sess)))))

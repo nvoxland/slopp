@@ -27,7 +27,8 @@
     :description "Regex search across all store source; ONE hit per matching form, and the hit is the form's card: {:ns :form :line :sig :doc [:matches n]} — the signature and doc line say what a hit IS without a read. Search before reading."
     :inputSchema {:type "object"
                   :properties {:pattern {:type "string"}
-                               :limit {:type "integer"}}
+                               :limit {:type "integer"}
+                               :ns {:type "string"}}
                   :required ["pattern"]}}
    {:name "query_flow"
     :description "HOW forms connect, with the bodies on the way — the question a whole-namespace read stands in for. {from \"ns/a\" to \"ns/b\"}: the call path between two forms, each form on it whole and versioned (:v), the forms it calls off the path as cards, :edges between steps; an unreachable pair says :unreachable. {on \"ns/x\" reach 2}: callers and callees around one form, bodies one hop out, cards beyond. Across namespaces. What it sends enters the ledger — a later read of the same form is a reference."
@@ -1153,6 +1154,20 @@ CLI:     every op, from a shell, routed to THIS running server (fast):
            {:name name
             :arguments (assoc (apply dissoc a write-keys) :impl [top])
             :repaired {:moved-into-impl (vec (keys top))}}
+
+           (and (= "query_source" name) (:ns a) (:name a) (nil? (:targets a)))
+           {:name "query_source"
+            :arguments (-> (dissoc a :ns :name) (assoc :targets [(str (:ns a) "/" (:name a))]))
+            :repaired {:routed "query_source"}}
+
+           (and (= "query_brief" name) (:targets a))
+           {:name "query_source" :arguments a :repaired {:routed "query_source"}}
+
+           (and (= "session_brief" name) (contains? a :tokens))
+           {:name name :arguments (dissoc a :tokens) :repaired {:dropped [:tokens]}}
+
+           (and (= "query_changes" name) (contains? a :limit) (nil? (:ns a)) (nil? (:name a)))
+           {:name name :arguments (dissoc a :limit) :repaired {:dropped [:limit]}}
 
            (and (= "query_slice" name) (:targets a))
            (let [keep    (select-keys a [:targets :full :resend :prompt :agent :verbose])

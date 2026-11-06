@@ -1071,3 +1071,9 @@
       (is (= [:b] (span [(w :a) (done :d1 :none) (w :b)]))))
     (testing "with no done in the window, all of it"
       (is (= [:a :b] (span [(w :a) (w :b)]))))))
+
+(deftest a-turn-marker-says-when-its-intent-is-the-agents-own-words
+  (let [begin (fn [& opts] (second (apply store/record-turn (store/empty-store) :turn-begin :intent "x" opts)))]
+    (is (true? (:agent-worded (begin :agent-worded true))))
+    (is (not (contains? (begin) :agent-worded)))
+    (is (not (contains? (begin :agent-worded false) :agent-worded)))))

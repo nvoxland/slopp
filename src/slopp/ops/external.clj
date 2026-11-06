@@ -1370,9 +1370,9 @@ client-deps (merge (:client-deps st) (:client provided))
                 ;; correctly. Small sets stay serial: sharding four tests buys
                 ;; nothing and costs three extra JVM boots.
                 only-par (when (and (seq only) (nil? ns) (> (count only) 8))
-                           (testrun/auto-parallel
-                            (count (distinct (keep #(namespace (symbol (str %))) only)))
-                            (.availableProcessors (Runtime/getRuntime))))
+                           (min 3 (testrun/auto-parallel
+                                   (count only)
+                                   (.availableProcessors (Runtime/getRuntime)))))
                 only-groups (when (and only-par (> only-par 1))
                               (testrun/only-shards (:store @session) only only-par))
                 ;; narrowed runs need the filter-free alias: the :test alias bakes
@@ -1633,699 +1633,6 @@ client-deps (merge (:client-deps st) (:client provided))
                      (store/suffix-touched
                       (remove :merged-from (db/unlanded-deltas conn line)))))]
     (vec (distinct (concat edited held)))))
-
-(defn ^:export done!
-  "The DONE-POINT: call when you believe your changes are complete. Marks
-  the episode boundary and runs the automatic done-processing — normalize
-  every form changed this episode (conservative behavior-preserving
-  rewrites), clean up safe (declare)s, kondo-lint every touched namespace,
-  and RUN THE AFFECTED TESTS for everything the episode touched (no
-  test_run needed first — mid-episode runs are for spot-checks). Unused
-  PUBLIC surface in touched namespaces GATES here (error-grade): delete it
-  or mark the name ^:unused-ok; a stale marker (the var is called now)
-  fails symmetrically. Findings ride the boundary delta so the next
-  session's brief surfaces anything left red.
-
-  Findings carry TWO verdicts. `:test-status` grades the STORE and is what
-  commit_point and session_brief read. `:episode-status` grades this
-  episode's own work and is what the LAND turns on, so a store left red by
-  another agent no longer holds this thread — `:red-attribution` names
-  which failing tests are `:mine`, `:foreign`, `:untraced` or `:unseen`,
-  and only `:foreign` counts as innocence.
-
-  Returns {:done id :normalized n :rewrites [{:form :applied}]
-  :lint [...] :test s :findings {...}}."
-  [session & {:keys [label agent external?] :or {external? true}}]
-  (let [t0       (System/currentTimeMillis)
-        st       (:store @session)
-        ;; nothing written since the last done → no unit of work to bound, so
-        ;; no boundary is recorded and its verdict still stands. See
-        ;; [[unchanged-since-done]]: three callers each reasonably ask for a
-        ;; done and none can see that the others just did. Everything below is
-        ;; already a no-op in this case (`changed` is empty, so normalize,
-        ;; declare/require hygiene, the suite and the external slice all skip),
-        ;; which is why the guard only has to stop the RECORDING.
-        standing (unchanged-since-done st agent)
-        changed  (when-not standing
-                   (->> ;; mine, and what my CHILD threads landed here
-                        ;; exactly what the land carries: every write on this line
-                        ;; by anyone, and nothing already on the branch, whose red
-                        ;; is somebody else's
-                        (engine/land-deltas session st)
-                        (filter #(contains? history/content-ops (:op %)))
-                        (mapcat history/delta-fids)
-                        distinct
-                        (filter #(store/ns-of-form-id st %))))
-        rewrites (done/normalize-rewrites changed st)
-        _        (done/apply-normalization! rewrites st label agent  session)
-        ;; automatic declare hygiene: the pipeline OWNS declares (auto-inserted
-        ;; for a genuine cycle); once the cycle breaks the declare is stale —
-        ;; remove it here. SILENT: the agent never manages declares, so this
-        ;; runs for effect and is not reported.
-        _
-        (doseq [ns* (done/touched-namespaces session (:store @session) changed)]
-          (ops/fix-declares! session ns*
-                         :prompt (or label "done declare hygiene")
-                         :agent agent))
-        ;; require hygiene, REPORTED (unlike declares, which the agent never
-        ;; sees): try dropping each unused require — a genuinely dead one goes,
-        ;; a load-bearing one is restored marked ^:side-effect. The agent never
-        ;; manages unused requires; done does.
-        pruned-reqs
-        (into (sorted-map)
-              (for [ns* (done/touched-namespaces session (:store @session) changed)
-                    :let [pr (ops/prune-requires! session ns*
-                                                  :prompt (or label "done require hygiene")
-                                                  :agent agent)]
-                    :when (or (seq (:pruned pr)) (seq (:kept pr)))]
-                [ns* pr]))
-        ;; kondo lint over every namespace touched since the last done-point —
-        ;; carried mid-episode errors (stale callers) get re-checked HARD here
-        lint (done/anchored-lint session (done/touched-namespaces session (:store @session) changed))
-        ;; the unused-public GATE: unmarked dead surface — and stale
-        ;; ^:unused-ok markers — join as ERROR-grade lint (never demoted)
-        unused-rep (let [st* (:store @session)]
-                     ;; episode-scoped, like the lint scan: a form elsewhere
-                     ;; can become dead because THIS episode deleted its last
-                     ;; caller, so the store-wide sweep is real — it is just
-                     ;; `full_check`'s job, not every done point's.
-                     (read.modules/unused-report
-                      st* (done/touched-namespaces session st* changed)))
-        lint (done/with-unused-gate lint unused-rep)
-        ;; NEW warnings (on forms this episode touched) report in full;
-        ;; CARRIED ones (pre-existing, untouched forms) compress to a count —
-        ;; re-listing them at every done buries real findings. Errors and
-        ;; unattributed rows never demote.
-        touched-q (into #{}
-                        (keep (fn [fid]
-                                (let [st* (:store @session)]
-                                  (when-let [e (store/form-by-id st* fid)]
-                                    (symbol (str (store/ns-of-form-id st* fid))
-                                            (str (or (:name e) (:id e))))))))
-                        changed)
-        loud?     (fn [f] (or (= :error (:level f))
-                              (nil? (:form f))
-                              (contains? touched-q (:form f))))
-        lint-new  (vec (filter loud? lint))
-        carried   (vec (remove loud? lint))
-        ;; THE done-point verification: the episode's whole working set —
-        ;; independent of whether normalize rewrote anything
-        summary
-        (when (seq changed)
-          (let [st*      (:store @session)
-                qsyms    (into #{}
-                               (keep (fn [fid]
-                                       (when-let [e (store/form-by-id st* fid)]
-                                         (symbol (str (store/ns-of-form-id st* fid))
-                                                 (str (or (:name e) (:id e)))))))
-                               changed)
-                ;; the ENTIRE in-image suite, not the impacted slice: "done
-                ;; means done". Impacted-only answered the weaker question
-                ;; "does what I touched still work" — and impacted SELECTION
-                ;; was itself a source of misses (one untraced form used to
-                ;; collapse the whole narrowing, on 54.4% of real episodes).
-                ;; Running everything retires that machinery here.
-                ;;
-                ;; The full ISOLATED tier is still skipped (it spawns JVMs)
-                ;; and the findings SAY so, so running it stays a visible
-                ;; choice rather than a silent omission.
-                ;; minus what the ORACLE could not load: the tracer walks ns-interns,
-                ;; which throws on a namespace the image cannot hold, and "done
-                ;; means done" must not mean dying on a namespace the boot
-                ;; already reported. Excluded AND reported — the finding rides
-                ;; below as :unloadable-namespaces, the :external-pending
-                ;; pattern, never a silent skip.
-                unloadable (do
-                             ;; the cold-load question, asked of the image: the
-                             ;; touched namespaces and their dependents reload
-                             ;; WHOLE, so a derived value a form-level hot-load
-                             ;; left as it was is re-evaluated here — before the
-                             ;; suite, which would otherwise grade a namespace
-                             ;; no fresh process can load
-                             (engine/reload-namespaces!
-                              session (done/touched-namespaces session st* changed))
-                             (mapv :ns (:image-load-failures @session)))
-                main-ns  (vec (sort (remove (set unloadable)
-                                            (keys (:namespaces st*)))))
-                ;; nil affected => every test in main-ns; :edited still powers
-                ;; the red :implicated correlation
-                s        (if (:suite-trusted @session)
-                           ;; a pull of commits that each passed this suite,
-                           ;; onto no local work: nothing new could be red
-                           {:test 0 :pass 0 :fail 0 :error 0 :type :summary :suite-trusted true}
-                           (engine/run-verification! session main-ns nil
-                                            ;; against the whole THREAD's edits, not this
-                                            ;; episode's: the land is the thread, and a
-                                            ;; red from an earlier episode here is mine
-                                            :edited (thread-edited session st* qsyms)
-                                            :include-integration? true
-                                            :boundary? true))]  ; M5
-            (engine/commit-appended! session
-                              #(store/record-verification % main-ns s) [])
-            s))
-        ;; the tier is an implementation detail: ^:external tests the episode's
-        ;; changes reach run in the EXTERNAL tier here — capped, and a deferral
-        ;; is REPORTED (external-pending), never silent.
-        ;;
-        ;; #127: selected from THE TRACE, like the in-image half above, instead
-        ;; of re-derived from the require-closure. That closure selects a median
-        ;; 43 of 46 external test nses (measured over every source ns
-        ;; 2026-07-17) — it never narrowed, it just always blew the cap, so 84.6%
-        ;; of changes deferred and the tier effectively never ran here. The
-        ;; evidence was already computed a few lines up and thrown away.
-        iso (when (and external? (seq changed) (not (:suite-trusted @session)))
-              (let [st*      (:store @session)
-                    iso-only (engine/impacted-external session st* changed)]
-                ;; #132: impacted-external is never silent — an untraced form expands
-                ;; to its own namespace's reach — so the old closure fallback is
-                ;; gone with the collapse that needed it. Run exactly the named
-                ;; tests. A :only run is one serial JVM (it never shards), so the
-                ;; cap is on TESTS: p50 is 12 covering tests and a cap of 40 fits
-                ;; ~71% of forms, while the tail (p90 = 218) is the core-form
-                ;; case that honestly wants the whole suite anyway.
-                ;; The cap was 40 because a narrowed run could not shard — :only forced
-                ;; one serial JVM, so a large impacted set cost MORE than the
-                ;; sharded full suite and deferring was the least-bad option.
-                ;; `only-shards` removed that, so the number is re-derived from
-                ;; what deferrals actually looked like: measured over 40 recent
-                ;; dones, 15 deferred, six of them between 52 and 136 tests —
-                ;; sets the trace map had picked out correctly and nothing ran.
-                ;; 150 converts all six. Past that the impacted set approaches
-                ;; the whole suite (the other nine were 339–394 of 409), where
-                ;; narrowing saves nothing and full_check is the honest answer.
-                ;; A content-keyed cache lived here for one day and was REMOVED by its
-                ;; own gate (s19): replayed over the journal, a done-grain skip
-                ;; would have avoided 5 runs of 228 (2.2%) — 12.1% of tests, but a
-                ;; run whose tests are only partly skipped still boots the JVM that
-                ;; is this tier's whole cost. The 44.6% that authorized building it
-                ;; was the WHOLE-SUITE grain, which stays uncached on purpose. The
-                ;; evidence remains recorded (`:ns-status` on every observation,
-                ;; `slopp.lab.verdicts/reuse-by-grain`), so this is re-measurable
-                ;; rather than folklore — rebuild it if a store's numbers differ.
-                (when (seq iso-only)
-                  (if (<= (count iso-only) external-slice-cap)
-                    (external-test-run! session :only iso-only)
-                    {:pending {:count (count iso-only)
-                               :tests (vec (take 5 iso-only))
-                               :note  (str "NO ^:external test ran this time — these "
-                                           (count iso-only) " impacted ones were deferred"
-                                           " (most of the external suite; narrowing saves"
-                                           " nothing), so the green above is the in-image"
-                                           " suite only. full_check is the external evidence"
-                                           " for a change this broad.")}}))))
-        findings (let [lint-errors (count (filter #(= :error (:level %)) lint))
-      lint-warns  (vec (for [f lint :when (= :warning (:level f))]
-                         (select-keys f [:form :type :message])))
-      failures    (+ (:fail summary 0) (:error summary 0)
-                     (:failures iso 0) (:errors iso 0))
-      iso-red?    (contains? #{:red :error} (:status iso))
-      st*         (:store @session)
-      ;; the done-time advisory REGISTRY (D9 rule-registry, done grain): schema
-      ;; drift (status-affecting), key typos + contract breakage (advisory). A
-      ;; new done finding registers in slopp.rules/done-advisories — ONE
-      ;; entry — not by hand-wiring a binding, a clause, and a status term here.
-      advisories  (rules/run-done-advisories! session st* changed)
-      ;; CARRIED rows — the same finding the previous done already
-      ;; reported, teaching and all — compress to a count per rule. A
-      ;; standing advisory (a seed namespace with no purpose, a README
-      ;; the human branch disagrees on) otherwise rides every done of a
-      ;; lifetime at 300 chars a row, and a model that obeys pays a
-      ;; change and a second done per step (eval24 opus). New rows teach.
-      prev-adv    (when-let [conn (:db @session)]
-                    (some-> (db/last-marker conn (engine/session-line session) :done)
-                            :findings))
-      carried-key (fn [row] (dissoc row :teach))
-      carried     (into {}
-                        (keep (fn [[k rows]]
-                                (when (and (sequential? rows) (sequential? (get prev-adv k)))
-                                  (let [old (into #{} (map carried-key) (get prev-adv k))
-                                        ;; a row that holds the landing is never
-                                        ;; carried: repeating it must keep holding,
-                                        ;; and keep saying what is wrong
-                                        n   (count (filter #(and (old (carried-key %))
-                                                                 (not (rules/status-affecting-fired? st* {k [%]})))
-                                                       rows))]
-                                    (when (pos? n) [k n])))))
-                        advisories)
-      advisories  (into {}
-                        (keep (fn [[k rows]]
-                                (if (contains? carried k)
-                                  (let [old  (into #{} (map carried-key) (get prev-adv k))
-                                        kept (vec (remove #(and (old (carried-key %))
-                                                                (not (rules/status-affecting-fired? st* {k [%]})))
-                                                          rows))]
-                                    (when (seq kept) [k kept]))
-                                  [k rows])))
-                        advisories)
-      advisory-red? (rules/status-affecting-fired? st* advisories)
-      ;; WHOSE red is this? `implicate` splits the failing tests three ways
-      ;; and only :foreign is evidence of innocence — :untraced and :unseen
-      ;; are the two ways of having no evidence at all, and both leave the
-      ;; red this episode's problem. Anything red in the external slice is
-      ;; this episode's by construction: those tests were SELECTED as the
-      ;; ones its changes impact.
-      attribution (engine/attribute-unloadable session (engine/red-attribution summary))
-      foreign-red?
-      (boolean (and attribution
-                    (seq (:foreign attribution))
-                    (not (:mine attribution))
-                    (not (:untraced attribution))
-                    (not (:unseen attribution))
-                    (not iso-red?)
-                    (zero? (+ (:failures iso 0) (:errors iso 0)))))
-      ;; the STORE's verdict — what commit_point and session_brief read
-      store-red?   (or (pos? failures) iso-red? (pos? lint-errors) advisory-red?
-                       ;; a namespace no fresh process can load: the store cannot
-                       ;; ship, whoever left it so
-                       (seq (:image-load-failures @session))
-                       ;; and a dev instance that could not boot from it: the
-                       ;; cold oracle's answer, remembered until it boots
-                       (some? (app-boot-failure session)))
-      ;; THIS EPISODE's verdict — what the land reads. It differs from the
-      ;; store's exactly when the store is red for reasons that provably
-      ;; exercise nothing this episode touched. Lint, dead surface and the
-      ;; advisories are episode-scoped already, so they are mine by
-      ;; construction and stay on this side.
-      episode-red? (or (and (pos? failures) (not foreign-red?))
-                       iso-red? (pos? lint-errors) advisory-red?
-                       ;; and THIS episode's when its own reload broke one —
-                       ;; a namespace it touched, or one that requires it
-                       (seq (:slopp.ops.engine/reload-failures @session)))
-      nothing-judged? (and (nil? summary) (nil? iso) (zero? lint-errors)
-                           ;; a delete-only episode has no form left to run a
-                           ;; suite for, but it DID judge its namespaces above
-                           (empty? (done/touched-namespaces session st* changed)))
-      missing-doc (vec (sort (distinct
-                              (keep (fn [fid]
-                                      (when-let [e (store/form-by-id st* fid)]
-                                        (:var (edit.modules/missing-doc-warning
-                                               st*
-                                               (store/ns-of-form-id st* fid)
-                                               (:name e)))))
-                                    changed))))
-      ;; the same nag-where-you-work grain, one level up: a namespace the
-      ;; episode touched that never says what it is FOR. Whole-store is
-      ;; review_scan's question, not this one's.
-      ]
-  ;; TWO verdicts, because a done answers two questions that are not the
-  ;; same question. :test-status grades the STORE — commit_point and
-  ;; session_brief read it, and a red store must not take a commit point.
-  ;; :episode-status grades THIS EPISODE's work, and the land reads it.
-  ;; They differ exactly when the store is red for reasons that provably
-  ;; exercise nothing this episode touched, which is the case that used to
-  ;; freeze every agent's thread behind one agent's red.
-  ;;
-  ;; Lint errors — which INCLUDE dead public surface, folded in as ERROR
-  ;; rows by with-unused-gate — count toward BOTH: they are part of "is this
-  ;; codebase good?", and they are episode-scoped, so they are also this
-  ;; episode's. They were absent here while commit-point! kept its own
-  ;; dead-surface scan; with that removed, omitting them let a store with
-  ;; dead surface commit-point green.
-  ;;
-  ;; :none is judged AFTER red, never before it. An error-grade finding that
-  ;; fires on a DELTA rather than on code — tier-governance,
-  ;; http-dangling-route-refs — can be the only thing that happened in an
-  ;; episode, and while :none came first it swallowed exactly those.
-  (cond-> {:test-status    (cond store-red?      :red
-                                 nothing-judged? :none
-                                 :else           :green)
-           :episode-status (cond episode-red?    :red
-                                 nothing-judged? :none
-                                 :else           :green)
-           :failures    failures
-           :lint-errors lint-errors
-           ;; what the oracle could not load and therefore could not judge —
-           ;; subtracted from the suite scope above, REPORTED here. A boot
-           ;; failure names a store invalidated from OUTSIDE (a framework
-           ;; rename, a dep bump, a platform declaration); the fix is one
-           ;; edit to the named namespace, which the write path now verifies
-           ;; against its POST-edit state.
-           :unloadable-namespaces (vec (:image-load-failures @session))
-           ;; the app image — the dev instance — is booted by a process that
-           ;; has never seen the store: what it could not load is the
-           ;; cold-load verdict, and it is the store's red until it boots
-           :app-boot-failure (app-boot-failure session)
-           ;; done runs the WHOLE in-image suite but not the full external
-           ;; tier. Say so EVERY time: an unstated omission reads as coverage,
-           ;; and that is how a green status comes to mean less than the agent
-           ;; thinks it does.
-           ;; done is EPISODE-scoped: the whole in-image suite plus impacted
-           ;; ^:external tests, but lint and dead-surface cover only what this
-           ;; episode touched, and the full external + integration tiers do
-           ;; not run. Say so EVERY time: an unstated omission reads as
-           ;; coverage, and that is how a green status comes to mean less than
-           ;; the agent thinks it does.
-           ;; a KEYWORD, not the paragraph. The scope was 600 characters of
-           ;; teaching on every done — 2,062 chars average result, measured —
-           ;; and read carefully twice in a session. The teaching lives in the
-           ;; `done` tool description now (read once); the fact rides here.
-           :scope :episode}
-    ;; ADVISORY, and named as such: kondo findings slopp's config
-    ;; deliberately does not block on, because each is routinely true of a
-    ;; form mid-edit. Listed so the agent can judge them, never counted.
-    ;; whose red, named: {:mine :foreign :untraced :unseen}. Present
-    ;; whenever anything is red, because the split is what makes
-    ;; :episode-status auditable rather than something to take on trust.
-    attribution       (assoc :red-attribution attribution)
-    (seq lint-warns)  (assoc :lint-warnings lint-warns)
-    (:pending iso)    (assoc :external-pending (:pending iso))
-    (seq missing-doc) (assoc :missing-doc missing-doc)
-    
-    (seq advisories)  (merge advisories)
-    (seq carried)     (assoc :carried-advisories carried)
-    (seq (:unused unused-rep)) (assoc :unused-public (:unused unused-rep))
-    (seq (:stale unused-rep))  (assoc :stale-unused-ok (:stale unused-rep))
-    ;; friction #10: the host-currency record existed and only ever reached
-    ;; session_brief — an orientation surface read once a session — so a
-    ;; verdict produced by a process running superseded code said nothing
-    ;; about it, and the investigation that followed eliminated four correct
-    ;; mechanisms in rt first. Nil unless there is genuinely something to
-    ;; doubt, so it never becomes noise the reader learns to skip.
-    (host-warning-now session st*) (assoc :host-stale (host-warning-now session st*))
-    ;; what the done-point COST, persisted on the boundary delta. done is the
-    ;; most frequently called verdict, so its cost dominates by repetition
-    ;; rather than by any single call being slow — a product the log could
-    ;; not compute while no delta carried a duration.
-    true (assoc :ms (- (System/currentTimeMillis) t0))))
-        cid (if standing
-              (:done standing)
-              (let [v (volatile! nil)]
-                (engine/commit-appended! session
-                                  (fn [base]
-                                    (let [[st2 c] (store/record-done base label
-                                                                     :agent agent
-                                                                     :findings findings)]
-                                      (vreset! v c)
-                                      st2))
-                                  [])
-                (swap! session assoc :done @v)
-                @v))
-;; THE LAND. A branch only ever contains done work, so this is the one
-        ;; place work leaves an agent's thread — rebasing onto whatever landed
-        ;; while it worked, then advancing the branch under CAS. nil when the
-        ;; session is not on a thread or nothing was written to it.
-        ;;
-        ;; AFTER the boundary delta on purpose: the done itself is part of the
-        ;; episode, so it lands with the work it grades rather than being
-        ;; stranded on a line nobody will read again.
-        ;;
-        ;; A done that is red ON THIS EPISODE'S WORK lands nothing and the
-        ;; thread survives, holding what is not finished yet. That is the
-        ;; whole bargain — the verdict is what decides, so a branch cannot
-        ;; come to contain something no verdict ever stood behind.
-        ;;
-        ;; The bar is the EPISODE's verdict rather than the store's, and the
-        ;; difference is only ever a red whose failing tests provably
-        ;; exercise nothing this episode touched. Reading the store's verdict
-        ;; here froze every agent's thread the moment the trunk went red for
-        ;; anyone's reason — including the thread carrying the fix, which is
-        ;; a deadlock two agents reached in one night and could not clear
-        ;; between them. Innocence has to be PROVEN, never assumed: an
-        ;; untraced failing test, or a failure the run counted and did not
-        ;; show, keeps the red this episode's and the thread stays put.
-        land (when-not (= :red (:episode-status findings))
-               ;; entries a replay or a merge left stale are brought current
-               ;; and persisted here, before the view lands — the one cadence
-               ;; a stale entry can accumulate at
-               (ops/refresh-index! session)
-               (let [l (branch/land-thread! session)]
-                 ;; the server lends `:on-landed`: what this session landed
-                 ;; is announced to every other session on the project
-                 (when (and (:landed l) (:on-landed @session))
-                   (try ((:on-landed @session) l) (catch Throwable _ nil)))
-                 l))
-        ;; #14: the verdict above was earned against the THREAD image, which
-        ;; held the whole episode. The land rebases and re-mints ids, so
-        ;; "green" and "on the branch" are two different facts and nothing
-        ;; joined them — measured with two forms, one of which landed and one
-        ;; of which did not, after which every request served 200 while the
-        ;; commit-point read green. A red that lies costs an investigation; a
-        ;; GREEN that lies ships.
-        ;;
-        ;; Read from the BRANCH, never from this session: checking a landing
-        ;; against the store that produced it is one reader answering twice,
-        ;; which is the mistake being caught. ~0.4s, and only on a done that
-        ;; actually landed something.
-        gap (when (and (:landed land) (seq touched-q) (:db @session))
-              (done/landed-gap
-               (into #{} (map (fn [q] [(symbol (namespace q)) (name q)])) touched-q)
-               (db/load-elements (:db @session)
-                                 (engine/session-fork-line session))))
-        ;; the DECLARATION twin. A `module_dep` is not a form — it is a
-        ;; `:module-edge` delta folded into the manifest — so the check above
-        ;; cannot see one go missing, and one going missing is measured rather
-        ;; than hypothetical: three edges declared and landed were gone from
-        ;; the trunk hours later while still present in the declaring session's
-        ;; store, which left that agent GREEN and another agent's commit-point
-        ;; blocked by twenty undeclared edges it could not repair.
-        ;;
-        ;; Gated on the episode having declared any at all, which is rare, so
-        ;; the branch read this needs costs nothing on an ordinary done.
-        declared (when (and (:landed land) (:db @session))
-                   (into [] (comp (filter #(and (#{:module-edge :module-test-edge} (:op %))
-                                                (= :add (:action %))
-                                                (= agent (:agent %))))
-                                  (map (fn [d]
-                                         (cond-> {:from (:from d) :to (:to d)}
-                                           (= :module-test-edge (:op d))
-                                           (assoc :test-only true))))
-                                  (distinct))
-                         (history/episode-span st agent)))
-        edge-gap (when (seq declared)
-                   (let [branch (db/load-store (:db @session)
-                                               (engine/session-fork-line session))]
-                     (done/declared-edge-gap
-                      declared
-                      (edit.modules/modules-manifest branch)
-                      (edit.modules/module-test-manifest branch))))]
-    ;; the STANDING verdict, verbatim, when nothing was written — carrying its
-    ;; :note, so a caller cannot read an inherited verdict as a fresh one
-    (if standing standing (cond-> {:done cid
-             :normalized (count rewrites)
-             :rewrites   (mapv #(select-keys % [:form :applied]) rewrites)
-             :lint       lint-new
-             :findings   findings}
-      (seq carried)       (assoc :lint-carried
-                                 {:count (count carried)
-                                  :forms (vec (sort (distinct (keep :form carried))))})
-      summary             (assoc :test summary)
-      (seq pruned-reqs)   (assoc :pruned-requires pruned-reqs)
-      (:status iso)       (assoc :external iso)
-      (seq changed)       (merge (done/spread-report st changed))
-      ;; where locality failed, measured: only when this session keeps a
-      ;; read ledger (the MCP door does; a one-shot CLI call does not), so
-      ;; absence of a ledger is never reported as "read nothing"
-      (and (seq changed) (contains? @session :slopp-server.mcp/ledger))
-      (as-> m (if-let [u (not-empty (done/unread-callees st changed (map first (keys (:slopp-server.mcp/ledger @session)))))]
-                (assoc m :unread-callees u
-                       :unread-note (str "these changed forms call store forms whose source this"
-                                         " session never read: the edit was made blind to them."
-                                         " Not an error; the tests may cover it. It is where"
-                                         " the slice was not enough."))
-                m))
-      land                (assoc :land land)
-      (seq gap)           (assoc :landed-gap
-                                 {:forms (mapv (fn [[ns* nm]] (symbol (str ns*) nm)) gap)
-                                  :note (str "this done's verdict covered "
-                                             (count gap) " form(s) that are NOT on"
-                                             " the branch it just landed onto. The"
-                                             " green is honest and does not describe"
-                                             " what shipped — re-apply them and call"
-                                             " done again. Read from the branch, not"
-                                             " from this session.")})
-      (seq edge-gap)      (assoc :declared-gap
-                                 {:edges edge-gap
-                                  :note (str "this episode declared " (count edge-gap)
-                                             " module edge(s) that are NOT on the branch"
-                                             " it just landed onto. Re-declare them —"
-                                             " and note that `module_dep` will answer"
-                                             " :already-declared from THIS session,"
-                                             " which still holds them; thread_drop puts"
-                                             " you on the branch where the repair can"
-                                             " take. Until then another agent's"
-                                             " full_check is red on your edges and"
-                                             " cannot take a commit point.")})))))
-
-(defn ^:export commit-point!
-  "Record a COMMIT-POINT (P4-m7): run the full done pipeline (normalize,
-  declare hygiene, verify) for `:agent`, then append a `:commit` marker
-  pointing at the resulting state with a human `description`.
-
-  THE COMMIT-POINT HAS NO GATES OF ITS OWN. It runs `done!` and gates on that
-  verdict — nothing is re-judged here, and nothing whole-store is forced.
-  `full_check` (every namespace, every tier) is the agent's call, before a
-  commit or any other time; a commit-point records what the done point verified. Two enforcement points DRIFT: this
-  function used to recompute status from raw test counts and so never saw
-  the `:error` done-advisories at all, and it carried its own copies of the
-  dead-surface and lint scans. `done` means done, which only holds if done
-  is the single bar; a second bar is somewhere to accidentally put a check
-  that then does not apply at done.
-
-  GREEN-GATED: a red verification refuses the commit-point (the done still
-  stands — fix and retry) unless `:force true`, which records `:status :red`
-  honestly. Re-requesting a commit-point on an UNCHANGED store returns the
-  existing marker instead of minting an empty one. With `:target` (a past
-  delta id) it is a pure retroactive marker: no done runs, status is
-  derived from the log at that spot. No commit-point captures a tree at all now;
-  the projection folds the journal, so a retroactive marker gets the exact
-  state it names rather than a lossy reconstruction of it. `:extra` merges
-  op-specific payload into the marker delta
-  (P4-m8 uses it for `:git-sha` on imported commits)."
-  [session description & {:keys [agent force target extra]}]
-  (let [mark! (fn [target status result-extra delta-extra]
-                (let [v (volatile! nil)]
-                  (engine/commit-appended!
-                   session
-                   (fn [base]
-                     (let [[st2 d] (store/record-commit base description
-                                                        :agent agent
-                                                        :target target
-                                                        :status status
-                                                        :extra (if-let [au (author-identity session)]
-                                                                 (assoc delta-extra :author au)
-                                                                 delta-extra))]
-                       (vreset! v d)
-                       st2))
-                   [])
-                  ;; the marker is a statement about the BRANCH, so it has to reach one.
-                  ;; done landed the work a moment ago and left this session on a
-                  ;; FRESH thread, which is exactly where the marker delta just
-                  ;; went — so without this a commit-point records itself onto a line
-                  ;; nobody will ever read, and the projection folds a branch whose
-                  ;; last delta is the one before the commit-point.
-                  ;;
-                  ;; Unconditional, `:force` included. Forcing is an explicit
-                  ;; request to record a red state as a commit-point, and a commit-point
-                  ;; naming work the branch does not contain is not honest, it is
-                  ;; unreadable.
-                  (let [t1   (System/currentTimeMillis)
-                        land (branch/land-thread! session)
-                        land-ms (- (System/currentTimeMillis) t1)
-                        ;; A REFUSED land is the one case the commit-point must not
-                        ;; smooth over. The delta is recorded by now, but it was
-                        ;; recorded onto the same thread the work is stranded on,
-                        ;; so nothing reached the branch — and returning
-                        ;; `:status :green` for that is the failure observed on
-                        ;; `d32474`: the branch did not contain what the
-                        ;; commit-point named, and everything downstream reads the
-                        ;; stamp rather than the branch.
-                        ;;
-                        ;; The value used to be discarded here, which is the
-                        ;; whole mechanism: a `{:landed false :reason …}` was
-                        ;; indistinguishable from a landing that worked.
-                        refused? (false? (:landed land))
-                        ;; #17, and the same shape one artifact over. A
-                        ;; commit-point is the announcement OTHER PEOPLE act on,
-                        ;; and it made a claim about the store while saying
-                        ;; nothing about the jar that carries the store to
-                        ;; them. Announcement → artifact → process are three
-                        ;; states and nothing joined them; twice in one night a
-                        ;; consumer caught a green commit-point whose jar had
-                        ;; never been rebuilt, and caught it by reading the
-                        ;; artifact rather than by believing the announcement.
-                        ;;
-                        ;; Nil unless there is something to doubt — no jar, a
-                        ;; foreign one, or one built from this head all report
-                        ;; nothing.
-                        jar-stale (orient/jar-warning
-                                   (ops/jar-currency session (:jar-head (boot/current-boot-info))))]
-                    (cond-> (merge {:commit (:id @v) :target target
-                                    :status (if refused? :unlanded status)
-                                    :description description}
-                                   result-extra)
-                      land      (-> (assoc :land land) (update :ms assoc :land land-ms))
-                      jar-stale (assoc :jar-stale jar-stale)))))]
-    (cond
-      (str/blank? (str description))
-      {:error "a commit point needs a human-facing :description"}
-
-      target
-      (if (db/on-line? (:db @session) (engine/session-line session) target)
-        (mark! target (history/status-at (:store @(ops/with-history session)) target) {} extra)
-        {:error (str "no delta " target " in this branch's history")})
-
-      :else
-      (let [;; the newest entry on this session's line, from the journal — the
-            ;; value carries its head's ID, not the delta
-            last-d (db/head-delta (:db @session) (engine/session-line session))]
-        (if (= :commit (:op last-d))
-          (merge {:commit (:id last-d) :target (:target last-d)
-                  :status (:status last-d)
-                  :description (:description last-d)
-                  :note "nothing changed since this commit-point — returning it"})
-          (let [t0     (System/currentTimeMillis)
-                cp     (done! session :label description :agent agent)
-                ;; where the commit-point's time goes, as a fact: done here, land
-                ;; in mark!, the publish on the wire (s20)
-                done-ms (- (System/currentTimeMillis) t0)
-                ;; done runs the impacted ^:external slice itself (:external?
-                ;; defaults true), so the commit-point's done is a REAL done — not
-                ;; one weakened to skip the tier the in-image suite already
-                ;; skips. The commit-point still runs no WHOLE-store check (that is
-                ;; `full_check`, the agent's call, per D-full-check): a red
-                ;; ^:external test the episode never TOUCHED does not stop it,
-                ;; but one this episode touched does — exactly what a standalone
-                ;; done catches. :force skips straight to an honest red.
-                st     (:store @session)
-                head   (:head st)
-                ;; done's OWN verdict — it already accounts for failures, the
-                ;; :error advisories, store-wide lint and store-wide dead
-                ;; surface. Believe it rather than re-deriving a weaker answer.
-                ;; :none means this done judged NOTHING (no writes since the last
-                ;; one) — so the previous real verdict stands. Otherwise a red
-                ;; done is laundered by committing without changing anything.
-                ;; the findings this commit-point is judged on: THIS done's when it
-                ;; judged something, otherwise the last done that did.
-                verdict (if (#{:red :green} (get-in cp [:findings :test-status]))
-                          (:findings cp)
-                          (ops/last-judged-done st))
-                status  (or (:test-status verdict)
-                            (history/status-at (:store @(ops/with-history session)) head))
-                status (if (= :unknown status) :green status) ; nothing ever ran red
-                ;; NO tree is captured. A commit-point used to carry a byte-exact
-                ;; snapshot of every namespace, because comments lived
-                ;; positionally in the elements table — CURRENT state only —
-                ;; and so could not be re-derived. That cost 82 MB here, 39% of
-                ;; the journal, and by the end it was already a diff chain
-                ;; against the previous commit-point. Comments are form-owned
-                ;; content now, so the log is a complete account and
-                ;; `git/project-journal!` folds it to render the tree it needs.
-                ;; a SUMMARY of done's findings, not a second implementation:
-                ;; name the findings that actually fired so the refusal is
-                ;; actionable without re-deriving anything
-                ;; :scope and :lint-warnings are INFORMATIONAL — always present,
-                ;; never a reason. Listing them as things that fired made a
-                ;; refusal say "scope" instead of "unused-public".
-                wrong  (->> (dissoc verdict :test-status
-                                    :scope :lint-warnings :failures
-                                    ;; informational too: a duration, a grade,
-                                    ;; an attribution — none is a reason, and
-                                    ;; listing them made a refusal say \"ms\"
-                                    :ms :episode-status :red-attribution)
-                            (remove (fn [[_ v]] (or (and (number? v) (zero? v))
-                                                    (and (coll? v) (empty? v)))))
-                            (map (comp name key))
-                            sort vec)]
-            (if (and (= :red status) (not force))
-              {:error (str "verification is RED — commit-point refused"
-                           (when (seq wrong)
-                             (str " — " (str/join ", " wrong)))
-                           ". Your work is at its done-point; the full"
-                           " list is in :findings — and if this done"
-                           " judged nothing (no writes since the last"
-                           " one), the RED verdict of that earlier done"
-                           " still stands. Fix and retry, or :force"
-                           " true to record a red commit-point honestly.")
-               :status :red :done (:done cp) :test (:test cp)
-               :findings verdict}
-              (mark! head status {:done (:done cp) :ms {:done done-ms}}
-                     (cond-> (or extra {})
-                       (seq (:deps st))  (assoc :deps (:deps st))
-                       (seq (:files st)) (assoc :files (:files st))
-                       (or (seq (:config st)) (read.modules/modules-config-entry st))
-                            (assoc :config (cond-> (:config st)
-                                             (read.modules/modules-config-entry st)
-                                             (assoc "modules" (read.modules/modules-config-entry st)))))))))))))
 
 (defn ^:export rerun-failed!
   "Run only what [[slopp.ops/still-failing]] says is still failing: about 30s rather
@@ -2773,6 +2080,730 @@ client-deps (merge (:client-deps st) (:client provided))
                                   " whole-store check over this same content; this is"
                                   " ITS verdict, recorded on your line so it stands here"
                                   " too. Nothing was run twice."))))))))))
+
+(defn ^:export done!
+  "The DONE-POINT: call when you believe your changes are complete. Marks
+  the episode boundary and runs the automatic done-processing — normalize
+  every form changed this episode (conservative behavior-preserving
+  rewrites), clean up safe (declare)s, kondo-lint every touched namespace,
+  and RUN THE AFFECTED TESTS for everything the episode touched (no
+  test_run needed first — mid-episode runs are for spot-checks). Unused
+  PUBLIC surface in touched namespaces GATES here (error-grade): delete it
+  or mark the name ^:unused-ok; a stale marker (the var is called now)
+  fails symmetrically. Findings ride the boundary delta so the next
+  session's brief surfaces anything left red.
+
+  Findings carry TWO verdicts. `:test-status` grades the STORE and is what
+  commit_point and session_brief read. `:episode-status` grades this
+  episode's own work and is what the LAND turns on, so a store left red by
+  another agent no longer holds this thread — `:red-attribution` names
+  which failing tests are `:mine`, `:foreign`, `:untraced` or `:unseen`,
+  and only `:foreign` counts as innocence.
+
+  The in-image suite and the impacted external slice run at the same time:
+  they share nothing, so a done costs the longer of the two, not the sum. `:phases` in the findings is the wall time in ms of each step, adding
+  up to `:ms`, where `:external` is what the slice took past the end of the
+  suite; `:rule-ms` names each rule that took 100 ms or more.
+
+  Returns {:done id :normalized n :rewrites [{:form :applied}]
+  :lint [...] :test s :findings {...}}."
+  [session & {:keys [label agent external?] :or {external? true}}]
+  (let [t0       (System/currentTimeMillis)
+        clock    (atom {:at t0 :ms {}})
+        st       (:store @session)
+        ;; nothing written since the last done → no unit of work to bound, so
+        ;; no boundary is recorded and its verdict still stands. See
+        ;; [[unchanged-since-done]]: three callers each reasonably ask for a
+        ;; done and none can see that the others just did. Everything below is
+        ;; already a no-op in this case (`changed` is empty, so normalize,
+        ;; declare/require hygiene, the suite and the external slice all skip),
+        ;; which is why the guard only has to stop the RECORDING.
+        standing (unchanged-since-done st agent)
+        changed  (when-not standing
+                   (->> ;; mine, and what my CHILD threads landed here
+                        ;; exactly what the land carries: every write on this line
+                        ;; by anyone, and nothing already on the branch, whose red
+                        ;; is somebody else's
+                        (engine/land-deltas session st)
+                        (filter #(contains? history/content-ops (:op %)))
+                        (mapcat history/delta-fids)
+                        distinct
+                        (filter #(store/ns-of-form-id st %))))
+        rewrites (done/normalize-rewrites changed st)
+        _        (done/apply-normalization! rewrites st label agent  session)
+        ;; automatic declare hygiene: the pipeline OWNS declares (auto-inserted
+        ;; for a genuine cycle); once the cycle breaks the declare is stale —
+        ;; remove it here. SILENT: the agent never manages declares, so this
+        ;; runs for effect and is not reported.
+        _
+        (doseq [ns* (done/touched-namespaces session (:store @session) changed)]
+          (ops/fix-declares! session ns*
+                         :prompt (or label "done declare hygiene")
+                         :agent agent))
+        ;; require hygiene, REPORTED (unlike declares, which the agent never
+        ;; sees): try dropping each unused require — a genuinely dead one goes,
+        ;; a load-bearing one is restored marked ^:side-effect. The agent never
+        ;; manages unused requires; done does.
+        pruned-reqs
+        (into (sorted-map)
+              (for [ns* (done/touched-namespaces session (:store @session) changed)
+                    :let [pr (ops/prune-requires! session ns*
+                                                  :prompt (or label "done require hygiene")
+                                                  :agent agent)]
+                    :when (or (seq (:pruned pr)) (seq (:kept pr)))]
+                [ns* pr]))
+        ;; kondo lint over every namespace touched since the last done-point —
+        ;; carried mid-episode errors (stale callers) get re-checked HARD here
+        lint (do (lap-phase! clock :hygiene)
+                 (done/anchored-lint session (done/touched-namespaces session (:store @session) changed)))
+        ;; the unused-public GATE: unmarked dead surface — and stale
+        ;; ^:unused-ok markers — join as ERROR-grade lint (never demoted)
+        unused-rep (let [st* (:store @session)]
+                     ;; episode-scoped, like the lint scan: a form elsewhere
+                     ;; can become dead because THIS episode deleted its last
+                     ;; caller, so the store-wide sweep is real — it is just
+                     ;; `full_check`'s job, not every done point's.
+                     (lap-phase! clock :lint)
+                     (read.modules/unused-report
+                      st* (done/touched-namespaces session st* changed)))
+        lint (done/with-unused-gate lint unused-rep)
+        ;; NEW warnings (on forms this episode touched) report in full;
+        ;; CARRIED ones (pre-existing, untouched forms) compress to a count —
+        ;; re-listing them at every done buries real findings. Errors and
+        ;; unattributed rows never demote.
+        touched-q (into #{}
+                        (keep (fn [fid]
+                                (let [st* (:store @session)]
+                                  (when-let [e (store/form-by-id st* fid)]
+                                    (symbol (str (store/ns-of-form-id st* fid))
+                                            (str (or (:name e) (:id e))))))))
+                        changed)
+        loud?     (fn [f] (or (= :error (:level f))
+                              (nil? (:form f))
+                              (contains? touched-q (:form f))))
+        lint-new  (vec (filter loud? lint))
+        carried   (vec (remove loud? lint))
+        external-only (when (and external? (seq changed) (not (:suite-trusted @session)))
+                        (engine/impacted-external session (:store @session) changed))
+        external-run  (when (and (seq external-only) (<= (count external-only) external-slice-cap))
+                        (future (external-test-run! session :only external-only)))
+        ;; THE done-point verification: the episode's whole working set —
+        ;; independent of whether normalize rewrote anything
+        summary
+        (when (seq changed)
+          (let [st*      (:store @session)
+                qsyms    (into #{}
+                               (keep (fn [fid]
+                                       (when-let [e (store/form-by-id st* fid)]
+                                         (symbol (str (store/ns-of-form-id st* fid))
+                                                 (str (or (:name e) (:id e)))))))
+                               changed)
+                ;; the ENTIRE in-image suite, not the impacted slice: "done
+                ;; means done". Impacted-only answered the weaker question
+                ;; "does what I touched still work" — and impacted SELECTION
+                ;; was itself a source of misses (one untraced form used to
+                ;; collapse the whole narrowing, on 54.4% of real episodes).
+                ;; Running everything retires that machinery here.
+                ;;
+                ;; The full ISOLATED tier is still skipped (it spawns JVMs)
+                ;; and the findings SAY so, so running it stays a visible
+                ;; choice rather than a silent omission.
+                ;; minus what the ORACLE could not load: the tracer walks ns-interns,
+                ;; which throws on a namespace the image cannot hold, and "done
+                ;; means done" must not mean dying on a namespace the boot
+                ;; already reported. Excluded AND reported — the finding rides
+                ;; below as :unloadable-namespaces, the :external-pending
+                ;; pattern, never a silent skip.
+                unloadable (do
+                             ;; the cold-load question, asked of the image: the
+                             ;; touched namespaces and their dependents reload
+                             ;; WHOLE, so a derived value a form-level hot-load
+                             ;; left as it was is re-evaluated here — before the
+                             ;; suite, which would otherwise grade a namespace
+                             ;; no fresh process can load
+                             (lap-phase! clock :dead-surface)
+                             (engine/reload-namespaces!
+                              session (done/touched-namespaces session st* changed))
+                             (lap-phase! clock :reload)
+                             (mapv :ns (:image-load-failures @session)))
+                main-ns  (vec (sort (remove (set unloadable)
+                                            (keys (:namespaces st*)))))
+                ;; nil affected => every test in main-ns; :edited still powers
+                ;; the red :implicated correlation
+                s        (if (:suite-trusted @session)
+                           ;; a pull of commits that each passed this suite,
+                           ;; onto no local work: nothing new could be red
+                           {:test 0 :pass 0 :fail 0 :error 0 :type :summary :suite-trusted true}
+                           (engine/run-verification! session main-ns nil
+                                            ;; against the whole THREAD's edits, not this
+                                            ;; episode's: the land is the thread, and a
+                                            ;; red from an earlier episode here is mine
+                                            :edited (thread-edited session st* qsyms)
+                                            :include-integration? true
+                                            :boundary? true))]  ; M5
+            (engine/commit-appended! session
+                              #(store/record-verification % main-ns s) [])
+            s))
+        ;; the tier is an implementation detail: ^:external tests the episode's
+        ;; changes reach run in the EXTERNAL tier here — capped, and a deferral
+        ;; is REPORTED (external-pending), never silent.
+        ;;
+        ;; #127: selected from THE TRACE, like the in-image half above, instead
+        ;; of re-derived from the require-closure. That closure selects a median
+        ;; 43 of 46 external test nses (measured over every source ns
+        ;; 2026-07-17) — it never narrowed, it just always blew the cap, so 84.6%
+        ;; of changes deferred and the tier effectively never ran here. The
+        ;; evidence was already computed a few lines up and thrown away.
+        iso (when (and external? (seq changed) (not (:suite-trusted @session)))
+              (let [iso-only (do (lap-phase! clock :in-image) external-only)]
+                ;; #132: impacted-external is never silent — an untraced form expands
+                ;; to its own namespace's reach — so the old closure fallback is
+                ;; gone with the collapse that needed it. Run exactly the named
+                ;; tests. A :only run is one serial JVM (it never shards), so the
+                ;; cap is on TESTS: p50 is 12 covering tests and a cap of 40 fits
+                ;; ~71% of forms, while the tail (p90 = 218) is the core-form
+                ;; case that honestly wants the whole suite anyway.
+                ;; The cap was 40 because a narrowed run could not shard — :only forced
+                ;; one serial JVM, so a large impacted set cost MORE than the
+                ;; sharded full suite and deferring was the least-bad option.
+                ;; `only-shards` removed that, so the number is re-derived from
+                ;; what deferrals actually looked like: measured over 40 recent
+                ;; dones, 15 deferred, six of them between 52 and 136 tests —
+                ;; sets the trace map had picked out correctly and nothing ran.
+                ;; 150 converts all six. Past that the impacted set approaches
+                ;; the whole suite (the other nine were 339–394 of 409), where
+                ;; narrowing saves nothing and full_check is the honest answer.
+                ;; A content-keyed cache lived here for one day and was REMOVED by its
+                ;; own gate (s19): replayed over the journal, a done-grain skip
+                ;; would have avoided 5 runs of 228 (2.2%) — 12.1% of tests, but a
+                ;; run whose tests are only partly skipped still boots the JVM that
+                ;; is this tier's whole cost. The 44.6% that authorized building it
+                ;; was the WHOLE-SUITE grain, which stays uncached on purpose. The
+                ;; evidence remains recorded (`:ns-status` on every observation,
+                ;; `slopp.lab.verdicts/reuse-by-grain`), so this is re-measurable
+                ;; rather than folklore — rebuild it if a store's numbers differ.
+                (when (seq iso-only)
+                  (if (<= (count iso-only) external-slice-cap)
+                    (try @external-run
+                      (catch java.util.concurrent.ExecutionException e (throw (.getCause e))))
+                    {:pending {:count (count iso-only)
+                               :tests (vec (take 5 iso-only))
+                               :note  (str "NO ^:external test ran this time — these "
+                                           (count iso-only) " impacted ones were deferred"
+                                           " (most of the external suite; narrowing saves"
+                                           " nothing), so the green above is the in-image"
+                                           " suite only. full_check is the external evidence"
+                                           " for a change this broad.")}}))))
+        findings (let [lint-errors (do (lap-phase! clock :external)
+                           (count (filter #(= :error (:level %)) lint)))
+      lint-warns  (vec (for [f lint :when (= :warning (:level f))]
+                         (select-keys f [:form :type :message])))
+      failures    (+ (:fail summary 0) (:error summary 0)
+                     (:failures iso 0) (:errors iso 0))
+      iso-red?    (contains? #{:red :error} (:status iso))
+      st*         (:store @session)
+      ;; the done-time advisory REGISTRY (D9 rule-registry, done grain): schema
+      ;; drift (status-affecting), key typos + contract breakage (advisory). A
+      ;; new done finding registers in slopp.rules/done-advisories — ONE
+      ;; entry — not by hand-wiring a binding, a clause, and a status term here.
+      advisories  (let [found (rules/run-done-advisories! session st* changed)]
+                    (lap-phase! clock :advisories)
+                    found)
+      ;; CARRIED rows — the same finding the previous done already
+      ;; reported, teaching and all — compress to a count per rule. A
+      ;; standing advisory (a seed namespace with no purpose, a README
+      ;; the human branch disagrees on) otherwise rides every done of a
+      ;; lifetime at 300 chars a row, and a model that obeys pays a
+      ;; change and a second done per step (eval24 opus). New rows teach.
+      prev-adv    (when-let [conn (:db @session)]
+                    (some-> (db/last-marker conn (engine/session-line session) :done)
+                            :findings))
+      carried-key (fn [row] (hash (dissoc row :teach)))
+      ;; what the previous done reported OR carried: a carried row leaves the
+      ;; findings, so it is remembered by its signature on the delta, and
+      ;; without that every second done teaches it again
+      seen-rows   (fn [k]
+                    (into (set (get-in prev-adv [:carried-sigs k]))
+                          (map carried-key)
+                          (when (sequential? (get prev-adv k)) (get prev-adv k))))
+      carried     (into {}
+                        (keep (fn [[k rows]]
+                                (when (and (sequential? rows) (seq (seen-rows k)))
+                                  (let [old (seen-rows k)
+                                        ;; a row that holds the landing is never
+                                        ;; carried: repeating it must keep holding,
+                                        ;; and keep saying what is wrong
+                                        n   (count (filter #(and (old (carried-key %))
+                                                                 (not (rules/status-affecting-fired? st* {k [%]})))
+                                                       rows))]
+                                    (when (pos? n) [k n])))))
+                        advisories)
+      carried-sigs (into {}
+                         (keep (fn [[k rows]]
+                                 (when (contains? carried k)
+                                   [k (vec (filter (seen-rows k) (map carried-key rows)))])))
+                         advisories)
+      advisories  (into {}
+                        (keep (fn [[k rows]]
+                                (if (contains? carried k)
+                                  (let [old  (seen-rows k)
+                                        kept (vec (remove #(and (old (carried-key %))
+                                                                (not (rules/status-affecting-fired? st* {k [%]})))
+                                                          rows))]
+                                    (when (seq kept) [k kept]))
+                                  [k rows])))
+                        advisories)
+      advisory-red? (rules/status-affecting-fired? st* advisories)
+      ;; WHOSE red is this? `implicate` splits the failing tests three ways
+      ;; and only :foreign is evidence of innocence — :untraced and :unseen
+      ;; are the two ways of having no evidence at all, and both leave the
+      ;; red this episode's problem. Anything red in the external slice is
+      ;; this episode's by construction: those tests were SELECTED as the
+      ;; ones its changes impact.
+      attribution (engine/attribute-unloadable session (engine/red-attribution summary))
+      foreign-red?
+      (boolean (and attribution
+                    (seq (:foreign attribution))
+                    (not (:mine attribution))
+                    (not (:untraced attribution))
+                    (not (:unseen attribution))
+                    (not iso-red?)
+                    (zero? (+ (:failures iso 0) (:errors iso 0)))))
+      ;; the STORE's verdict — what commit_point and session_brief read
+      store-red?   (or (pos? failures) iso-red? (pos? lint-errors) advisory-red?
+                       ;; a namespace no fresh process can load: the store cannot
+                       ;; ship, whoever left it so
+                       (seq (:image-load-failures @session))
+                       ;; and a dev instance that could not boot from it: the
+                       ;; cold oracle's answer, remembered until it boots
+                       (some? (app-boot-failure session)))
+      ;; THIS EPISODE's verdict — what the land reads. It differs from the
+      ;; store's exactly when the store is red for reasons that provably
+      ;; exercise nothing this episode touched. Lint, dead surface and the
+      ;; advisories are episode-scoped already, so they are mine by
+      ;; construction and stay on this side.
+      episode-red? (or (and (pos? failures) (not foreign-red?))
+                       iso-red? (pos? lint-errors) advisory-red?
+                       ;; and THIS episode's when its own reload broke one —
+                       ;; a namespace it touched, or one that requires it
+                       (seq (:slopp.ops.engine/reload-failures @session)))
+      nothing-judged? (and (nil? summary) (nil? iso) (zero? lint-errors)
+                           ;; a delete-only episode has no form left to run a
+                           ;; suite for, but it DID judge its namespaces above
+                           (empty? (done/touched-namespaces session st* changed)))
+      missing-doc (vec (sort (distinct
+                              (keep (fn [fid]
+                                      (when-let [e (store/form-by-id st* fid)]
+                                        (:var (edit.modules/missing-doc-warning
+                                               st*
+                                               (store/ns-of-form-id st* fid)
+                                               (:name e)))))
+                                    changed))))
+      ;; the same nag-where-you-work grain, one level up: a namespace the
+      ;; episode touched that never says what it is FOR. Whole-store is
+      ;; review_scan's question, not this one's.
+      ]
+  ;; TWO verdicts, because a done answers two questions that are not the
+  ;; same question. :test-status grades the STORE — commit_point and
+  ;; session_brief read it, and a red store must not take a commit point.
+  ;; :episode-status grades THIS EPISODE's work, and the land reads it.
+  ;; They differ exactly when the store is red for reasons that provably
+  ;; exercise nothing this episode touched, which is the case that used to
+  ;; freeze every agent's thread behind one agent's red.
+  ;;
+  ;; Lint errors — which INCLUDE dead public surface, folded in as ERROR
+  ;; rows by with-unused-gate — count toward BOTH: they are part of "is this
+  ;; codebase good?", and they are episode-scoped, so they are also this
+  ;; episode's. They were absent here while commit-point! kept its own
+  ;; dead-surface scan; with that removed, omitting them let a store with
+  ;; dead surface commit-point green.
+  ;;
+  ;; :none is judged AFTER red, never before it. An error-grade finding that
+  ;; fires on a DELTA rather than on code — tier-governance,
+  ;; http-dangling-route-refs — can be the only thing that happened in an
+  ;; episode, and while :none came first it swallowed exactly those.
+  (cond-> {:test-status    (cond store-red?      :red
+                                 nothing-judged? :none
+                                 :else           :green)
+           :episode-status (cond episode-red?    :red
+                                 nothing-judged? :none
+                                 :else           :green)
+           :failures    failures
+           :lint-errors lint-errors
+           ;; what the oracle could not load and therefore could not judge —
+           ;; subtracted from the suite scope above, REPORTED here. A boot
+           ;; failure names a store invalidated from OUTSIDE (a framework
+           ;; rename, a dep bump, a platform declaration); the fix is one
+           ;; edit to the named namespace, which the write path now verifies
+           ;; against its POST-edit state.
+           :unloadable-namespaces (vec (:image-load-failures @session))
+           ;; the app image — the dev instance — is booted by a process that
+           ;; has never seen the store: what it could not load is the
+           ;; cold-load verdict, and it is the store's red until it boots
+           :app-boot-failure (app-boot-failure session)
+           ;; done runs the WHOLE in-image suite but not the full external
+           ;; tier. Say so EVERY time: an unstated omission reads as coverage,
+           ;; and that is how a green status comes to mean less than the agent
+           ;; thinks it does.
+           ;; done is EPISODE-scoped: the whole in-image suite plus impacted
+           ;; ^:external tests, but lint and dead-surface cover only what this
+           ;; episode touched, and the full external + integration tiers do
+           ;; not run. Say so EVERY time: an unstated omission reads as
+           ;; coverage, and that is how a green status comes to mean less than
+           ;; the agent thinks it does.
+           ;; a KEYWORD, not the paragraph. The scope was 600 characters of
+           ;; teaching on every done — 2,062 chars average result, measured —
+           ;; and read carefully twice in a session. The teaching lives in the
+           ;; `done` tool description now (read once); the fact rides here.
+           :scope :episode}
+    ;; ADVISORY, and named as such: kondo findings slopp's config
+    ;; deliberately does not block on, because each is routinely true of a
+    ;; form mid-edit. Listed so the agent can judge them, never counted.
+    ;; whose red, named: {:mine :foreign :untraced :unseen}. Present
+    ;; whenever anything is red, because the split is what makes
+    ;; :episode-status auditable rather than something to take on trust.
+    attribution       (assoc :red-attribution attribution)
+    (seq lint-warns)  (assoc :lint-warnings lint-warns)
+    (:pending iso)    (assoc :external-pending (:pending iso))
+    (seq missing-doc) (assoc :missing-doc missing-doc)
+    
+    (seq advisories)  (merge advisories)
+    (seq carried)     (assoc :carried-advisories carried :carried-sigs carried-sigs)
+    (seq (:unused unused-rep)) (assoc :unused-public (:unused unused-rep))
+    (seq (:stale unused-rep))  (assoc :stale-unused-ok (:stale unused-rep))
+    ;; friction #10: the host-currency record existed and only ever reached
+    ;; session_brief — an orientation surface read once a session — so a
+    ;; verdict produced by a process running superseded code said nothing
+    ;; about it, and the investigation that followed eliminated four correct
+    ;; mechanisms in rt first. Nil unless there is genuinely something to
+    ;; doubt, so it never becomes noise the reader learns to skip.
+    (host-warning-now session st*) (assoc :host-stale (host-warning-now session st*))
+    ;; what the done-point COST, persisted on the boundary delta. done is the
+    ;; most frequently called verdict, so its cost dominates by repetition
+    ;; rather than by any single call being slow — a product the log could
+    ;; not compute while no delta carried a duration.
+    (seq (:slopp.rules/rule-ms @session)) (assoc :rule-ms (:slopp.rules/rule-ms @session))
+    true (assoc :phases (do (lap-phase! clock :rest) (:ms @clock))
+                :ms (- (:at @clock) t0))))
+        cid (if standing
+              (:done standing)
+              (let [v (volatile! nil)]
+                (engine/commit-appended! session
+                                  (fn [base]
+                                    (let [[st2 c] (store/record-done base label
+                                                                     :agent agent
+                                                                     :findings findings)]
+                                      (vreset! v c)
+                                      st2))
+                                  [])
+                (swap! session assoc :done @v)
+                @v))
+;; THE LAND. A branch only ever contains done work, so this is the one
+        ;; place work leaves an agent's thread — rebasing onto whatever landed
+        ;; while it worked, then advancing the branch under CAS. nil when the
+        ;; session is not on a thread or nothing was written to it.
+        ;;
+        ;; AFTER the boundary delta on purpose: the done itself is part of the
+        ;; episode, so it lands with the work it grades rather than being
+        ;; stranded on a line nobody will read again.
+        ;;
+        ;; A done that is red ON THIS EPISODE'S WORK lands nothing and the
+        ;; thread survives, holding what is not finished yet. That is the
+        ;; whole bargain — the verdict is what decides, so a branch cannot
+        ;; come to contain something no verdict ever stood behind.
+        ;;
+        ;; The bar is the EPISODE's verdict rather than the store's, and the
+        ;; difference is only ever a red whose failing tests provably
+        ;; exercise nothing this episode touched. Reading the store's verdict
+        ;; here froze every agent's thread the moment the trunk went red for
+        ;; anyone's reason — including the thread carrying the fix, which is
+        ;; a deadlock two agents reached in one night and could not clear
+        ;; between them. Innocence has to be PROVEN, never assumed: an
+        ;; untraced failing test, or a failure the run counted and did not
+        ;; show, keeps the red this episode's and the thread stays put.
+        land (when-not (= :red (:episode-status findings))
+               ;; entries a replay or a merge left stale are brought current
+               ;; and persisted here, before the view lands — the one cadence
+               ;; a stale entry can accumulate at
+               (ops/refresh-index! session)
+               (let [l (branch/land-thread! session)]
+                 ;; the server lends `:on-landed`: what this session landed
+                 ;; is announced to every other session on the project
+                 (when (and (:landed l) (:on-landed @session))
+                   (try ((:on-landed @session) l) (catch Throwable _ nil)))
+                 l))
+        ;; #14: the verdict above was earned against the THREAD image, which
+        ;; held the whole episode. The land rebases and re-mints ids, so
+        ;; "green" and "on the branch" are two different facts and nothing
+        ;; joined them — measured with two forms, one of which landed and one
+        ;; of which did not, after which every request served 200 while the
+        ;; commit-point read green. A red that lies costs an investigation; a
+        ;; GREEN that lies ships.
+        ;;
+        ;; Read from the BRANCH, never from this session: checking a landing
+        ;; against the store that produced it is one reader answering twice,
+        ;; which is the mistake being caught. ~0.4s, and only on a done that
+        ;; actually landed something.
+        gap (when (and (:landed land) (seq touched-q) (:db @session))
+              (done/landed-gap
+               (into #{} (map (fn [q] [(symbol (namespace q)) (name q)])) touched-q)
+               (db/load-elements (:db @session)
+                                 (engine/session-fork-line session))))
+        ;; the DECLARATION twin. A `module_dep` is not a form — it is a
+        ;; `:module-edge` delta folded into the manifest — so the check above
+        ;; cannot see one go missing, and one going missing is measured rather
+        ;; than hypothetical: three edges declared and landed were gone from
+        ;; the trunk hours later while still present in the declaring session's
+        ;; store, which left that agent GREEN and another agent's commit-point
+        ;; blocked by twenty undeclared edges it could not repair.
+        ;;
+        ;; Gated on the episode having declared any at all, which is rare, so
+        ;; the branch read this needs costs nothing on an ordinary done.
+        declared (when (and (:landed land) (:db @session))
+                   (into [] (comp (filter #(and (#{:module-edge :module-test-edge} (:op %))
+                                                (= :add (:action %))
+                                                (= agent (:agent %))))
+                                  (map (fn [d]
+                                         (cond-> {:from (:from d) :to (:to d)}
+                                           (= :module-test-edge (:op d))
+                                           (assoc :test-only true))))
+                                  (distinct))
+                         (history/episode-span st agent)))
+        edge-gap (when (seq declared)
+                   (let [branch (db/load-store (:db @session)
+                                               (engine/session-fork-line session))]
+                     (done/declared-edge-gap
+                      declared
+                      (edit.modules/modules-manifest branch)
+                      (edit.modules/module-test-manifest branch))))]
+    ;; the STANDING verdict, verbatim, when nothing was written — carrying its
+    ;; :note, so a caller cannot read an inherited verdict as a fresh one
+    (if standing standing (cond-> {:done cid
+             :normalized (count rewrites)
+             :rewrites   (mapv #(select-keys % [:form :applied]) rewrites)
+             :lint       lint-new
+             :findings   (dissoc findings :carried-sigs)}
+      (seq carried)       (assoc :lint-carried
+                                 {:count (count carried)
+                                  :forms (vec (sort (distinct (keep :form carried))))})
+      summary             (assoc :test summary)
+      (seq pruned-reqs)   (assoc :pruned-requires pruned-reqs)
+      (:status iso)       (assoc :external iso)
+      (seq changed)       (merge (done/spread-report st changed))
+      ;; where locality failed, measured: only when this session keeps a
+      ;; read ledger (the MCP door does; a one-shot CLI call does not), so
+      ;; absence of a ledger is never reported as "read nothing"
+      (and (seq changed) (contains? @session :slopp-server.mcp/ledger))
+      (as-> m (if-let [u (not-empty (done/unread-callees st changed (map first (keys (:slopp-server.mcp/ledger @session)))))]
+                (assoc m :unread-callees u
+                       :unread-note (str "these changed forms call store forms whose source this"
+                                         " session never read: the edit was made blind to them."
+                                         " Not an error; the tests may cover it. It is where"
+                                         " the slice was not enough."))
+                m))
+      land                (assoc :land land)
+      (seq gap)           (assoc :landed-gap
+                                 {:forms (mapv (fn [[ns* nm]] (symbol (str ns*) nm)) gap)
+                                  :note (str "this done's verdict covered "
+                                             (count gap) " form(s) that are NOT on"
+                                             " the branch it just landed onto. The"
+                                             " green is honest and does not describe"
+                                             " what shipped — re-apply them and call"
+                                             " done again. Read from the branch, not"
+                                             " from this session.")})
+      (seq edge-gap)      (assoc :declared-gap
+                                 {:edges edge-gap
+                                  :note (str "this episode declared " (count edge-gap)
+                                             " module edge(s) that are NOT on the branch"
+                                             " it just landed onto. Re-declare them —"
+                                             " and note that `module_dep` will answer"
+                                             " :already-declared from THIS session,"
+                                             " which still holds them; thread_drop puts"
+                                             " you on the branch where the repair can"
+                                             " take. Until then another agent's"
+                                             " full_check is red on your edges and"
+                                             " cannot take a commit point.")})))))
+
+(defn ^:export commit-point!
+  "Record a COMMIT-POINT (P4-m7): run the full done pipeline (normalize,
+  declare hygiene, verify) for `:agent`, then append a `:commit` marker
+  pointing at the resulting state with a human `description`.
+
+  THE COMMIT-POINT HAS NO GATES OF ITS OWN. It runs `done!` and gates on that
+  verdict — nothing is re-judged here, and nothing whole-store is forced.
+  `full_check` (every namespace, every tier) is the agent's call, before a
+  commit or any other time; a commit-point records what the done point verified. Two enforcement points DRIFT: this
+  function used to recompute status from raw test counts and so never saw
+  the `:error` done-advisories at all, and it carried its own copies of the
+  dead-surface and lint scans. `done` means done, which only holds if done
+  is the single bar; a second bar is somewhere to accidentally put a check
+  that then does not apply at done.
+
+  GREEN-GATED: a red verification refuses the commit-point (the done still
+  stands — fix and retry) unless `:force true`, which records `:status :red`
+  honestly. Re-requesting a commit-point on an UNCHANGED store returns the
+  existing marker instead of minting an empty one. With `:target` (a past
+  delta id) it is a pure retroactive marker: no done runs, status is
+  derived from the log at that spot. No commit-point captures a tree at all now;
+  the projection folds the journal, so a retroactive marker gets the exact
+  state it names rather than a lossy reconstruction of it. `:extra` merges
+  op-specific payload into the marker delta
+  (P4-m8 uses it for `:git-sha` on imported commits)."
+  [session description & {:keys [agent force target extra]}]
+  (let [mark! (fn [target status result-extra delta-extra]
+                (let [v (volatile! nil)]
+                  (engine/commit-appended!
+                   session
+                   (fn [base]
+                     (let [[st2 d] (store/record-commit base description
+                                                        :agent agent
+                                                        :target target
+                                                        :status status
+                                                        :extra (if-let [au (author-identity session)]
+                                                                 (assoc delta-extra :author au)
+                                                                 delta-extra))]
+                       (vreset! v d)
+                       st2))
+                   [])
+                  ;; the marker is a statement about the BRANCH, so it has to reach one.
+                  ;; done landed the work a moment ago and left this session on a
+                  ;; FRESH thread, which is exactly where the marker delta just
+                  ;; went — so without this a commit-point records itself onto a line
+                  ;; nobody will ever read, and the projection folds a branch whose
+                  ;; last delta is the one before the commit-point.
+                  ;;
+                  ;; Unconditional, `:force` included. Forcing is an explicit
+                  ;; request to record a red state as a commit-point, and a commit-point
+                  ;; naming work the branch does not contain is not honest, it is
+                  ;; unreadable.
+                  (let [t1   (System/currentTimeMillis)
+                        land (branch/land-thread! session)
+                        land-ms (- (System/currentTimeMillis) t1)
+                        ;; A REFUSED land is the one case the commit-point must not
+                        ;; smooth over. The delta is recorded by now, but it was
+                        ;; recorded onto the same thread the work is stranded on,
+                        ;; so nothing reached the branch — and returning
+                        ;; `:status :green` for that is the failure observed on
+                        ;; `d32474`: the branch did not contain what the
+                        ;; commit-point named, and everything downstream reads the
+                        ;; stamp rather than the branch.
+                        ;;
+                        ;; The value used to be discarded here, which is the
+                        ;; whole mechanism: a `{:landed false :reason …}` was
+                        ;; indistinguishable from a landing that worked.
+                        refused? (false? (:landed land))
+                        ;; #17, and the same shape one artifact over. A
+                        ;; commit-point is the announcement OTHER PEOPLE act on,
+                        ;; and it made a claim about the store while saying
+                        ;; nothing about the jar that carries the store to
+                        ;; them. Announcement → artifact → process are three
+                        ;; states and nothing joined them; twice in one night a
+                        ;; consumer caught a green commit-point whose jar had
+                        ;; never been rebuilt, and caught it by reading the
+                        ;; artifact rather than by believing the announcement.
+                        ;;
+                        ;; Nil unless there is something to doubt — no jar, a
+                        ;; foreign one, or one built from this head all report
+                        ;; nothing.
+                        jar-stale (orient/jar-warning
+                                   (ops/jar-currency session (:jar-head (boot/current-boot-info))))]
+                    (cond-> (merge {:commit (:id @v) :target target
+                                    :status (if refused? :unlanded status)
+                                    :description description}
+                                   result-extra)
+                      land      (-> (assoc :land land) (update :ms assoc :land land-ms))
+                      jar-stale (assoc :jar-stale jar-stale)))))]
+    (cond
+      (str/blank? (str description))
+      {:error "a commit point needs a human-facing :description"}
+
+      target
+      (if (db/on-line? (:db @session) (engine/session-line session) target)
+        (mark! target (history/status-at (:store @(ops/with-history session)) target) {} extra)
+        {:error (str "no delta " target " in this branch's history")})
+
+      :else
+      (let [;; the newest entry on this session's line, from the journal — the
+            ;; value carries its head's ID, not the delta
+            last-d (db/head-delta (:db @session) (engine/session-line session))]
+        (if (= :commit (:op last-d))
+          (merge {:commit (:id last-d) :target (:target last-d)
+                  :status (:status last-d)
+                  :description (:description last-d)
+                  :note "nothing changed since this commit-point — returning it"})
+          (let [t0     (System/currentTimeMillis)
+                cp     (done! session :label description :agent agent)
+                ;; where the commit-point's time goes, as a fact: done here, land
+                ;; in mark!, the publish on the wire (s20)
+                done-ms (- (System/currentTimeMillis) t0)
+                ;; done runs the impacted ^:external slice itself (:external?
+                ;; defaults true), so the commit-point's done is a REAL done — not
+                ;; one weakened to skip the tier the in-image suite already
+                ;; skips. The commit-point still runs no WHOLE-store check (that is
+                ;; `full_check`, the agent's call, per D-full-check): a red
+                ;; ^:external test the episode never TOUCHED does not stop it,
+                ;; but one this episode touched does — exactly what a standalone
+                ;; done catches. :force skips straight to an honest red.
+                st     (:store @session)
+                head   (:head st)
+                ;; done's OWN verdict — it already accounts for failures, the
+                ;; :error advisories, store-wide lint and store-wide dead
+                ;; surface. Believe it rather than re-deriving a weaker answer.
+                ;; :none means this done judged NOTHING (no writes since the last
+                ;; one) — so the previous real verdict stands. Otherwise a red
+                ;; done is laundered by committing without changing anything.
+                ;; the findings this commit-point is judged on: THIS done's when it
+                ;; judged something, otherwise the last done that did.
+                verdict (if (#{:red :green} (get-in cp [:findings :test-status]))
+                          (:findings cp)
+                          (ops/last-judged-done st))
+                status  (or (:test-status verdict)
+                            (history/status-at (:store @(ops/with-history session)) head))
+                status (if (= :unknown status) :green status) ; nothing ever ran red
+                ;; NO tree is captured. A commit-point used to carry a byte-exact
+                ;; snapshot of every namespace, because comments lived
+                ;; positionally in the elements table — CURRENT state only —
+                ;; and so could not be re-derived. That cost 82 MB here, 39% of
+                ;; the journal, and by the end it was already a diff chain
+                ;; against the previous commit-point. Comments are form-owned
+                ;; content now, so the log is a complete account and
+                ;; `git/project-journal!` folds it to render the tree it needs.
+                ;; a SUMMARY of done's findings, not a second implementation:
+                ;; name the findings that actually fired so the refusal is
+                ;; actionable without re-deriving anything
+                ;; :scope and :lint-warnings are INFORMATIONAL — always present,
+                ;; never a reason. Listing them as things that fired made a
+                ;; refusal say "scope" instead of "unused-public".
+                wrong  (->> (dissoc verdict :test-status
+                                    :scope :lint-warnings :failures
+                                    ;; informational too: a duration, a grade,
+                                    ;; an attribution — none is a reason, and
+                                    ;; listing them made a refusal say \"ms\"
+                                    :ms :episode-status :red-attribution)
+                            (remove (fn [[_ v]] (or (and (number? v) (zero? v))
+                                                    (and (coll? v) (empty? v)))))
+                            (map (comp name key))
+                            sort vec)]
+            (if (and (= :red status) (not force))
+              {:error (str "verification is RED — commit-point refused"
+                           (when (seq wrong)
+                             (str " — " (str/join ", " wrong)))
+                           ". Your work is at its done-point; the full"
+                           " list is in :findings — and if this done"
+                           " judged nothing (no writes since the last"
+                           " one), the RED verdict of that earlier done"
+                           " still stands. Fix and retry, or :force"
+                           " true to record a red commit-point honestly.")
+               :status :red :done (:done cp) :test (:test cp)
+               :findings verdict}
+              (mark! head status {:done (:done cp) :ms {:done done-ms}}
+                     (cond-> (or extra {})
+                       (seq (:deps st))  (assoc :deps (:deps st))
+                       (seq (:files st)) (assoc :files (:files st))
+                       (or (seq (:config st)) (read.modules/modules-config-entry st))
+                            (assoc :config (cond-> (:config st)
+                                             (read.modules/modules-config-entry st)
+                                             (assoc "modules" (read.modules/modules-config-entry st)))))))))))))
 
 (defn ^:export on-commit-point?
   "True when the newest entry on this session's line is a commit point, which

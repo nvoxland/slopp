@@ -911,3 +911,26 @@
           (is (:error r) (pr-str r))
           (is (nil? (:repaired r)))))
       (finally (ops/close! sess)))))
+
+(deftest ^:external a-change-step-repairs-a-fragment-match-and-search-narrows-to-a-namespace
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'fg.core "(ns fg.core)\n(defn f \"F.\" [x] (let [y 1] (+ x y)))\n")
+      (ops/ingest! sess 'fg.other "(ns fg.other)\n(defn g \"G.\" [x] (let [y 1] (+ x y)))\n")
+      (testing "a fragment with one home lands through a group"
+        (let [r (ops/edit-group! sess [{:action :subform :ns 'fg.core :name 'f :match "(let [y 1" :source "(let [y 2"}]
+                                 :prompt "bump y")]
+          (is (nil? (:error r)) (pr-str r))
+          (is (str/includes? (query/query-source sess 'fg.core) "[y 2]"))))
+      (testing "a replacement that unbalances the form is still refused"
+        (let [r (ops/edit-group! sess [{:action :subform :ns 'fg.core :name 'f :match "(let [y 2" :source "(let [[y 2"}]
+                                 :prompt "broken")]
+          (is (:error r) (pr-str r))))
+      (testing "search narrows to one namespace"
+        (is (= '[fg.other] (mapv :ns (query/query-search sess "\\[y 1" :ns "fg.other"))))
+        (is (= '[] (mapv :ns (query/query-search sess "\\[y 1" :ns "fg.core"))))
+        (is (= 2 (count (query/query-search sess "let \\[y")))))
+      (testing "a bare expression naming the store is its function; anything else is still refused"
+        (is (= {:n 2} (select-keys (:result (query/query-store sess "{:n (count (filter #(re-find #\"fg\" (str %)) (keys (:namespaces store))))}")) [:n])))
+        (is (re-find #"takes ONE" (:error (query/query-store sess "(+ 1 2)")))))
+      (finally (ops/close! sess)))))

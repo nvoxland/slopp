@@ -12,7 +12,7 @@
   claim being one the brief actually checked rather than one it assumed at
   startup and never revisited."
   (:require [clojure.test :refer [deftest is testing]]
-            [slopp.ops :as ops] [slopp.edit :as edit] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [slopp.read.graph :as graph]))
+            [slopp.ops :as ops] [slopp.edit :as edit] [slopp.read.query :as query] [slopp.ops.review :as review] [slopp.ops.external :as external] [slopp.read.graph :as graph] [clojure.java.shell :as sh]))
 
 (deftest ^:external outline-and-namespaces                        ; T2
   (let [sess (external/open!)]
@@ -614,3 +614,27 @@
         (is (not (re-find #"total-ok\?" (pr-str (:facets r))))))
       (is (not (contains? (query/query-slice sess 'shop.core 'plain) :facets)))
       (finally (ops/close! sess)))))
+
+(deftest ^:external the-brief-is-not-spent-on-what-nobody-needs
+  (let [dir  (str (System/getProperty "java.io.tmpdir") "/slopp-brief-" (System/nanoTime))
+        sess (external/open! {:slopp.ops/dir dir :slopp.ops/agent-id "harness-b"})]
+    (try
+      (ops/create-ns! sess 'bb.fuel :source "(ns bb.fuel)\n(defn ^:unused-ok f \"F.\" [x] x)\n" :prompt "seed")
+      (ops/create-ns! sess 'bb.fuel-test :source (str "(ns bb.fuel-test (:require [clojure.test :refer [deftest is]] [bb.fuel :as fuel]))\n"
+                                                       "(deftest f-t (is (= 2 (fuel/f 1))))\n") :prompt "a red test")
+      (external/done! sess :label "red")
+      (let [{:keys [aliases last-done]} (ops/session-brief sess)]
+        (testing "a test namespace is nobody's dependency, so it has no alias worth teaching"
+          (is (= 'fuel (get aliases 'bb.fuel)) (pr-str aliases))
+          (is (not (contains? aliases 'bb.fuel-test)) (pr-str aliases)))
+        (testing "a red last done keeps its failure and drops its time breakdown"
+          (is (pos? (get-in last-done [:findings :failures])) (pr-str last-done))
+          (is (nil? (get-in last-done [:findings :phases])) (pr-str last-done))
+          (is (nil? (get-in last-done [:findings :rule-ms])) (pr-str last-done))))
+      (testing "an info-only rule is a count, and anything else is kept"
+        (is (= {:failures 1 :a-rule 2 :other [{:form 'x :severity :error}]}
+               (ops/brief-findings {:failures 1 :phases {:x 1} :rule-ms {:y 1} :carried-sigs {:z [1]}
+                                    :a-rule [{:severity :info} {:severity :info}]
+                                    :other [{:form 'x :severity :error}]}))))
+      (finally (ops/close! sess)
+               (sh/sh "rm" "-rf" dir)))))

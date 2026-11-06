@@ -1759,3 +1759,41 @@
             e   (last (store/forms st0 'ty.core))]
         (is (= '[ty.core/R]
                (:unjudged (first (rules/red-proof-check! (atom {}) (assoc st0 :baselines [{:sources {}}]) [(:id e)])))))))))
+
+(deftest a-slow-rule-is-named-with-its-time
+  (let [s (atom {})
+        ok (fn [_ _ _] [])
+        r (#'rules/run-checks! s {} []
+           [{:key :slow :check (fn [_ _ _] (Thread/sleep 150) [])}
+            {:key :fast :check ok}
+            {:key :fires :check (fn [_ _ _] [{:form 'a/b}])}])]
+    (is (= {:fires [{:form 'a/b}]} r) "the findings are unchanged")
+    (is (= #{:slow} (set (keys (:slopp.rules/rule-ms @s)))) "only a rule worth looking at is named")
+    (is (<= 150 (:slow (:slopp.rules/rule-ms @s))))
+    (is (= {:fires [{:form 'a/b}]} (#'rules/run-checks! nil {} [] [{:key :fires :check (fn [_ _ _] [{:form 'a/b}])}]))
+        "a check run with no session still answers")))
+
+(defn- waits-for-the-other-rule
+  "A rule that answers whether a second rule was running at the same time as it."
+  [session _ _]
+  (let [^java.util.concurrent.CountDownLatch latch (:latch @session)]
+    (.countDown latch)
+    [{:together (.await latch 3 java.util.concurrent.TimeUnit/SECONDS)}]))
+
+(deftest rules-that-only-read-run-at-the-same-time
+  (let [s (atom {:latch (java.util.concurrent.CountDownLatch. 2)})
+        r (#'rules/run-checks! s {} []
+           [{:key :a :check #'waits-for-the-other-rule}
+            {:key :b :check #'waits-for-the-other-rule}])]
+    (is (= {:a [{:together true}] :b [{:together true}]} r) (pr-str r))))
+
+(deftest a-rule-that-writes-runs-alone-and-its-throw-arrives-as-itself
+  (let [boom (ex-info "rule broke" {})]
+    (is (= boom (try (#'rules/run-checks! nil {} []
+                      [{:key :a :check (fn [_ _ _] (throw boom))}])
+                     (catch Throwable t t))))
+    (with-redefs [rules/key-not-returned-check (fn [_ _ _] (throw boom))]
+      (is (= boom (try (#'rules/run-checks! nil {} []
+                        [{:key :a :check #'rules/key-not-returned-check}])
+                       (catch Throwable t t)))
+          "a rule run at the same time as others still throws its own exception"))))

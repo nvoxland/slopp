@@ -222,3 +222,9 @@
 
       :else
       {:error "the frame names no tool: or verb:"})))
+
+(defn human-asks
+  "The asks among `turn-begin` markers: a turn the agent opened on its own words
+  says what the work was, and is not something the human asked."
+  [markers]
+  (keep :intent (remove :agent-worded markers)))

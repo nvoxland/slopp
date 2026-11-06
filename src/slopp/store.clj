@@ -1307,7 +1307,7 @@
   "Append a turn marker (:turn-begin carries the VERBATIM user ask — the root
   intent of everything that follows; :turn-end closes the bracket, stable or
   not). Returns [store' delta]."
-  [store kind & {:keys [agent intent user note timing]}]
+  [store kind & {:keys [agent intent user note timing agent-worded]}]
   (let [[did store'] (gen-id store "d")
         delta (cond-> {:id did :parent (:head store)
                        :op kind :ns '*session* :at (now-ms)}
@@ -1315,6 +1315,9 @@
                 intent (assoc :intent intent)
                 user   (assoc :user user)
                 note   (assoc :note note)
+                ;; the intent is the agent's words, not the human's: only the
+                ;; prompt hook's mailbox carries theirs
+                agent-worded (assoc :agent-worded true)
                 ;; where this ask's wall clock went — {:slopp-ms :outside-ms
                 ;; :top …} — and what its answers cost to send, under :reads.
                 ;; Folded by slopp.read.telemetry/call-timing from what the

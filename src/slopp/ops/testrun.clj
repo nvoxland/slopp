@@ -99,7 +99,8 @@
                    (conj out {:phrase g :tests (count ts)}))))))))
 
 (defn ^{:export "slopp.verification"} auto-parallel
-  "Default shard count for an external run over `n` test namespaces on a
+  "Default shard count for an external run over `n` test namespaces, or `n` tests
+  when the run is narrowed to named ones, on a
   `cores`-core box. Each shard reloads the WHOLE materialized store AND spawns
   the child image JVMs its ^:external tests boot, so sharding only pays at real
   scale: 1 below ~8 test nses (boot overhead beats the gain), then n/8 shards,
@@ -113,7 +114,11 @@
   340s, 4 shards 471s, all green, with 11GB still free at 6. The count must also stay
   DETERMINISTIC — a shard assignment that varied between runs would make a flake
   unreproducible — so it cannot be dialed by free memory at runtime. The other lever
-  for a faster tier is FEWER boots."
+  for a faster tier is FEWER boots.
+
+  A narrowed run takes at most 3 of these: 148 tests took 39s on 3 shards and 40s on
+  6, and their summed time rose from 90s to 126s, because the shards compete for CPU
+  with each other and with the in-image suite."
   [n cores]
   (max 1 (min 6 (quot cores 2) (quot n 8))))
 
@@ -202,7 +207,8 @@
                                        (refs/refs-to store 'slopp.ops/open!))))
         cost (fn [grp] (reduce + 0 (map #(get w % 0) grp)))]
     (reduce (fn [shards x]
-              (let [i (apply min-key #(cost (nth shards %)) (range (count shards)))]
+              (let [i (first (sort-by (fn [i] [(cost (nth shards i)) (count (nth shards i)) i])
+                                    (range (count shards))))]
                 (update shards i conj x)))
             (vec (repeat n []))
             (sort-by (juxt #(- (get w % 0)) str) nses))))

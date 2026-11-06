@@ -1550,3 +1550,10 @@
           (is (= 1 (:namespaces row)) (pr-str row))
           (is (pos? (:forms row)) (pr-str row))))
       (finally (ops/close! sess)))))
+
+(deftest the-cost-contract-accepts-a-note-that-telemetry-stopped
+  (let [shape {:by "ask" :rows []
+               :telemetry {:asks-after 2 :last-request-at 1500 :note "two asks came after it"}}]
+    (is (m/validate contracts/cost shape) (pr-str (m/explain contracts/cost shape)))
+    (is (m/validate contracts/cost (update shape :telemetry dissoc :last-request-at)))
+    (is (not (m/validate contracts/cost (assoc-in shape [:telemetry :asks-after] "two"))))))

@@ -1067,3 +1067,21 @@
           (is (= phases (get-in v [:result :phases]))
               "the journal keeps them, so a past run can still be read")))
       (finally (ops/close! sess)))))
+
+(deftest ^:external done-says-where-its-time-went
+  ;; a done took about two minutes on this store and could only report the total
+  (let [sess (external/open!)]
+    (try
+      (ops/ingest! sess 'dph.core
+                   (str "(ns dph.core (:require [clojure.test :refer [deftest is]]))\n"
+                        "(defn f \"F.\" [] 1)\n"
+                        "(deftest f-t (is (= 1 (f))))\n"))
+      (let [f      (:findings (external/done! sess :label "timed" :agent "a"))
+            phases (:phases f)]
+        (is (= #{:hygiene :lint :dead-surface :reload :in-image :external :advisories :rest}
+               (set (keys phases)))
+            (pr-str phases))
+        (is (every? nat-int? (vals phases)) (pr-str phases))
+        (is (= (:ms f) (reduce + (vals phases)))
+            "every millisecond is in one phase, so nothing can hide outside them"))
+      (finally (ops/close! sess)))))

@@ -3160,3 +3160,45 @@
       (is (nil? (ask nil {:action "add" :ns "pg.core-test" :name "new-help" :source "(defn new-help [] 1)"}))))
     (testing "production code is not a helper"
       (is (nil? (ask nil (edit "pg.core" "g")))))))
+
+(deftest a-refusal-quotes-the-ask-the-guard-read
+  (let [[s tmap] (protected-fixture)
+        step {:action :replace :ns 'a.core-test :name 'f-is-identity
+              :source "(deftest f-is-identity (is (= 2 (c/f 1))))"}
+        refuse #(ops/protected-test-refusal s tmap "bot" % [step])]
+    (testing "the human's latest word, as the guard saw it, so a mismatch with what they said shows"
+      (is (re-find #"the ask this guard read: \"make f increment\"" (refuse "make f increment"))))
+    (testing "a long ask is clipped"
+      (is (< (count (refuse (apply str (repeat 400 "x"))))
+             (+ (count (refuse "")) 200))))
+    (testing "no ask at all is said outright"
+      (is (re-find #"no human ask has reached this session" (refuse nil))))))
+
+(deftest ^:external a-standing-advisory-stays-carried-past-the-second-done
+  (let [sess (external/open!)
+        carried-only (fn [d]
+                       (is (nil? (get-in d [:findings :namespace-purpose])) (pr-str (:findings d)))
+                       (is (= 1 (get-in d [:findings :carried-advisories :namespace-purpose])) (pr-str (:findings d))))
+        touch (fn [doc] (ops/edit-replace! sess 'cb.core 'f (str "(defn ^:unused-ok f \"" doc "\" [x] x)") :prompt doc))]
+    (try
+      (ops/ingest! sess 'cb.core "(ns cb.core)\n(defn ^:unused-ok f \"F.\" [x] x)\n")
+      (external/done! sess :label "one")
+      (touch "F2.")
+      (carried-only (external/done! sess :label "two"))
+      (touch "F3.")
+      (testing "the third done does not teach it again"
+        (carried-only (external/done! sess :label "three")))
+      (touch "F4.")
+      (let [d (external/done! sess :label "four")]
+        (carried-only d)
+        (testing "what makes that possible stays on the delta, off the answer"
+          (is (nil? (get-in d [:findings :carried-sigs])) (pr-str (:findings d)))))
+      (finally (ops/close! sess)))))
+
+(deftest a-brief-carries-what-a-red-done-found-not-what-it-cost
+  (is (= {:failures 1 :a-rule 2 :other [{:form 'x :severity :error}] :mixed [{:severity :info} {:severity :error}] :none []}
+         (ops/brief-findings {:failures 1 :phases {:x 1} :rule-ms {:y 1} :carried-sigs {:z [1]}
+                              :a-rule [{:severity :info} {:severity :info}]
+                              :other [{:form 'x :severity :error}]
+                              :mixed [{:severity :info} {:severity :error}]
+                              :none []}))))

@@ -110,3 +110,10 @@
   (testing "no bundle is the tail alone"
     (is (= "[slopp] live store here" (hooks/prompt-answer nil ["[slopp] live store here"]))))
   (is (<= (count (hooks/prompt-answer (apply str (repeat 20000 "x")) [])) hooks/max-chars)))
+
+(deftest the-recent-asks-are-the-humans-only
+  (is (= ["fix x" "add y"]
+         (hooks/human-asks [{:intent "fix x"}
+                            {:intent "my own prompt" :agent-worded true}
+                            {}
+                            {:intent "add y"}]))))

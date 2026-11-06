@@ -10,7 +10,7 @@
   about whether the orphans died."
   (:require [clojure.test :refer [deftest is testing]]
             [slopp.store :as store]
-            [slopp.ops.testrun :as testrun] [slopp.ops.external :as external]))
+            [slopp.ops.testrun :as testrun] [slopp.ops.external :as external] [slopp.ops :as ops]))
 
 (deftest balance-shards-minimises-the-SLOWEST-shard-not-the-average
   ;; The external tier is 98.4% of a full_check (measured: 288s of 293s), and
@@ -238,3 +238,21 @@
     ;; an early exit (build failure, nothing selected) has no cost to report,
     ;; and a zeroed map would read as a measurement
     (is (nil? (testrun/shard-cost 5000 [])))))
+
+(deftest ^:external a-narrowed-run-stops-at-three-shards
+  (let [sess  (external/open!)
+        calls (atom 0)
+        nses  (mapv #(str "nar3.t" % "-test") (range 6))
+        only  (vec (for [n nses i (range 8)] (symbol n (str "t" i))))]
+    (try
+      (doseq [n nses]
+        (ops/ingest! sess (symbol n)
+                     (str "(ns " n " (:require [clojure.test :refer [deftest is]]))\n"
+                          (apply str (for [i (range 8)] (str "(deftest t" i " (is true))\n"))))))
+      (with-redefs [testrun/run-shard! (fn [_ _ _ _]
+                                         (swap! calls inc)
+                                         {:exit 0 :err ""
+                                          :out "Ran 8 tests containing 8 assertions.\n0 failures, 0 errors.\n"})]
+        (external/external-test-run! sess :only only)
+        (is (= 3 @calls) "48 tests would earn 6 shards, and more than 3 buys no time"))
+      (finally (ops/close! sess)))))
