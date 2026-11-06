@@ -168,7 +168,13 @@ elsewhere without moving (`help {topic "threads"}`).
   `use-fixtures` over it, since a helper that answers true silences the
   assertion. Tests and helpers you wrote this episode stay editable, and a new
   helper is always open; an ask that names the test or the helper lifts the
-  guard.
+  guard. The refusal quotes the ask it read. If that is not what the person
+  just said, or it says no ask has arrived, the prompt hook is not delivering:
+  tell them, because a restart with the server up is the fix. Never supply
+  their word yourself.
+- **A call past 50 s answers `{:running "run-1"}`.** That is not a failure: the
+  work carries on, and `query_detail {id}` waits for it and returns its answer.
+  Sending the same call again joins the run and does not repeat the work.
 - **An endorsed test is the human's.** `^{:endorsed "who: what it pins"}` on
   a deftest says a human read it and said yes. No agent edits or deletes it,
   whatever its coverage, and no agent adds or changes the marker: both need an

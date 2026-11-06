@@ -166,7 +166,9 @@ full map.
   :cache-read :cache-creation :tokens :cost-usd :context} …]}`, dearest first;
   `{by "ask"}` — `{:by :ask :rows [{:ask :agent :intent :at :ms :requests
   :prompts :model} …]}` newest first, plus `:unattributed` (requests in no
-  turn bracket) and `:undated`; `{by "commit-point"}` the series across
+  turn bracket), `:undated`, and `:telemetry {:asks-after :last-request-at :note}`
+  when asks came after the last request the store received: their 0 means not
+  measured, not free; `{by "commit-point"}` the series across
   landed changes. Telemetry is what the harness exported to the store's
   listener; no telemetry is no rows, never a zeroed one.
 

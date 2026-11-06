@@ -314,8 +314,8 @@ The oracle must never return a false verdict. Everything here serves that.
      around survivors is structurally blind to it. The symptom was the schema
      oracle (`malli.generator` is lazily required): whichever `^:external`
      test used it SECOND drew a `check-threw` on every honest schema in its
-     episode, and because `done` runs impacted externals in one serial JVM
-     while `full_check` shards, the narrower check saw it and the broader one
+     episode, and because `done` then ran impacted externals in one serial JVM
+     while `full_check` sharded, the narrower check saw it and the broader one
      did not.
    - **Isolation has two DIRECTIONS.** Nothing of the previous tenant may leak
      IN, and the next tenant must lose no CAPABILITY the previous one happened
@@ -758,6 +758,27 @@ problem. Two things the replay also showed: 3,083 of 3,361 forms carry SOME
 credit (a rename sweep credits hundreds of forms at once — a selector would
 weight by 1/|changed|), and the top rows are the rule-catalog tests, which
 go red beside almost any rule change.
+
+## What a done costs, and what runs together (2026-11-04)
+
+`:phases` on a `:done` delta's findings is the wall ms of each step (`:hygiene`, `:lint`,
+`:dead-surface`, `:reload`, `:in-image`, `:external`, `:advisories`, `:rest`), adding up to `:ms`.
+`:rule-ms` names each rule that took 100 ms or more. The green one-liner leaves both out; read
+them from the delta. Measured numbers: `.context/findings-log.md`.
+
+- **The in-image suite and the external slice run at the same time.** The slice is picked and
+  started first, in a `future`. Its selection reads only external traces, which the in-image
+  run does not add to. Both sides append through `commit-appended!`, which retries a lost race.
+  `:external` is what the slice took PAST the end of the suite, not its whole run.
+- **Rules run together when they only read.** A registered check whose var has no `!` runs under
+  `pmap`; `!` checks (image, journal writes) and bare fns run afterwards, one at a time. The
+  `!` is load-bearing here: a reading rule that starts writing must take the suffix.
+- **A narrowed external run uses at most 3 shards**, sized from its test count. More do not pay:
+  see the findings log.
+- **Tracing is not the in-image cost.** One warm run took 10.4 s traced and 10.1 s with no target
+  instrumented, so do not spend effort on the wrapper.
+- **To profile a done, dump with `jcmd <pid> Thread.dump_to_file`.** Tool calls run on virtual
+  threads, and `jstack` does not show them: it reports an idle server during a busy done.
 
 ## Evidence at done: red-proof, mutation, false-green (2026-11-02 to 11-04)
 

@@ -3672,3 +3672,59 @@ sweep 19s, in-image 13s, lint 8s, the rest under 2s each. The 691s did not recur
 tier was faster than any earlier 6-shard run. One sample: this does not explain the 691s run, and
 the next slow run will say where its time went.
 
+### What a done costs (2026-11-04, slopp's own store, 14 cores)
+
+Phase timings on `done` now exist (`:phases`). Same store, normal session with a warm image. One
+or two samples per row.
+
+| Slice | Before | After | Where it went after |
+|---|---|---|---|
+| 147-148 external tests | 60.6 s, 67.1 s | 42.1 s, 42.4 s | in-image 13 s, external 37 s overlapping it, rules 2 s, reload 2.5 s |
+| 11 external tests | not measured | 30.6 s | in-image 12 s, external 26 s overlapping it |
+| deferred (over the 150 cap) | 23-25 s | 20.3 s | in-image 14 s, reload 2.3 s, rules 2.3 s |
+
+- Rules: 4.1 s to about 2 s, by running the ones that only read at the same time.
+- Shards for a narrowed run: the same 148 tests took 39 s on 3 shards and 40 s on 6 alone. Their
+  summed test time rose from 90 s to 126 s, and beside 6 shards the in-image suite slowed from 12.7 s
+  to 17.3 s. The fastest of 6 shards still took 26 s. This agrees with the earlier result that the
+  tier is CPU-bound and only fewer image boots would help.
+- A fresh session pays about 12-20 s of image load before a done can run. That is outside `:ms`. It
+  hits anything that opens a new session for a done, including a done with nothing to judge
+  (12-13 s measured). A session with a warm image does not pay it.
+
+
+## What three days of working on slopp through slopp measured (2026-11-05)
+
+From the session transcripts of 11-02 to 11-05 and the store's own records. One
+session, different tasks each day, so these are signals and not a comparison.
+
+| | 11-02 | 11-03 | 11-04 | 11-05 (part) |
+|---|---|---|---|---|
+| changes | 81 | 234 | 87 | 42 |
+| requests per change | 8.8 | 6.7 | 6.3 | 5.2 |
+| tokens per change (M) | 1.9 | 2.2 | 2.2 | 1.1 |
+| results with a timeout | 2 | 54 | 18 | 3 |
+
+- **The prompt hook was off for about 31 hours and nothing said so** (11-04 00:45 to
+  11-05 07:56 UTC), after `~/.claude/skills/slopp` was removed under a running Claude
+  Code. At least 14 asks went unrecorded. Tokens per change fell (2.7M to 1.7M) and
+  result text per change doubled (7.3K to 15.2K) in that span; the tasks differed, so
+  this does not show what the ask block is worth.
+- **Advisories were re-taught on every second done.** Compressing a carried row removed
+  it from the delta, so the next done had nothing to compare it with. Found by the
+  alternation in live output, not by a test.
+- **The fragment-match repair existed on one door only.** `edit-subform!` had it and a
+  `change` step did not, so `change` refused what `edit` would land.
+- **A misread worth keeping:** the review said `session_brief` grew to 30K. It did not.
+  A normal brief is 10.9K, 93% of it aliases; the 30K cases were 18.8K of a red
+  `:last-done`.
+- **`query_cost {by ask}` is right and telemetry is absent.** The last request the
+  store holds is from 2026-09-26, about six weeks ago, and 62 asks came after it. The route
+  answers and the settings are in place, and the server's own counter stays at 0 routed
+  and 0 dropped, so nothing is arriving at all. Why the exporter stopped is still open.
+- **Used the same day:** the run-id answer fired on real work within minutes, including
+  a `full_check` and a `change` that would have timed out.
+
+Not built, with the reason: a clean guard exit (above) and a summary-first
+`query_detail` (it answers an explicit ask for the full text, so a summary only adds a
+round trip).

@@ -146,6 +146,10 @@ ends a turn's batch by definition — its verdict is what decides the next move.
    teaching once): lint and dead-surface cover only the namespaces you
    touched, and the full `^:external`/`^:integration` tiers do not run.
    `full_check` answers the whole-store question — see below.
+   **A slow done says why:** `:phases` and `:rule-ms` on the `:done` delta give
+   the time of each step and each slow rule. The in-image suite and the external
+   slice run at the same time, so `:external` is only what the slice took past
+   the end of the suite.
    **Read `:external-pending` for whether the external slice actually RAN.**
    done runs the impacted `^:external` tests, but above a cap it defers the
    whole lot and runs NONE — and it still returns `:green`, because the
@@ -299,10 +303,11 @@ ends a turn's batch by definition — its verdict is what decides the next move.
    work, and running fewer tests does not touch it. Read `:cost` before
    choosing a gear.
    **It is NOT a superset of `done`, and the axis it loses on is
-   ISOLATION.** `done` puts every impacted `^:external` test in ONE serial
-   JVM; `full_check` shards the suite across four. So two tests that only
-   fail TOGETHER — through a recycled image, a temp dir, any process-global
-   — fail under the narrower check and can pass under the broader one. **A
+   ISOLATION.** `done` splits its impacted `^:external` tests across at most
+   three JVMs, and one when there are few; `full_check` shards the suite
+   differently, across up to six. So two tests that only fail TOGETHER —
+   through a recycled image, a temp dir, any process-global — can fail under
+   one check and pass under the other. **A
    red `done` beside a green `full_check` is not `done` being wrong**; it is
    the pair being co-scheduled in one place and split in the other, and the
    reproduction is `test_run {external true affected true parallel 1}`.

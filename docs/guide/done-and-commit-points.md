@@ -100,6 +100,11 @@ If a large external slice would take too long it defers, and rides the findings
 as `:external-pending` with a count and a sample rather than burying the
 response.
 
+The in-image suite and the external slice run at the same time, so a `done` costs
+about the longer of the two. The `:done` record keeps the time of each step
+(`:phases`) and names any rule that took 100 ms or more (`:rule-ms`), so a slow
+`done` can say where its time went.
+
 ## `full_check` is the whole store
 
 Every namespace linted, dead surface store-wide, both layering graphs -- purity

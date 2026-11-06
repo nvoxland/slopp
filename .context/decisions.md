@@ -8000,6 +8000,20 @@ that touched an untested function and broke two "a clean done says
 nothing" tests. `verify {op mutate}` and the false-green instrument still
 count these functions; the done advisory reports survivors only.
 
+**Amended 2026-11-05 (slopp-s09, slopp-eu1): a missing word has to show, and an
+episode outlives a connection.** The mailbox is the human's only channel and it
+fails silently. A removed plugin directory stopped the prompt hook for about 31
+hours, every turn then opened on the agent's own prompt, and the guard could not
+hear a message that named the test. So a refusal quotes the ask it read, a turn
+on the agent's words is marked `:agent-worded`, says so once until the next ask,
+and is left out of the recent asks. Separately, a server-labelled session
+(`mcp-<id>`) now takes the hook's session id as its identity: a reconnect gets a
+new label, and a test proved the guard then forgot what it was protecting.
+Not built: a clean exit for a test the episode wrote and landed (slopp-37f). Seen
+once in about 290 changes; a safe rule needs a net-change comparison the guard, a
+pure question over a store value, cannot make, and the human naming the test
+already works.
+
 **Amended 2026-11-04 (slopp-s8x.1): the human's channel is `:human-intent`.**
 The ask that lifts this guard, endorsement and the dependency allow-list is
 read from `:human-intent`, which only `absorb-pending-intent!` sets when it
