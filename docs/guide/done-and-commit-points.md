@@ -99,7 +99,10 @@ done {decide [{rule "bare-throw" form "app.core/parse" why "the Java API we impl
 An answer is one of three: fix it, proceed with a reason, or hand it over. A
 hand-over keeps the hold, and the timeline lists it under "waiting on a
 person". Each answer is recorded with who gave it and the version of the form
-it covers, so a later edit asks again. A blank reason is refused.
+it covers. It stands across later dones until the form is edited; then the
+finding asks again. A blank reason is refused, and so are a rule that no done
+check has and a form the store does not have. An answer on a rule that is not
+dialed to `ask` is recorded, and the result names it under `:no-effect`.
 
 The reason for asking instead of blocking is measured. An agent that has an
 honest way out games a check far less often than one that is only blocked, and
@@ -205,7 +208,7 @@ version, and a function no in-image test can watch carries `^{:untested-ok
 only `^:external` tests reach is reported but not held, because the image cannot
 run those tests. The same goes for a function whose in-image tests pass on the
 old version while an `^:external` test of it did not run: that is unjudged, not
-unproven, and the report names the test that could tell. A test that only names a function does not count as reaching it. A pull skips the check for what its incoming commits brought
+unproven, and the report names the test that could tell. A test the image does not have at all, such as one that was deleted, could tell nothing either way, so it does not make a change unjudged. A test that only names a function does not count as reaching it. A pull skips the check for what its incoming commits brought
 when slopp stamped all of them as passing. When there is also no local work, the
 tree after the pull is one that already passed, so the pull skips the test suite
 too and its answer says `:suite-trusted`. The stamp is a claim and not a

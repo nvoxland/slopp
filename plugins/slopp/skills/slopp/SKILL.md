@@ -146,7 +146,8 @@ elsewhere without moving (`help {topic "threads"}`).
   watch, `^{:untested-ok "why"}` on its name. A function only `^:external` tests reach is reported, not held, and so is one
   whose in-image tests pass on the old version while an `^:external` test of it
   did not run there: the finding names that test, so run it against the old
-  version yourself or answer the ask. A
+  version yourself or answer the ask. A test the image no longer has does not
+  count as one that did not run: it could tell nothing. A
   test that only names a function, as in `(is (fn? f))`, does not count as
   reaching it. `def` of a `fn` and `defmethod` are checked like `defn`. A pull skips this for what
   commits slopp stamped as passing brought, because they proved it where they
@@ -164,8 +165,10 @@ elsewhere without moving (`help {topic "threads"}`).
   - hand it over: add `hand_over true`. The hold stands, and the timeline lists
     it under "waiting on a person". Tell the person why.
 
-  An answer covers that version of the form, so an edit asks again. A blank
-  reason is refused. A person reads each reason beside the code it is about, so
+  An answer covers that version of the form until you edit it, across later
+  dones too. A blank reason, a rule no done check has, and a form the store
+  does not have are refused. An answer on a rule this store does not dial to
+  `ask` is recorded and named under `:no-effect`: it changes nothing. A person reads each reason beside the code it is about, so
   say what you checked, and hand over when you are not sure. A reason that does
   not fit the evidence is worse than no answer. Rules that grade your own change
   do not ask: a lost assertion (`:test-checks-lost`) is still the person's
