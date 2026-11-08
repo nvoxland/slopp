@@ -16,22 +16,49 @@ Review starts at a milestone, not at a file.
 
 1. **Timeline** (`/`). Commit points, newest first, each linking to its own
    change screen. Below them is the working set: what has changed since the
-   last commit point, with a capped listing and an exact count.
-2. **Change screen** (`/change/<from>..<to>`). One range of history, read
-   module, then namespace, then form. Every changed form shows three things in
-   this order:
-    - the **recorded ask**: the reason the agent gave when it wrote the form,
-      and the user's verbatim request it was working under (see
-      [History and provenance](history.md));
-    - a **per-line diff**;
-    - the **blast radius**: what calls the form, and which tests cover it.
+   last commit point, with a capped listing and an exact count. Above both,
+   when a `done` is holding a test for a lost or changed assertion, a
+   **held tests** panel lists each one with what it lost and the thread
+   holding it, and a **release** button that releases it under your name,
+   signed in with `slopp server token`. A **decisions** panel lists how the
+   agents answered `done`'s questions. Hand-overs come first, under "waiting
+   on a person". Each row names the rule, the form, the reason and who gave
+   it, and says when the form has changed since the answer.
+2. **Change screen** (`/change/<from>..<to>`). One range of history, read in
+   four bands in a fixed order: logic, structure, tests, wiring. Inside a band,
+   forms go by risk, and every risk point shows its reason. Module and namespace
+   are a tag on each row, never the order.
+    - **Logic** rows show the recorded ask (see
+      [History and provenance](history.md)), a per-line diff, what calls the form,
+      how strong the evidence behind it is, and any owned keys it touches. Wiring
+      that crosses a boundary, adds a dependency, or changes a route or permission
+      is read here too.
+    - **Structure** rows show a table of the fields that changed, and the logic in
+      the range that touches their keys.
+    - A changed **test** sits once, under the code it covers, with its own diff.
+      The tests band holds only those that cover nothing changed here.
+    - **Wiring** is folded under a sentence that counts it by kind and names what
+      moved up. Nothing is dropped.
+
+   Before the bands, the screen checks the asks against the changes by name:
+   forms an ask names that did not change, changed logic no ask names, and a
+   claim of no behaviour change on a form whose body changed.
 
    Above the forms, the screen says what it did not see (changed forms no test
    was observed running, housekeeping writes) and lists any test an agent
-   flagged in the range with `flag_test`: the agent was refused an edit to a
-   test grading its own change and recorded its objection instead. Each flag
+   flagged in the range with `flag_test`: the agent disputed a test grading
+   its own change and recorded its objection instead of changing it. Each flag
    names the test, the reason and the agent, and stands until a person edits
    or deletes the test.
+   It lists the decisions recorded in the range the same way: the findings an
+   agent left waiting on a person first, then the ones it proceeded past, each
+   with its reason. Read the reason against the code it is about.
+   The screen also lists any test edited only by adding entries to an expected
+   map. `done` does not hold that edit, because it makes the test stricter, so
+   a person can still see each one. A test that lost an assertion never
+   reaches this screen unreleased: `done` holds it until the person names it
+   or releases it from the timeline's held tests panel (see
+   [Done and commit points](done-and-commit-points.md)).
 3. **Form permalink** (`/store/form/<id>`). Each form on the change screen links
    here. The page is laid out for someone who arrives cold from a link: a
    breadcrumb, the callers above, the form itself, and the callees below with

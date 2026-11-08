@@ -154,8 +154,11 @@ It records itself in `~/.slopp/server.json` (`url pid token`, readable by
 its owner only — the token is the write door's secret); `slopp
 <op>` and the prompt hook route there. The same token signs a person in to the
 change screen, so they can endorse or flag a commit point: `slopp server token`
-prints it. Do not record a review yourself. Its whole value is that a person
-looked, and nothing stops an agent with the same OS user but this rule. **The slopp server is the user's to start
+prints it. The same token signs the release door, `POST
+/api/projects/<slug>/release {"tests" [...]}`, which releases tests a `done`
+holds for a lost assertion. Do not record a review or a release yourself. Their
+whole value is that a person looked, and nothing stops an agent with the same OS
+user but this rule. **The slopp server is the user's to start
 and stop** (`slopp server`, `slopp server stop`): nothing else starts one,
 and a call or a session with nothing live on the configured port fails with
 a sentence saying to start it — a server nobody started is a server nobody

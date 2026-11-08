@@ -29,6 +29,7 @@ conclusions, so the review reasons about findings, not source dumps.
 
 ## Where to start (don't read everything)
 
+0. **One range → `review_scan {from to}`.** Every changed form and store change with its `:class`, `:band` and `:reasons`, each risk point with its `:why`, logic first. Wiring that crossed a module boundary, added a dependency or moved a route or permission marker bands with logic.
 1. **Whole-codebase triage → `review_scan`.** Risk-ranks every form by signal:
    `:untested` (unreachable from any test in the call graph), `:off-platform`
    (`:cljs` — the JVM oracle cannot load it, so nothing could cover it), `:unused`
@@ -43,8 +44,8 @@ conclusions, so the review reasons about findings, not source dumps.
    `verify {op mutate}` runs the pass over what earlier dones did not reach.
    A change lands only with a test that fails against its old version, so
    the changes to read hardest are the ones that skipped that proof: the
-   `:unproven-change` `:waived` rows in a done's findings (each with the
-   author's reason) and functions marked `^{:untested-ok "why"}`.
+   agents' `decide` answers (below) and functions marked
+   `^{:untested-ok "why"}`.
    Start at the top of the risk ranking, not the top of a file.
 
    A row with `:escapes` (flag `:escape`) uses an escape hatch: the sorted
@@ -63,12 +64,27 @@ under review:
   agent work fails most, so read those more closely.
 - `:unread-callees`: the edit was made without reading what the form calls.
 - A `:finisher` in a change result: the agent moved a literal expectation with
-  `accept`, which the test guard leaves open on purpose. Check the new value is
-  what the ask wanted.
+  `accept`. A moved expected value is a changed assertion, so `done` holds it
+  until the person names the test or releases it. Check the new value is what
+  the ask wanted before you release it.
 - `rejected`, on the change screen: the alternative the author turned down.
 
-A row flagged `:flagged-test` has an oracle the agent disputes: it was refused
-an edit to a test grading its own change and recorded `flag_test` instead. The
+**Read the decisions first.** `done` asks the agent about what it may have
+missed instead of blocking it, and the agent answers each question: proceed
+with a reason, or hand it over. The scan's `:decisions` lists every answer
+(rule, form, choice, why, who, `:standing`), and the change screen and the
+timeline show them. Rows carry a flag for each:
+
+- `:handed-over`: the agent stopped on this finding for a person. That is a
+  question waiting for you, and the thread stays held until someone acts.
+- `:decided`: the agent proceeded. Check the reason against the code. The
+  measured failure is a fluent reason for a finding that was real.
+- `:stale-decision`: the answer covers an older version of the form. The next
+  `done` that sees the finding asks again.
+
+A row flagged `:flagged-test` has an oracle the agent disputes: it chose not to
+change a test grading its own change, or was refused, and recorded `flag_test`
+instead. The
 scan's `:flagged-tests` lists each objection (test, reason, who), and the change
 screen for the range shows the same. That is a decision waiting for a person:
 read the test and the code and decide which one is wrong. Editing the test (or

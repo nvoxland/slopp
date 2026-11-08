@@ -455,8 +455,9 @@ The main `slopp` skill has the mechanics; these are the shapes worth writing.
 - **Write the failing reproduction test first.** Of the test shapes measured on
   agents, it has the strongest effect on correctness; a regression test written
   after the fix adds little. Mechanics: `change {tests ...}` and `:red-first`.
-  **Enforced:** `done` holds the landing when a changed function has no test
-  that fails in the state before the change (`:unproven-change`); the order you
+  **Enforced, as a question:** `done` asks when a changed function has no test
+  that fails in the state before the change (`:unproven-change`, held until you
+  fix it or answer with a reason); the order you
   wrote them in does not matter. **Advisory:** `assertions-never-red` when a test
   gained assertions that were never seen failing.
 - **One property and one example per behaviour.** They catch different bugs (a
@@ -481,12 +482,12 @@ The main `slopp` skill has the mechanics; these are the shapes worth writing.
 - **Print and eval output you ran while working is not a test.** Only a
   committed assertion is.
 - **A test you believe is wrong is not yours to weaken.** Do not edit the
-  assertion to make it pass. **Enforced:** a write that edits a test whose
-  observed coverage reaches a form you changed this episode is refused; record
-  the objection with `flag_test {ns name reason}` and tell the human in your
-  reply. A helper or fixture in a test namespace that such a test runs is guarded
-  the same way, and so is a new `use-fixtures` over it. A test you created this
-  episode stays yours, and an ask that names the test or helper lifts the guard.
+  assertion to make it pass. **Enforced at `done`:** an existing test that lost
+  or changed an assertion, or was deleted, holds the landing until the person
+  names it in their ask or releases it through the server's release door. A setup edit that leaves the test passing on the old code is reported.
+  Adding entries to an expected map in `(is (= expected ...))` asks more and is
+  only listed. If you would rather not change the test, record the objection
+  with `flag_test {ns name reason}` and tell the human in your reply.
 
 - **A test a human endorsed is the readable spec.** One behaviour per test,
   named as a sentence, small enough for the person who asked to read and say
@@ -508,7 +509,7 @@ functions and plain data, and teach the addition with an example.
 
 **`query_rules` shows exactly what's enforced in THIS store, at what severity, and
 how to discharge each rule** — a project can dial any rule `:off`/`:advisory`/
-`:error`/`:refuse` with `config_file {path "rules" key <rule> value <severity>}`,
+`:ask`/`:error`/`:refuse` with `config_file {path "rules" key <rule> value <severity>}`,
 so treat the table below as the defaults and `query_rules` as the truth here.
 Turning down a security rule (`process-launch`, `java-deserialization`,
 `facet-reveal`, `security-hazard`) needs the human's ask to name the rule.
@@ -531,18 +532,18 @@ cover, so drifting either way turns the suite red.
 | No Java deserialization in shipped code | **Yes** (write gate `:java-deserialization`, production only) — `ObjectInputStream` runs code chosen by whoever wrote the bytes; read data with `clojure.edn/read-string` or a JSON reader. No marker discharges it; the per-store rules dial is the only escape, and it needs the human's ask to name the rule |
 | Cross-module edge declared; no cycles; cohesion vs export | **Yes** (module gate at write) — plus `done`'s `:module-governance` and `full_check`'s `:module-violations`, both error-grade, because a RELOCATION rewrites callers without writing them through the gate |
 | Public surface documented | **Yes** (write advisory) |
-| Dead public surface removed | **Yes** (`done`/`commit_point` gate) |
+| Dead public surface removed | **Asked** — `done` holds an `:unused-public` or `:stale-unused-ok` finding until you delete it, mark it `^:unused-ok`, or answer with `decide` |
 | Pure core / IO at the edge (locale) | **Yes, when a namespace declares a tier** — `module_purity {module tier :pure/:internal/:external}` hard-refuses a form exceeding it; **`:pure` also forbids non-determinism** (`rand`/`slurp` — referential transparency). Declaring verifies the existing code, so a tier cannot claim more than it earns |
 | Core does not depend on shell (layering) | **Yes** — `full_check` REFUSES (red) on a non-`:external` namespace requiring an `:external` one. Whole-graph, so it lives at `full_check`, not the write gate; catches the transitive IO a non-bang callee hides from effect-reachability |
-| Boundary schemas on exports | **Yes** — a written `:=>` `:malli/schema` is generatively oracle-checked at `done` (drift → red `:schema-drift`); opt-in `require-boundary-schemas` gate mandates them on module-external map-arg fns |
+| Boundary schemas on exports | **Yes** — a written `:=>` `:malli/schema` is generatively oracle-checked at `done` (drift → `:schema-drift`, asked); opt-in `require-boundary-schemas` gate mandates them on module-external map-arg fns |
 | Key hygiene (namespaced + no near-dups) | **Yes** — `done` flags likely-typo keys (`:key-typos` advisory); opt-in `require-namespaced-keys` gate refuses bare `{:keys}` at a boundary; browse/reuse with `query_vocabulary` |
 | Accretion over breakage | **Advisory** — `done` flags a narrowed boundary contract (`:breaking-changes`: arity / `:=>` schema-key / visibility, vs the last-done baseline) |
-| Return data over a bare `throw` at a boundary | **Advisory** — `done` flags a module-external fn throwing a freshly-constructed non-`ex-info` exception (`:bare-throw`) |
+| Return data over a bare `throw` | **Asked** — `done` holds a fn throwing a freshly-constructed non-`ex-info` exception (`:bare-throw`) until you fix it, mark it `^{:bare-throw-ok "why"}`, or answer with `decide` |
 | No ambient global mutable state | **Advisory** — `done` flags a global `(def _ (atom/ref/agent …))` (`:ambient-state`) |
 | `?` / `*earmuffs*` predicate / dynamic-var naming | Judgment (no gate yet) |
-| A changed function has a test that fails without the change | **Yes** — `done` holds the landing (`:unproven-change`); exits: `done {untested {"ns/name" "why"}}` for a refactor, `^{:untested-ok "why"}` for a function no in-image test can watch |
+| A changed function has a test that fails without the change | **Asked** — `done` holds the landing (`:unproven-change`) until answered; answers: a test, `done {untested {"ns/name" "why"}}` for a refactor (the short form of `decide`), `^{:untested-ok "why"}` for a function no in-image test can watch |
 | Failing test seen red before green | **Advisory** — `done` flags `assertions-never-red` |
-| A test grading your change is not yours to edit | **Yes** — the write is refused; `flag_test` records the objection |
+| A lost or changed assertion is the human's decision | **Yes** — `done` holds the landing (`:test-checks-lost`) until the ask names the test or the person releases it through the server's release door; a setup edit that passes on the old code is **advisory** (`:test-proves-nothing`); `flag_test` records an objection |
 | Tests fail when the code is wrong | **Advisory** — `done` mutation-tests changed functions (`:mutants-survived`, about 10s budget; `verify {op mutate}` for what it did not reach) |
 | An endorsed test is the human's | **Yes** — agent edits and self-endorsement are refused unless the ask names the test |
 | A facet declaration is well formed (checks resolve and have a `:doc`, views name fields, one owner per key) | **Yes** — write gate `facet-declaration`; `done` re-asks over every facet as `:facet-integrity` (`:error`, also checks each check is pure) and `:facet-fields` (`:error`, malli accepts the fields) |

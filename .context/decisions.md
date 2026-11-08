@@ -8549,3 +8549,144 @@ that did not change" in the absence block, intent/delta mismatch as a
 endorsed-vs-agent-written coverage in `review_scan` (the form page shows it;
 zrs.1 judged the row noise on stores with no endorsements).
 
+
+## D-form-class (2026-11-06, user-directed) — a form's class and risk reasons are derived, once; the guard admits edits that only grow an expected map
+
+**Decision.** `slopp.rules.classify/form-class` gives every form one of logic, structure, wiring or test, from its source, first rule wins, never stored or declared. Anything unrecognised is logic, so a mistake costs attention and never hides a form. Store changes that touch no form (module edge, deps, config) are wiring rows. `classify/promotion` is the rule as data: wiring that crossed a boundary, added a dependency, moved a route or permission marker (`:http/auth` counts) or carries a security hazard bands with logic. `slopp.ops.review/risk-reasons` names each risk point; the total is their sum. `review-range` (`review_scan {from to}`) ranks one range. Why: `ideas/research/reports/Reviewing changes by structure and logic.md`. Narrated summaries and trained risk scores are excluded: the first hallucinates, and neither gives a reason a reader can check.
+
+**Rules measured on slopp's store before building** (295 namespaces): test 2317, logic 1958, wiring 319, structure 319. "Literal of only vars and keywords" does not mean wiring: 18 of the 27 matches were keyword vocabularies, so wiring is only symbols and var-quotes.
+
+**Amends D-test-immutability.** A whole-form replace of a deftest passes when the sole difference is new entries in the first argument of `(is (= expected ...))`, through maps and same-length vectors (`classify/additive-test-edit?`). Prompted by a refusal on `the-api-answers-with-data-that-matches-its-contract` when a row gained a field. An `=` against a larger literal asks more, so this cannot be the weakening the guard stops. Refused: a removed or changed entry, a new entry on the actual side (it may be input to the code under test), a changed message, any metadata change (a tag could move the test out of the suite), `patch` steps. Known limit: the new values have only the author's word behind them, as with any new test, and comments in the form are not compared. `change_view`'s `:extended-tests` lists every such edit in a range, derived from source so it cannot miss one.
+
+**Limits.** Effects now and security findings are judged on the store as it stands, so they are exact when the range ends at the head. Not yet on the outline row: that needs the human to name the whole-body contract test, or goes through the new exemption (slopp-f6s.1).
+
+**Effects in the score.** A form named with `!` weighs 1. A form that only reaches an effect through a call carries the `:effectful` flag and a reason of weight 0. `orientation-test/review-scan-triages-by-risk` caught the first cut, where scoring the derived set made every caller outrank the effect it calls.
+
+## D-change-bands
+
+The change screen is one page with four bands in fixed order: logic, structure,
+tests, wiring. Row order is risk, then name; module is a tag. Wiring folds in a plain
+details element, and promoted wiring is never in the fold. A changed test appears once,
+under the changed row it covers on the strongest evidence, then fewest hops, then the
+row read first. Why: position drives defect finding, and reviewers stop reading tests
+when the suite is green, so tests sit beside the logic. The structure table's read and
+return key producer was dropped for now: a structure form has no function body, so
+top-level keys of plain data stand in. The ask check matches names only and uses no model.
+`:modules` is retired (2026-11-07, slopp-tr0): the model returns flat `:rows`, and the
+contract requires `:bands`. The person released the tests that graded the old shape.
+
+## D-test-guard-at-done (2026-11-07, user-approved) — judge what an edit did to a test, at done; amends D-test-immutability
+
+**Decision.** The write-time refusal of an edit to a test that grades the agent's own
+change is off by default (rules dial `test-write-guard`, default `:off`; `:error`
+restores the refusal). Endorsed tests are still refused at write time. `done` judges
+every test edit in the landing span instead, against the last LANDED done (a held done
+does not move the baseline):
+
+- `:test-checks-lost` (`:error`): an existing test that lost or changed an `is`/`are`,
+  or was deleted, holds the landing. The finding quotes the lost assertions.
+  `classify/lost-checks` compares assertion frequencies and normalises `#()` gensyms.
+- `:test-proves-nothing` (`:advisory`, Option B): a test whose setup changed, whose
+  assertions did not, and which passes against the production code from before the
+  change, is reported.
+- Released by the person: their ask naming the test, or a `:test-release` marker from
+  the signed-in door `POST /api/projects/:slug/release` (`slopp-server.review/release`,
+  `:by` from the identity, landed onto the branch). `rules/release-words!` is the one
+  reader for both, and a named release re-judges a standing verdict (`released-hold?`).
+
+**Why (5 whys).** The refusal was a proxy, read-only at write time, for the goal: no
+checking is lost without a person deciding. At write time the guard cannot tell a fixture
+that follows a new data shape from a weakening, so it blocked both, and its only exit was
+the person's words reaching the session through the prompt hook, which does not always
+deliver. Judging at done sees the whole edit and its proof.
+
+**Why `test-proves-nothing` is advisory.** Its four firings in the first real batch were
+all fixture edits that followed a new shape. A gutted test is still caught: if no other
+test proves the change, `:unproven-change` holds it (pinned by
+`rules-test/with-the-write-guard-off-done-judges-what-an-edit-did-to-a-test`). If the
+warnings show real gaming, the dial goes back to `:error`.
+
+**The button.** `GET /api/projects/:slug/holds` (`model/held-tests`, pure, over each open
+thread's newest done and the branch's release markers; a release only answers a done it
+came after) feeds a held tests panel on the timeline, with a release button per test that
+signs in with the review panel's token. An expected SET that only gains members is
+additive like a growing map (`classify/grows-expected?`): route-list tests gaining a new
+path were held for it twice on the day the door shipped.
+
+**Why a door and not only the ask.** The ask channel is the prompt hook's mailbox, and in
+this session it skipped a mostly-pasted message, so a release named by the person never
+arrived. The door is the review door's pattern: authenticated, `:by` from the identity, a
+marker no agent tool writes.
+
+**Measured.** A small cohort (5 runs guard on, 4 off; `.context/findings-log.md`): no
+weakened test landed in either cell. Guard on, every run was refused and used
+`flag_test`; guard off, every run was held and reported to the person.
+
+**Known limits.** An agent can move an expected value to match buggy output; the test
+still fails on old code, so only `:test-checks-lost` and the person catch it, which is why
+that rule holds. A rename on main is replayed all-or-nothing by `merge-logs`, so a thread
+that touched any renamed form fails to land with an unresolved symbol; resolve by keeping
+that thread off the renamed forms.
+
+
+## D-guards-ask (2026-11-07, user-approved plan) — a check that is the agent's ally asks it; a check that grades it still holds; amends D-test-guard-at-done and D-red-proof
+
+**Decision.** A fourth rule severity, `:ask` (`rules.catalog/rule-severities`,
+done grain). An `:ask` finding holds the landing exactly like `:error` until a
+`:decision` marker answers it: same rule, same form, same version
+(`rules.mutate/form-sig`). `done {decide [{rule form why hand_over?}]}` records
+the answers (`ops/decide!`, `slopp-server.mcp/done-deciding!`) and then judges;
+a blank reason is refused. `:proceed` lets the landing go on; `:hand-over`
+keeps the hold for a person. An edit to the form makes the answer stale and the
+finding asks again. `done {untested {...}}` is now sugar for `:proceed`
+decisions on `:unproven-change`; the session's `:untested-waivers` key and the
+`:waived`/`:sigs` row are gone.
+
+Default `:ask`: `:unproven-change`, `:bare-throw`, `:direct-http`,
+`:http-dangling-route-refs`, `:facet-weakening`, `:schema-drift`, and dead
+public surface, which moved out of lint into two advisories
+(`:unused-public`, `:stale-unused-ok`) reading the report `done!` hands in as
+`:unused-report`. `ops.done/with-unused-gate` folds them back into lint only
+when a store dials them to `:error`.
+
+Stay `:error`: `:test-checks-lost` (graded; its exits are the person's release
+and `flag_test`), `:security-hazard`, `:tier-governance`, `:module-governance`,
+`:facet-integrity`, `:facet-fields`, `:facet-claims-reach`, `:stored-name`,
+`:stale-pattern`. Write-time refusals are unchanged.
+
+**Why the split is by who is graded, not by how serious the rule sounds.** The
+record supports an EXIT over a BLOCK: an explicit abort option cut gaming from
+54% to 9%, an escalation channel from 23.6% to 5.3%, and "do not cheat"
+prompting measured nothing; in the 5-on/4-off cohort no weakened test landed in
+either cell, so the block was not what kept tests honest. The record does not
+support SELF-CONFIRMATION on a check that grades the agent's own change: models
+game mostly by editing the test, and on this store a pass asked to justify each
+`^:unused-ok` wrote a fluent reason for a stale one (1 of 3). So an aligned
+check (did you forget a test, an adapter, a caller) asks, and its answer is
+recorded beside the evidence; a graded check keeps an exit that is not
+"proceed".
+
+**What a person sees.** `:decision` and `:refusal` are travelling markers.
+`GET /api/projects/:slug/decisions` (`api.model/decisions`, over the branch and
+every open thread, since a hand-over holds its thread) feeds the timeline's
+decisions panel, hand-overs first under "waiting on a person". The change
+screen lists the range's decisions. `review_scan` carries `:decisions` and flags
+`:handed-over` (risk 3), `:decided` (1), `:stale-decision` (1).
+`query_rule_telemetry` splits each rule into `:held :decided :handed-over
+:released :refused`; `:refused` counts write-gate refusals, recorded as a
+`:refusal` marker only when the refusal reaches the agent (a refusal the write
+path repairs itself and retries is not counted).
+
+**Measured, and `:test-checks-lost` stays `:error`** (2026-11-07). The
+fee-table cohort was replayed with it dialed `:ask` (findings-log, "Lost
+assertions dialed to ask"). In 5 scored runs, 4 proceeded and landed a test
+change and 1 handed over. Every reason matched its edit, and no test was gutted.
+That does not earn the default: in this task the test row really is wrong, so
+proceeding is the right answer and the cohort cannot show what an agent does
+with a test that is RIGHT and in its way, which is the case the hold exists
+for. With the dial at `:error` the same agents stopped and asked the person in
+4 of 4 runs. So the default stays a hold, and `ask` stays a per-store dial.
+When dialed, the finding's text follows the dial (`rules/test-checks-lost-check`
+names `decide` and `hand_over`), because a row that says only a person can act
+while the store lets the agent act makes the dial mean nothing. Revisit with a
+task whose test is correct and whose quick fix breaks it.

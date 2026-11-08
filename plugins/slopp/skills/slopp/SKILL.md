@@ -69,7 +69,9 @@ elsewhere without moving (`help {topic "threads"}`).
    `tests` land first and the result says which went RED (watched
    failing); `impl` lands; `accept ["ns/test" …]` names the tests whose
    literal expectations your change is MEANT to move, and their shifts
-   finish in the same call; one verification, one result. `done "label"`
+   finish in the same call (a moved expectation is a changed assertion, so
+   `done` holds it until the person names the test); one verification, one
+   result. `done "label"`
    says this change FINISHES the unit: it is closed in the same call
    (`:closed {:done :landed :suite :whole-store}`); `commit true` (or a
    label) takes the commit point there too. The write that finishes an
@@ -136,15 +138,37 @@ elsewhere without moving (`help {topic "threads"}`).
   so a change that only rode along with a real fix does not land either. A
   changed `deftype`, `defrecord`, `extend-type` or `extend-protocol` is reported
   as unjudged, not proven, so check those by hand. Docstring edits
-  and renames are not checked. Two exits, both visible in review: for a change
-  that keeps behaviour (a refactor), `done {untested {"ns/name" "why"}}`, which
-  covers that exact version until you edit it again and is refused with no
-  reason; for a function no in-image test can watch, `^{:untested-ok "why"}` on
-  its name. A function only `^:external` tests reach is reported, not held; a
+  and renames are not checked. This finding is a question (see `:asks` below).
+  Two answers other than a test, both visible in review: for a change that
+  keeps behaviour (a refactor), `done {untested {"ns/name" "why"}}`, the short
+  form of a `decide` answer, which covers that exact version until you edit it
+  again and is refused with no reason; for a function no in-image test can
+  watch, `^{:untested-ok "why"}` on its name. A function only `^:external` tests reach is reported, not held; a
   test that only names a function, as in `(is (fn? f))`, does not count as
   reaching it. `def` of a `fn` and `defmethod` are checked like `defn`. A pull skips this for what
   commits slopp stamped as passing brought, because they proved it where they
   were written.
+- **A `done` that returns `:asks` is asking you a question, not failing.**
+  The rules that check what you may have forgotten are `ask` grade:
+  `:unproven-change`, `:bare-throw`, `:direct-http`, `:http-dangling-route-refs`,
+  `:facet-weakening`, `:schema-drift`, and dead public surface (`:unused-public`,
+  `:stale-unused-ok`). Each row under `:asks` holds the landing until you answer
+  it, and carries the rule's `:teach`. Answer on the next `done`, one of three
+  ways:
+  - fix it, and the finding goes away;
+  - proceed: `done {decide [{rule "bare-throw" form "ns/name" why "what you
+    checked, and why it holds"}]}`;
+  - hand it over: add `hand_over true`. The hold stands, and the timeline lists
+    it under "waiting on a person". Tell the person why.
+
+  An answer covers that version of the form, so an edit asks again. A blank
+  reason is refused. A person reads each reason beside the code it is about, so
+  say what you checked, and hand over when you are not sure. A reason that does
+  not fit the evidence is worse than no answer. Rules that grade your own change
+  do not ask: a lost assertion (`:test-checks-lost`) is still the person's
+  release, and the security, tier and module rules still hold. A store can
+  dial `test-checks-lost` to `ask`; then its finding names the `decide` call,
+  and a change to a test you are not sure is wrong is a hand-over.
 - **Assert the behaviour, not the fixture.** A repro can be too minimal; a
   test whose expected value was copied from the actual value is not a test.
 - **A test that runs your code must also fail when the code is wrong.**
@@ -160,18 +184,31 @@ elsewhere without moving (`help {topic "threads"}`).
   its time limit counts as killed, but its loop can keep running in the image
   and slow every later run; when `done` lists one `:timed-out`,
   `build {op restart}` clears it.
-- **A test grading your change is not yours to edit.** Changing a test whose
-  traced coverage reaches a form you changed this episode is refused. If you
-  believe it is wrong, `flag_test {ns name reason}` records that for the human
-  (the `edit` family) — then say so in your reply. The same holds for a helper
-  or fixture in a test namespace that such a test runs, and for a new
-  `use-fixtures` over it, since a helper that answers true silences the
-  assertion. Tests and helpers you wrote this episode stay editable, and a new
-  helper is always open; an ask that names the test or the helper lifts the
-  guard. The refusal quotes the ask it read. If that is not what the person
-  just said, or it says no ask has arrived, the prompt hook is not delivering:
-  tell them, because a restart with the server up is the fix. Never supply
-  their word yourself.
+- **Losing a check in a test is the human's decision.** You may edit any test
+  that is not endorsed, and `done` judges what the edit did to it, against the
+  last landed done:
+  - An existing test that lost or changed an assertion, or was deleted, holds
+    the landing (`:test-checks-lost`). The finding quotes what the test no
+    longer has. Tell the person why, and name the test. Their ask that names
+    it releases the hold. So does the **release** button beside each held
+    test on the project's timeline page (`<pages>`, signed in with `slopp
+    server token`), which sends `POST /api/projects/<slug>/release`. Point
+    them there. Never send that release yourself: its value is that a person
+    decided.
+  - A test whose setup changed but whose assertions did not, and which now
+    passes against the code from before the change, is reported
+    (`:test-proves-nothing`, advisory). If nothing else proves the change,
+    `:unproven-change` still holds it.
+  - Adding entries to the expected map, or members to the expected set, of an
+    `(is (= expected ...))` asks more, so it is not judged; the change screen
+    lists it.
+
+  If you believe a test is wrong and do not want to change it yourself,
+  `flag_test {ns name reason}` records that for the human (the `edit` family).
+  A store can bring back the old write-time refusal with `config_file {path
+  "rules" key "test-write-guard" value "error"}`. When a release does not
+  arrive, the prompt hook may not be delivering: tell the person, and point
+  them to the release door. Never supply their word yourself.
 - **A call past 50 s answers `{:running "run-1"}`.** That is not a failure: the
   work carries on, and `query_detail {id}` waits for it and returns its answer.
   Sending the same call again joins the run and does not repeat the work.

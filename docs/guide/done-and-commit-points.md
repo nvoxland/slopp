@@ -82,6 +82,36 @@ history) and are bounded by the last done point. A thread holds everything
 since the last thing that **landed**, which after a red done or two is more
 than one episode.
 
+## A done asks before it holds
+
+Most of the rules `done` runs check for something the agent may have forgotten:
+a function with no test that shows it was needed, a bare `throw`, a raw HTTP
+call, a link to a route nobody serves, a facet made looser, a schema that
+disagrees with its function, a public var nothing calls. These rules are
+`ask` grade. A finding from one of them comes back under `:asks`, with the
+rule's teaching, and holds the landing until the agent answers it:
+
+```clj
+done {decide [{rule "bare-throw" form "app.core/parse" why "the Java API we implement requires IOException"}
+              {rule "unused-public" form "app.core/legacy" hand_over true why "may be called by the CLI shim"}]}
+```
+
+An answer is one of three: fix it, proceed with a reason, or hand it over. A
+hand-over keeps the hold, and the timeline lists it under "waiting on a
+person". Each answer is recorded with who gave it and the version of the form
+it covers, so a later edit asks again. A blank reason is refused.
+
+The reason for asking instead of blocking is measured. An agent that has an
+honest way out games a check far less often than one that is only blocked, and
+telling it not to cheat changes nothing. The record is what keeps it honest:
+every answer is shown to a person beside the code it is about.
+
+Some rules do not ask, because they grade the agent's own change, and an agent's
+word is weak evidence there. A lost assertion is still the person's release
+(below), and the security, purity tier and module rules still hold. A store can
+dial any rule to another grade with `config_file {path "rules" key <rule>
+value <severity>}`, for example `unproven-change` back to `error`.
+
 **`done` reports, it does not refuse.** It records the boundary honestly and
 tells you "not done yet", so a finding you cannot fix right now never
 deadlocks you. What refuses is `commit_point`, and a red `done` stands until
@@ -141,8 +171,8 @@ every form is in scope establishes nothing and is green for a reason that has
 nothing to do with the code. Those rules are listed under `:not-swept` with
 the reason, rather than padding the count under `:swept`.
 
-`:error`-grade findings flip the status; `:advisory` ones are reported and do
-not. That is the same bar `done` grades on, deliberately: a rule means one
+`:error`-grade findings flip the status, and so do `:ask`-grade ones nobody has
+answered; `:advisory` ones are reported and do not. That is the same bar `done` grades on, deliberately: a rule means one
 thing, and the sweep is a different population rather than a different
 standard.
 
@@ -167,10 +197,11 @@ with either half alone. When several changed functions share a failing test,
 each must then show its own effect on it, so a change that only rode along with
 a real fix does not borrow its proof. A changed `deftype`, `defrecord`,
 `extend-type` or `extend-protocol` cannot be put back safely in a running image,
-so `done` reports it as unjudged. Docstring edits and renames are not checked. A refactor
-that keeps behaviour is waived on the done call, `done {untested {"ns/name"
-"why"}}`, for that exact version, and a function no in-image test can watch
-carries `^{:untested-ok "why"}`. Both reasons show in review. A function that
+so `done` reports it as unjudged. Docstring edits and renames are not checked. This is an ask-grade
+rule. A refactor that keeps behaviour is answered on the done call, `done
+{untested {"ns/name" "why"}}` (the short form of `decide`), for that exact
+version, and a function no in-image test can watch carries `^{:untested-ok
+"why"}`. Both reasons show in review. A function that
 only `^:external` tests reach is reported but not held, because the image cannot
 run those tests. A test that only names a function does not count as reaching it. A pull skips the check for what its incoming commits brought
 when slopp stamped all of them as passing. When there is also no local work, the
@@ -193,27 +224,51 @@ On the day it shipped, a third of these planted faults in slopp's own recently
 changed code got past the tests `done` runs. Two days later it was a quarter,
 over different code, so that is a direction and not a measured effect.
 
-**The test grading a change is not the agent's to edit.** A write that changes
-an existing test whose traced coverage reaches code the agent changed in this
-episode -- or is changing in the same call -- is refused. So is a change to a
-helper or fixture in a test namespace that such a test runs, and a new
-`use-fixtures` over it, because a helper that always answers true silences the
-assertion just as well. The agent records its objection with `flag_test`, and
-the person decides.
+**Losing a check in a test is the person's decision.** An agent may edit a
+test, and `done` judges what the edit did to it, against the last landed done.
+A test that lost or changed an assertion, or was deleted, holds the landing.
+The finding quotes what the test no longer has, so the person sees exactly
+what would go. They release it by naming the test in their next message, or
+with the **release** button beside the test on the project's timeline page,
+which lists every held test with what it lost and the thread holding it. The
+button signs in with the server token (`slopp server token`), the same one the
+review panel takes. The same release from a shell:
+
+```
+curl -X POST -H "Authorization: Bearer $(slopp server token)" \
+     -H 'content-type: application/json' \
+     -d '{"tests": ["my.core-test/a-test"], "note": "why"}' \
+     http://127.0.0.1:7357/api/projects/<slug>/release
+```
+
+The release is recorded with the person's identity and lands on the branch,
+where every agent's next `done` reads it. A test whose setup changed but whose assertions did
+not, and which now passes against the code from before the change, is
+reported. If no other test proves the change, the change itself stays held
+as unproven. An agent that thinks a test is wrong can record that with
+`flag_test` instead of changing it.
+
+This used to be a refusal at write time, and a store can still choose that
+(`config_file {path "rules" key "test-write-guard" value "error"}`). It was
+moved to `done` because a write cannot tell a fixture that follows a new data
+shape from a weakened test. A refusal blocked both and could only be lifted
+by the person's words, which do not always reach the agent.
 
 **A test a person endorsed is the readable spec.** `^{:endorsed "who: what it
 pins"}` on a test says a human read it and agreed. No agent edits it or adds
 the marker; both need an ask from the person that names the test.
 
-## Dead surface is a hard gate
+## Dead surface is a question
 
-A public `defn` or `def` that nothing in the store calls is an error at `done`,
-and it refuses commit points globally.
+A public `defn` or `def` that nothing in the store calls is an ask at `done`
+(`:unused-public`): it holds the landing, and so the commit point, until it is
+deleted, marked, or answered with `decide`. A store that wants the old hard
+gate dials `unused-public` to `error`.
 
 Deliberate? Mark the name: `(defn ^:unused-ok f ...)` -- for genuinely external
 surface, string-eval'd entry points, runtime-resolved handlers. The dial
-polices itself: putting `^:unused-ok` on a var that *is* called fails with
-"remove the flag". Fixture namespaces in tests follow the same rule, and edits
+polices itself: putting `^:unused-ok` on a var that *is* called is asked about
+too (`:stale-unused-ok`), with "remove the flag". Fixture namespaces in tests follow the same rule, and edits
 must keep the marker.
 
 Public functions without a docstring get a one-time advisory on the write --

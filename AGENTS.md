@@ -181,9 +181,11 @@ plus the links, and skips cleanly when `ideas/` is absent (a fresh clone).
   not once at the end** — finishing a unit of work and starting the next IS
   a done point, and finding out you weren't done is cheapest right then.
   `done` runs the whole in-image suite plus impacted `^:external` tests. It
-  never refuses the call, but a red result or an `:error` rule
-  (`:unproven-change`, `:security-hazard`, `:direct-http`, ...) holds the
-  landing; `commit_point` has no checks of its own and
+  never refuses the call, but a red result, an `:error` rule
+  (`:security-hazard`, `:test-checks-lost`, ...) or an unanswered `:ask`
+  rule (`:unproven-change`, `:direct-http`, dead surface, ...) holds the
+  landing. An ask is a question: answer it with `done {decide [...]}` (see
+  the `slopp` skill); `commit_point` has no checks of its own and
   gates on done's verdict, so there is exactly ONE bar. A red done STANDS
   until new work supersedes it. `done` is EPISODE-scoped (its `:scope` field
   says so); **`full_check`** is the whole store — every namespace, every
