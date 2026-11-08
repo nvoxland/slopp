@@ -143,7 +143,10 @@ elsewhere without moving (`help {topic "threads"}`).
   keeps behaviour (a refactor), `done {untested {"ns/name" "why"}}`, the short
   form of a `decide` answer, which covers that exact version until you edit it
   again and is refused with no reason; for a function no in-image test can
-  watch, `^{:untested-ok "why"}` on its name. A function only `^:external` tests reach is reported, not held; a
+  watch, `^{:untested-ok "why"}` on its name. A function only `^:external` tests reach is reported, not held, and so is one
+  whose in-image tests pass on the old version while an `^:external` test of it
+  did not run there: the finding names that test, so run it against the old
+  version yourself or answer the ask. A
   test that only names a function, as in `(is (fn? f))`, does not count as
   reaching it. `def` of a `fn` and `defmethod` are checked like `defn`. A pull skips this for what
   commits slopp stamped as passing brought, because they proved it where they
@@ -168,7 +171,10 @@ elsewhere without moving (`help {topic "threads"}`).
   do not ask: a lost assertion (`:test-checks-lost`) is still the person's
   release, and the security, tier and module rules still hold. A store can
   dial `test-checks-lost` to `ask`; then its finding names the `decide` call,
-  and a change to a test you are not sure is wrong is a hand-over.
+  and a change to a test you are not sure is wrong is a hand-over. Measured,
+  that dial lets an agent land a change to a CORRECT test with a true-sounding
+  reason (2 of 5 runs, against 0 of 10 at `error`), so leave it at `error`
+  unless the store's tests are not worth a person's look.
 - **Assert the behaviour, not the fixture.** A repro can be too minimal; a
   test whose expected value was copied from the actual value is not a test.
 - **A test that runs your code must also fail when the code is wrong.**

@@ -203,7 +203,9 @@ rule. A refactor that keeps behaviour is answered on the done call, `done
 version, and a function no in-image test can watch carries `^{:untested-ok
 "why"}`. Both reasons show in review. A function that
 only `^:external` tests reach is reported but not held, because the image cannot
-run those tests. A test that only names a function does not count as reaching it. A pull skips the check for what its incoming commits brought
+run those tests. The same goes for a function whose in-image tests pass on the
+old version while an `^:external` test of it did not run: that is unjudged, not
+unproven, and the report names the test that could tell. A test that only names a function does not count as reaching it. A pull skips the check for what its incoming commits brought
 when slopp stamped all of them as passing. When there is also no local work, the
 tree after the pull is one that already passed, so the pull skips the test suite
 too and its answer says `:suite-trusted`. The stamp is a claim and not a

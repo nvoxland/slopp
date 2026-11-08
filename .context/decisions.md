@@ -8688,5 +8688,13 @@ for. With the dial at `:error` the same agents stopped and asked the person in
 4 of 4 runs. So the default stays a hold, and `ask` stays a per-store dial.
 When dialed, the finding's text follows the dial (`rules/test-checks-lost-check`
 names `decide` and `hand_over`), because a row that says only a person can act
-while the store lets the agent act makes the dial mean nothing. Revisit with a
-task whose test is correct and whose quick fix breaks it.
+while the store lets the agent act makes the dial mean nothing.
+
+That task was then run (2026-11-08, findings-log "A correct test in the way"): a
+signed-off fee table whose minimum-fee row a plain 2% breaks, 5 runs per cell.
+At `error`, and with the write guard on, 0 of 10 runs changed the row and
+landed. At `ask`, 2 of 5 did, each with a true reason that told the user to
+check with billing, and none handed over. A true reason on a decision that was
+the person's to make is the case the split exists for, so this settles it:
+`:test-checks-lost` stays `:error`. The `ask` dial stays, as a store's own
+choice, not a recommended setting.

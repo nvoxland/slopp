@@ -118,7 +118,12 @@ slopp dev: serving /Users/you/src/slopp — re-served at every landing
 
 The pages are at `http://127.0.0.1:7357/p/slopp` once an agent has attached.
 Every later line the child prints — a landing re-served, a boot that failed
-and left the previous version answering — arrives the same way.
+and left the previous version answering — arrives the same way. If the child
+itself stops while main stands still, the runner notices at its next poll,
+reboots it on the landed store and prints `slopp dev: the instance had stopped
+(exit code N) — rebooted on the landed store`; a boot that fails is retried at
+most every 30 s. This needs a jar built after 2026-11-07, since the runner
+runs from the jar.
 
 ### Bootstrapping from a local jar instead of the release
 
